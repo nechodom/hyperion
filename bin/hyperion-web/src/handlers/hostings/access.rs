@@ -49,7 +49,7 @@ pub async fn post_access_grant(
             urlencoding(&form.hosting_id)
         ))
         .into_response()),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -78,7 +78,7 @@ pub async fn post_access_revoke(
             urlencoding(&form.hosting_id)
         ))
         .into_response()),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

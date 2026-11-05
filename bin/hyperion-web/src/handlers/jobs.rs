@@ -691,7 +691,7 @@ pub async fn get_jobs(
     .await?;
     let mut jobs = match resp {
         RpcResponse::JobList(v) => v,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     humanize_targets(&state, &mut jobs).await;
@@ -898,7 +898,7 @@ async fn fetch_job(
             .await?;
     match resp {
         RpcResponse::JobGet(v) => Ok(v),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -1100,7 +1100,7 @@ where
     .await?;
     let id = match resp {
         RpcResponse::JobStarted { job_id } => job_id,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected JobStart response".into())),
     };
     let reporter = JobReporter {

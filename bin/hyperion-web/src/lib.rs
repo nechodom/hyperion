@@ -887,6 +887,18 @@ pub fn build_router(state: SharedState) -> Router {
         // node) are the other two tabs of the same page.
         .route("/import", get(handlers::import_wizard::get_wizard))
         .route("/import/ssh", get(handlers::import_panel::get_import))
+        .route(
+            "/import/wordpress",
+            get(handlers::import_wordpress::get_page),
+        )
+        .route(
+            "/import/wordpress/mint",
+            post(handlers::import_wordpress::post_mint),
+        )
+        .route(
+            "/import/wordpress/hyperion-migrate.zip",
+            get(handlers::import_wordpress::get_plugin_zip),
+        )
         .route("/import/hyperion", get(handlers::migration::get_import))
         .route("/import/plan", post(handlers::import_panel::post_plan))
         .route("/import/apply", post(handlers::import_panel::post_apply))
@@ -1457,6 +1469,23 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/import/upload/status",
             get(handlers::import_wizard::get_upload_status),
+        )
+        // The WordPress plugin's upload. Same token rules, two streams instead
+        // of one bundle: see handlers/import_wordpress.rs.
+        .route(
+            "/import/upload/wp/begin",
+            post(handlers::import_wordpress::post_begin)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/import/upload/wp/chunk",
+            axum::routing::put(handlers::import_wordpress::put_chunk)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024)),
+        )
+        .route(
+            "/import/upload/wp/commit",
+            post(handlers::import_wordpress::post_commit)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
         )
         .route(
             "/import/progress",

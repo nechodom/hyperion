@@ -359,7 +359,7 @@ async fn fetch_profiles(state: &SharedState) -> Result<Vec<HostingProfile>, AppE
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileList).await?;
     match resp {
         RpcResponse::ProfileList(v) => Ok(v),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -668,7 +668,7 @@ pub async fn get_edit(
         RpcResponse::Error(hyperion_rpc::RpcError::NotFound { .. }) => {
             return Err(AppError::NotFound)
         }
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     let price_major = match profile.price_minor {
@@ -978,7 +978,7 @@ pub async fn post_reapply_all(
     .await?
     {
         RpcResponse::ProfileUsage(v) => v,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     // Add worker-resident hostings so a re-apply covers the whole cluster, not
@@ -1248,7 +1248,7 @@ pub async fn get_wp_assets(
     }
     let assets = match hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await? {
         RpcResponse::WpAssetList(v) => v,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     let tpl = WpAssetsTpl {

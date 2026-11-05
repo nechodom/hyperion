@@ -69,6 +69,7 @@ several servers from the start.
 | Tamper-evident audit log | — | BLAKE3 hash chain |
 | Off-site backups | FTP | S3 (age-encrypted) + FTP/FTPS/SFTP, restic snapshots |
 | Import from HestiaCP / CloudPanel | — | in place, over SSH, or from an exporter |
+| Import a WordPress site from any host | — | plugin and a pasted code, no SSH needed |
 
 ---
 
@@ -341,14 +342,20 @@ Every command is listed with examples in the [CLI reference](docs/cli.md).
 
 ## Import from another panel
 
-Move existing sites off HestiaCP or CloudPanel, or between two Hyperion
-servers. The **Import** page (admin) has three ways in:
+Move existing sites off HestiaCP or CloudPanel, off any host running WordPress,
+or between two Hyperion servers. The **Import** page (admin) has four ways in:
 
 - **Command:** run a small exporter on the old server. It is a static binary,
   so it runs on old systems too, and its upload resumes after a dropped
   connection. No inbound SSH to the source is needed.
 - **SSH:** Hyperion connects to the source with a key that is used for that one
   run and then deleted.
+- **WordPress plugin:** for a WordPress site on a host with no shell. Install the
+  plugin from the Import page, paste the code Hyperion generates, and keep the
+  tab open while it sends the site in small pieces. A closed tab resumes. It
+  needs nothing from the host beyond running WordPress, and leaves out caches,
+  old backups and files that would break the site on a new server. It lists
+  what it left out.
 - **Hyperion:** import from another Hyperion node.
 
 Hyperion reads the source panel's own state (Hestia `*.conf`, CloudPanel's

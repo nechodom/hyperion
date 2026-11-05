@@ -573,7 +573,7 @@ fn month_year(ts: i64) -> String {
 async fn fetch_packages(state: &SharedState) -> Result<Vec<ServicePackage>, AppError> {
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageList).await? {
         RpcResponse::PackageList(v) => Ok(v),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

@@ -652,11 +652,11 @@ pub fn explain_apt_failure(output: &str) -> Option<&'static str> {
     if o.contains("read-only file system") {
         return Some(
             "a filesystem the package needs to write to is READ-ONLY. Check the SANDBOX \
-             first, not the disk: hyperion-agent runs with systemd's ProtectSystem=, which \
-             mounts /usr read-only for that service alone — so `mount` in your own shell \
-             shows / as rw while apt, running under the agent, cannot write a thing. \
-             Confirm with `systemctl show hyperion-agent -p ProtectSystem -p ReadWritePaths`; \
-             the unit needs ReadWritePaths=/usr (shipped since v0.15.1 — run update.sh). \
+             first, not the disk: an older hyperion-agent unit sets systemd's ProtectSystem=, \
+             which mounts /usr read-only for that service alone — so `mount` in your own \
+             shell shows / as rw while apt, running under the agent, cannot write a thing. \
+             Confirm with `systemctl show hyperion-agent -p ProtectSystem`; it must say `no`, \
+             and ReadWritePaths=/usr does not override it on systemd 257 (run update.sh). \
              Only if the sandbox is not the cause is this a real disk fault, which \
              `mount | grep ' / '` (looking for `ro,`) and `dmesg -T | grep -i 'i/o error'` \
              will show, and which needs fsck from rescue mode.",

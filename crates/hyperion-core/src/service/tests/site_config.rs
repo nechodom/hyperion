@@ -772,10 +772,8 @@ async fn resume_brings_back_to_active() {
 /// Editing a SUSPENDED site must not bring it back online.
 ///
 /// nginx_write_vhost renders the serving vhost with no idea what state the
-/// hosting is in. set_php_version happens to refuse on a suspended site
-/// already ("resume first"), but the alias and vhost-option editors did
-/// not — so an alias edit quietly un-suspended a customer who had not
-/// paid. The serving writer must not be touched at all here.
+/// hosting is in, so an alias edit quietly un-suspended a customer who had
+/// not paid. The serving writer must not be touched at all here.
 #[tokio::test]
 async fn editing_aliases_on_a_suspended_site_does_not_unsuspend_it() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1291,6 +1289,28 @@ async fn switching_one_sites_php_keeps_the_old_pool_for_the_other() {
         .await
         .expect("switch");
     assert_eq!(taken(&calls), ["write a.cz 8.4", "write b.cz 8.3"]);
+}
+
+/// A suspended site tries the new version on a pool, then lets it go. When a
+/// live sibling already runs that version, the pool is theirs and stays.
+#[tokio::test]
+async fn switching_a_suspended_sites_php_keeps_the_new_pool_for_the_other() {
+    let pool = open_memory().await.expect("open");
+    let calls = PoolCalls::default();
+    let s = svc(pool, pool_recording_mocks(&calls));
+    let (a, _b) = two_sites_on_one_user(&s, &calls, PhpVersion::V8_4).await;
+    s.suspend(
+        HostingSelector::Id(a.id.clone()),
+        hyperion_types::SuspendReason::Manual { message: None },
+    )
+    .await
+    .expect("suspend");
+    calls.lock().unwrap().clear();
+
+    s.set_php_version(HostingSelector::Id(a.id.clone()), PhpVersion::V8_4)
+        .await
+        .expect("switch");
+    assert_eq!(taken(&calls), ["write a.cz 8.4", "write b.cz 8.4"]);
 }
 
 /// A create that fails on a shared user rolls back its own work, not the pool

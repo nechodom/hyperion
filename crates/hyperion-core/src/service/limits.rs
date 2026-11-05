@@ -937,7 +937,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Switch a hosting's PHP version. Orchestrates:
     /// 1. Validation — hosting must be PHP (not static / proxy /
     ///    redirect), target version must differ from current, hosting
-    ///    must not be suspended/deleting (use suspend/resume for that).
+    ///    must not be deleting or in trash. A suspended hosting stays
+    ///    offline: the new version is tried, then only the row changes.
     /// 2. Ensure the NEW FPM pool exists (`fpm_ensure`) — this
     ///    creates the pool config under /etc/php/<new>/fpm/pool.d
     ///    and reloads php<new>-fpm.
@@ -1005,16 +1006,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // current value so the UI flash can still confirm.
             return Ok(new_version);
         }
-        if matches!(detail.state, HostingState::Suspended) {
-            return Err(RpcError::Conflict {
-                message: "hosting is suspended — resume first, then change PHP version".into(),
-            });
-        }
         if matches!(detail.state, HostingState::Deleting | HostingState::Trashed) {
             return Err(RpcError::Conflict {
                 message: "hosting is being deleted or in trash".into(),
             });
         }
+        // A suspended site has no pool and stays offline: only the row changes,
+        // and resume builds the pool from it. This used to demand a resume
+        // first, which put a site suspended over an unsafe PHP back online
+        // just to take it off that PHP.
+        let suspended = detail.state == HostingState::Suspended;
 
         // 1. Ensure the new pool. Nothing has changed yet, so a failure here
         //    only has to be reported. A pool file may stay behind when FPM
@@ -1036,7 +1037,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         //    limit set on PHP 8.3 (memory, children, etc.) survives
         //    the switch to 8.4. Best-effort — operator can re-apply
         //    via the Limits card if needed.
-        if let Ok(Some(row)) = hyperion_state::limits::get(&self.pool, &detail.id).await {
+        //
+        //    A suspended site only needed the proof that the version starts,
+        //    as resume ignores a pool that fails. It must not keep a running
+        //    pool, though a live sibling on that version keeps theirs; resume
+        //    applies the limits to the one it builds.
+        if suspended {
+            self.release_fpm_pool(&detail.system_user, new_version)
+                .await;
+        } else if let Ok(Some(row)) = hyperion_state::limits::get(&self.pool, &detail.id).await {
             let l = row_to_limits(row);
             if let Err(e) = self
                 .adapters
@@ -1067,15 +1076,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
         {
             self.undo_php_switch(&detail, converting).await;
-            self.release_fpm_pool(&detail.system_user, new_version)
-                .await;
+            if !suspended {
+                self.release_fpm_pool(&detail.system_user, new_version)
+                    .await;
+            }
             return Err(e);
         }
 
         // 4. This site no longer points at the old pool. Best-effort: it
         //    already runs on the new version, so a leftover pool is litter,
         //    not a failed switch.
-        if let Some(current) = current {
+        if let Some(current) = current.filter(|_| !suspended) {
             self.release_fpm_pool(&detail.system_user, current).await;
         }
 

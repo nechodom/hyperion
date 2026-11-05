@@ -8246,3 +8246,238 @@ async fn submit_still_validates() {
     let (_, list) = acme_dns_get(&app, &cookie, "/hostings").await;
     assert!(!list.contains("prefilled-bad.example.cz"));
 }
+
+// ---- WordPress plugin import ------------------------------------------------
+
+async fn mint_wordpress_token(sock: &std::path::Path) -> (String, i64) {
+    let resp = hyperion_rpc_client::call(
+        sock,
+        hyperion_rpc::codec::Request::ImportToken(hyperion_types::ImportTokenOp::Mint {
+            target_node: "local".into(),
+            source_kind: "wordpress".into(),
+            created_by: "kevin".into(),
+            ttl_secs: 3600,
+        }),
+    )
+    .await
+    .expect("mint rpc");
+    match resp {
+        hyperion_rpc::codec::Response::ImportToken(hyperion_types::ImportTokenResult::Minted {
+            token,
+            id,
+            ..
+        }) => (token, id),
+        other => panic!("unexpected mint reply: {other:?}"),
+    }
+}
+
+fn gz_member(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    e.write_all(bytes).unwrap();
+    e.finish().unwrap()
+}
+
+fn wp_chunk(token: &str, stream: &str, offset: u64, sha: &str, body: Vec<u8>) -> Request<Body> {
+    let mut req = upload_req("/import/upload/wp/chunk", token, Method::PUT, body);
+    let h = req.headers_mut();
+    h.insert("x-hyperion-stream", stream.parse().unwrap());
+    h.insert("x-hyperion-offset", offset.to_string().parse().unwrap());
+    h.insert("x-hyperion-sha256", sha.parse().unwrap());
+    req
+}
+
+fn wp_begin(token: &str, run: &str) -> Request<Body> {
+    let body = format!(
+        r#"{{"run":"{run}","home_url":"https://www.source-site.cz","wp_version":"6.7","php_version":"8.2.3","files_bytes":100,"db_estimate":100,"warnings":["a note"]}}"#
+    );
+    upload_req(
+        "/import/upload/wp/begin",
+        token,
+        Method::POST,
+        body.into_bytes(),
+    )
+}
+
+/// The whole machine conversation of the plugin, down to the bundle the archive
+/// import reads. Two gzip members per stream, as the plugin sends them.
+#[tokio::test]
+async fn a_wordpress_plugin_upload_becomes_an_importable_bundle() {
+    let (dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let (token, id) = mint_wordpress_token(&sock).await;
+    let app = build_app(sock, admin);
+
+    let r = app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_text(r).await;
+    assert_eq!(field(&body, "domain").as_deref(), Some("source-site.cz"));
+    assert_eq!(field(&body, "offset_db").as_deref(), Some("0"));
+
+    let db = gz_member(b"CREATE TABLE t(i int);\n-- hyperion-migrate: dump complete tables=1\n");
+    let sha = sha256_hex(&db);
+
+    // A chunk mangled on the way (a proxy, a WAF) leaves no trace.
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(&token, "db", 0, &"0".repeat(64), db.clone()))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    // A chunk for the wrong place is told where the server stands.
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(&token, "db", 5, &sha, db.clone()))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert_eq!(field(&body_text(r).await, "offset").as_deref(), Some("0"));
+
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(&token, "db", 0, &sha, db.clone()))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let mut tar = tar::Builder::new(Vec::new());
+    let mut h = tar::Header::new_gnu();
+    h.set_size(5);
+    h.set_mode(0o644);
+    h.set_cksum();
+    tar.append_data(&mut h, "wp-config.php", &b"<?php"[..])
+        .unwrap();
+    let whole = tar.into_inner().unwrap();
+    let (a, b) = whole.split_at(512);
+    let (a, b) = (gz_member(a), gz_member(b));
+
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(&token, "files", 0, &sha256_hex(&a), a.clone()))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    // The same run coming back, after a reloaded tab, resumes.
+    let r = app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+    assert_eq!(
+        field(&body_text(r).await, "offset_files"),
+        Some(a.len().to_string())
+    );
+
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(
+            &token,
+            "files",
+            a.len() as u64,
+            &sha256_hex(&b),
+            b.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    // A commit that does not match what arrived goes nowhere.
+    let commit = |files: usize| {
+        upload_req(
+            "/import/upload/wp/commit",
+            &token,
+            Method::POST,
+            format!(
+                r#"{{"db_bytes":{},"files_bytes":{files},"files_members":1}}"#,
+                db.len()
+            )
+            .into_bytes(),
+        )
+    };
+    let r = app.clone().oneshot(commit(1)).await.unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+
+    let total = a.len() + b.len();
+    let r = app.clone().oneshot(commit(total)).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_text(r).await;
+    assert_eq!(field(&body, "state").as_deref(), Some("importing"));
+    let job = field(&body, "job").expect("job id");
+
+    // A retried commit whose reply was lost must not import twice.
+    let r = app.clone().oneshot(commit(total)).await.unwrap();
+    assert_eq!(field(&body_text(r).await, "job"), Some(job));
+
+    // The job assembles the bundle. What happens after that needs a real node.
+    let bundle = dir.path().join(format!("bundle-{id}.tar"));
+    let staged = dir.path().join(format!("bundle-wp-{id}"));
+    for _ in 0..100 {
+        if bundle.exists() && !staged.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(bundle.exists(), "the job should have assembled the bundle");
+    assert!(
+        !staged.exists(),
+        "the streams hold the site's database and must not outlive the bundle"
+    );
+    let manifest = hyperion_adapters::backup::read_tar_member(&bundle, "manifest.json", 1 << 20)
+        .expect("manifest in bundle");
+    let ir: hyperion_import::ImportIR = serde_json::from_slice(&manifest).expect("manifest json");
+    assert_eq!(ir.source.kind, "wordpress");
+    assert_eq!(ir.hostings[0].domain, "source-site.cz");
+    assert_eq!(ir.hostings[0].aliases, vec!["www.source-site.cz"]);
+}
+
+#[tokio::test]
+async fn a_panel_import_token_cannot_drive_the_wordpress_upload() {
+    let (_dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let token = mint_import_token(&sock).await;
+    let app = build_app(sock, admin);
+    let r = app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+}
+
+/// A second run under one code means the first was abandoned: its bytes must not
+/// be continued, or two different exports are spliced into one stream.
+#[tokio::test]
+async fn a_new_run_discards_what_the_previous_one_staged() {
+    let (_dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let (token, _id) = mint_wordpress_token(&sock).await;
+    let app = build_app(sock, admin);
+
+    app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+    let db = gz_member(b"partial");
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(&token, "db", 0, &sha256_hex(&db), db))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let r = app.clone().oneshot(wp_begin(&token, "runB")).await.unwrap();
+    assert_eq!(
+        field(&body_text(r).await, "offset_db").as_deref(),
+        Some("0")
+    );
+}
+
+#[tokio::test]
+async fn the_plugin_zip_needs_a_session() {
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let app = build_app(sock, admin);
+    let r = app
+        .oneshot(
+            Request::builder()
+                .uri("/import/wordpress/hyperion-migrate.zip")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(r.status(), StatusCode::OK);
+}

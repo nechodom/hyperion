@@ -1459,7 +1459,7 @@ pub(super) async fn fetch_wp_assets(
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await?;
     match resp {
         RpcResponse::WpAssetList(v) => Ok(v),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -1768,7 +1768,7 @@ pub(crate) async fn compute_preview_domain(
     let has_wildcard = matches!(
         resp,
         Ok(RpcResponse::CertOverview(ref items))
-            if items.iter().any(|c| c.domain.eq_ignore_ascii_case(&base))
+            if items.iter().any(|c| c.is_wildcard_for(&base))
     );
     if has_wildcard {
         PreviewInfo {

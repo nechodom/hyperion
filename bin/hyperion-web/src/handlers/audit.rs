@@ -390,7 +390,7 @@ async fn fetch(state: &SharedState, f: &AuditSearchFilter) -> Result<Fetched, Ap
                     batches.push(batch_from_window("master".into(), v, f));
                     partial.push("master".into());
                 }
-                RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+                RpcResponse::Error(e) => return Err(AppError::from(e)),
                 _ => return Err(AppError::Internal("unexpected response".into())),
             }
         }

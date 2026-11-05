@@ -52,6 +52,7 @@ pub struct SourcePanelInfo {
 pub enum SourceKind {
     HestiaCp,
     CloudPanel,
+    WordPress,
 }
 
 impl SourceKind {
@@ -59,6 +60,7 @@ impl SourceKind {
         match self {
             SourceKind::HestiaCp => "hestiacp",
             SourceKind::CloudPanel => "cloudpanel",
+            SourceKind::WordPress => "wordpress",
         }
     }
 }

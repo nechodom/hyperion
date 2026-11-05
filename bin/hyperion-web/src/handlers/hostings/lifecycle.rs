@@ -274,7 +274,7 @@ pub async fn post_suspend(
         RpcResponse::HostingSuspend => {
             Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
         }
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -305,7 +305,7 @@ pub async fn post_resume(
         RpcResponse::HostingResume => {
             Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
         }
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

@@ -18,6 +18,7 @@ pub mod health;
 pub mod hostings;
 pub mod import_panel;
 pub mod import_wizard;
+pub mod import_wordpress;
 pub mod install;
 pub mod jobs;
 pub mod login;

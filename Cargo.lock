@@ -1565,11 +1565,13 @@ name = "hyperion-import"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "flate2",
  "rand 0.8.8",
  "rustix",
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -1719,6 +1721,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "subtle",
+ "tar",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -1732,6 +1735,7 @@ dependencies = [
  "ulid",
  "url",
  "utoipa",
+ "zip",
 ]
 
 [[package]]

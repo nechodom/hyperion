@@ -6,7 +6,7 @@
 //! It used to be one, and that broke both halves of the job:
 //!
 //! * **The OS upgrade inherited the agent's sandbox.** `ProtectKernelModules`
-//!   hides `/lib/modules` and `ProtectSystem` mounts `/boot` read-only, so a
+//!   hides `/lib/modules` and `ReadOnlyPaths` mounts `/boot` read-only, so a
 //!   kernel package died in its preinst (`mkdir: cannot create directory
 //!   '/lib/modules/…': Read-only file system`) and left dpkg half-configured —
 //!   on a machine whose own shell showed every filesystem writable.

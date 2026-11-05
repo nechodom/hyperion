@@ -172,7 +172,7 @@ async fn search(
     .map_err(AppError::from)?
     {
         RpcResponse::NotificationsSearch(r) => Ok(r),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -416,7 +416,7 @@ pub async fn get_open(
     .map_err(AppError::from)?
     {
         RpcResponse::NotificationsGet(n) => n,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     let Some(n) = n else {
@@ -444,7 +444,7 @@ async fn mark_one(state: &SharedState, user_id: i64, id: i64) -> Result<(), AppE
     .map_err(AppError::from)?
     {
         RpcResponse::NotificationsMarkRead => Ok(()),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -504,7 +504,7 @@ pub async fn post_read_matching(
     .map_err(AppError::from)?
     {
         RpcResponse::NotificationsMarkAllRead { .. } => {}
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected response".into())),
     }
     // Back to the same view, first page: "unread" will now be empty, which
@@ -545,7 +545,7 @@ pub async fn get_feed(
             Json(feed),
         )
             .into_response()),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -574,7 +574,7 @@ pub async fn post_mark_read(
     .map_err(AppError::from)?;
     match resp {
         RpcResponse::NotificationsMarkRead => Ok(StatusCode::NO_CONTENT.into_response()),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -600,7 +600,7 @@ pub async fn post_mark_all_read(
             format!("{{\"marked\":{}}}", marked),
         )
             .into_response()),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
