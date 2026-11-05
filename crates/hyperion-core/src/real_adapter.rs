@@ -421,29 +421,33 @@ impl AdapterPort for RealAdapter {
         hyperion_adapters::integrity::ClamFacts::read()
     }
 
-    async fn clamav_file_list(
+    async fn clamav_prepare(
         &self,
-        root: &str,
-        cap: usize,
-    ) -> Result<hyperion_adapters::integrity::ClamList, AdapterError> {
-        let root = std::path::PathBuf::from(root);
+        roots: &[(HostingId, String)],
+        list_path: &std::path::Path,
+        limits: hyperion_adapters::integrity::ClamLimits,
+    ) -> Result<hyperion_adapters::integrity::ClamPlan, AdapterError> {
+        if let Some(dir) = list_path.parent() {
+            hyperion_adapters::sitescan::runner::prepare_scan_dirs(dir)?;
+        }
+        let (roots, list_path) = (roots.to_vec(), list_path.to_path_buf());
         tokio::task::spawn_blocking(move || {
-            hyperion_adapters::integrity::clamav_file_list(&root, cap)
+            hyperion_adapters::integrity::clamav_prepare_with(&roots, &list_path, limits)
         })
         .await
         .map_err(|e| AdapterError::Other(format!("clamav list: {e}")))?
         .map_err(AdapterError::from)
     }
 
-    async fn clamav_sweep(
+    async fn clamav_run(
         &self,
-        lists: &[(HostingId, Vec<String>)],
-        list_path: &std::path::Path,
+        plan: hyperion_adapters::integrity::ClamPlan,
     ) -> Result<hyperion_adapters::integrity::ClamSweep, AdapterError> {
-        if let Some(dir) = list_path.parent() {
-            hyperion_adapters::sitescan::runner::prepare_scan_dirs(dir)?;
-        }
-        hyperion_adapters::integrity::clamav_sweep(lists, list_path).await
+        hyperion_adapters::integrity::clamav_run(plan).await
+    }
+
+    async fn clamav_stop_orphan(&self) {
+        hyperion_adapters::integrity::clamav_stop_orphan().await;
     }
 
     async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError> {

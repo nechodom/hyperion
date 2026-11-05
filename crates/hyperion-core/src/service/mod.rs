@@ -293,25 +293,28 @@ pub trait AdapterPort: Send + Sync {
         integrity::ClamFacts::default()
     }
 
-    /// What ClamAV should be given from one docroot, at most `cap` files. Walks
-    /// with the pinned-root walker.
-    async fn clamav_file_list(
+    /// Walk every site's docroot into one ClamAV file list on disk, in the order
+    /// given, streaming (only the paths' hashes stay in memory). Blocking work.
+    async fn clamav_prepare(
         &self,
-        _root: &str,
-        _cap: usize,
-    ) -> Result<integrity::ClamList, AdapterError> {
+        _roots: &[(HostingId, String)],
+        _list_path: &std::path::Path,
+        _limits: integrity::ClamLimits,
+    ) -> Result<integrity::ClamPlan, AdapterError> {
         Err(AdapterError::Other("no scanner here".into()))
     }
 
-    /// One `clamscan` over every site's list, in its capped unit. The list is
-    /// written to `list_path` and removed after.
-    async fn clamav_sweep(
+    /// One `clamscan` over the plan's list, in its capped unit. The list is removed
+    /// with the plan.
+    async fn clamav_run(
         &self,
-        _lists: &[(HostingId, Vec<String>)],
-        _list_path: &std::path::Path,
+        _plan: integrity::ClamPlan,
     ) -> Result<integrity::ClamSweep, AdapterError> {
         Err(AdapterError::Other("no scanner here".into()))
     }
+
+    /// Stop a ClamAV unit an earlier agent started and lost. Nothing there is fine.
+    async fn clamav_stop_orphan(&self) {}
 
     async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError>;
     async fn delete_user(&self, name: &str) -> Result<(), AdapterError>;

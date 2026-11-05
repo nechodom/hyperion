@@ -17,7 +17,7 @@ use hyperion_adapters::sitescan::scan::{
     ScanInput, ScanMode, SiteScanOutcome, WriterAccepted, WriterKind,
 };
 use hyperion_adapters::sitescan::vendor::{self, VendorError};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 pub(super) use hyperion_adapters::sitescan::runner::SCAN_DIR;
@@ -61,10 +61,15 @@ pub(super) const CLAMAV_RESTORED_KV_KEY: &str = "clamav_restored";
 /// Weekly, but not quite: a pass that began late in the night's window mustn't push
 /// the next one past its night. Half a day over six keeps it on the same night.
 const CLAMAV_MIN_AGE_SECS: i64 = 6 * DAY_SECS + 12 * HOUR_SECS;
-/// Files one site gives the pass, and the whole node together: the lists are held in
-/// memory while the pass runs.
-const CLAMAV_FILES_PER_SITE: usize = 300_000;
-const CLAMAV_FILES_PER_NODE: usize = 1_000_000;
+/// A pass the agent lost (a restart, a crash) or one that could not start is tried
+/// again this long after, which in practice is the next night's window.
+const CLAMAV_RETRY_SECS: i64 = 20 * HOUR_SECS;
+/// `node_kv` key: `started <unix>` while a pass runs, `finished <unix>` after. A
+/// `started` found by a tick is an agent's that is gone.
+const CLAMAV_STATE_KV: &str = "clamav_sweep_state";
+/// `node_kv` key: what the node had of ClamAV when the cards were last told
+/// (`none`, `nodb`, `ready`), so a change is told once and asking costs a read.
+const CLAMAV_FACTS_KV: &str = "site_scan_clamav_facts";
 /// Detections one site's record keeps, and restored hits remembered per site.
 const MAX_MALWARE_HITS: usize = 1000;
 const MAX_CLAMAV_RESTORED: usize = 200;
@@ -76,15 +81,21 @@ const CLAMAV_LOG_BYTES: usize = 2048;
 const CLAMAV_LOW_MEMORY: &str =
     "ClamAV skipped this week's pass: the node has less than 2 GiB of memory free";
 const CLAMAV_SIGNATURES: &str = "ClamAV is waiting: its signatures are still downloading";
-const CLAMAV_NOT_LISTED: &str = "ClamAV could not list this site's files";
+const CLAMAV_NOT_LISTED: &str =
+    "ClamAV could not list all of this site's files, so more may be hiding";
 const CLAMAV_NODE_FULL: &str =
-    "ClamAV's list for this node was full before this site, so it was not covered this week";
-const CLAMAV_FAILED: &str = "ClamAV could not run; it is tried again next week";
+    "ClamAV's list for this node was full before the end of this site, so more may be hiding";
+const CLAMAV_FAILED: &str = "ClamAV could not run; it is tried again tomorrow night";
+const CLAMAV_INTERRUPTED: &str =
+    "ClamAV's pass was interrupted by a restart; it is tried again tomorrow night";
 const CLAMAV_PARTIAL: &str =
-    "ClamAV could not read every file, so more may be hiding; what it found is listed";
+    "ClamAV could not finish reading every file, so more may be hiding; what it found is listed";
+const CLAMAV_UNREAD: &str =
+    "ClamAV could not read some of this site's files, so more may be hiding";
 const CLAMAV_TIMED_OUT: &str =
     "ClamAV ran out of its six hours; what it found is listed, and it is tried again next week";
-const CLAMAV_TOO_MANY: &str = "only the first detections are kept";
+const CLAMAV_TOO_MANY: &str =
+    "ClamAV found more than 1000 detections here; only the first 1000 are kept";
 
 /// wordpress.org requests one site's scan may make.
 const MAX_HTTP_FETCHES: u32 = 200;
@@ -281,8 +292,15 @@ pub(super) enum ClamUpdate {
     /// Why it did not run, or `None` for nothing to say. Only the note moves: the
     /// last pass's verdict stands.
     Note(Option<String>),
+    /// Take the note away if it is this one.
+    Clear(&'static str),
+    /// ClamAV is not on the node: no note, and no pass vouches for the site. What
+    /// the last pass found is still the last anyone knows.
+    Gone,
     Pass {
         hits: Vec<hyperion_types::WpMalwareHit>,
+        /// How it went for THIS site: a full pass that left part of the site out
+        /// is `Partial` here.
         end: integrity::SweepEnd,
         /// When the pass began. Restored hits from after it are in `hits`.
         started: i64,
@@ -299,13 +317,22 @@ impl ClamUpdate {
 /// Fold one update into the ClamAV half of a record, and into `result.error`
 /// with the native scan's own reason. Touches nothing else.
 ///
-/// A full pass is the answer: its hits replace the last pass's, which is how a
-/// cleaned file stops being listed. A partial one only adds, because what it
-/// didn't reach proves nothing either way: its hits are real, and hits from
-/// before stand.
+/// A full pass over the whole site is the answer: its hits replace the last
+/// pass's, which is how a cleaned file stops being listed. Anything less only
+/// adds, because what it didn't reach proves nothing either way: its hits are
+/// real, and hits from before stand.
 pub(super) fn apply_clamav(rec: &mut StoredIntegrityScan, update: ClamUpdate) {
     match update {
         ClamUpdate::Note(note) => rec.clamav_error = note,
+        ClamUpdate::Clear(text) => {
+            if rec.clamav_error.as_deref() == Some(text) {
+                rec.clamav_error = None;
+            }
+        }
+        ClamUpdate::Gone => {
+            rec.clamav_error = None;
+            rec.result.clamav_available = false;
+        }
         ClamUpdate::Pass {
             mut hits,
             end,
@@ -402,6 +429,43 @@ fn clamav_end_note(end: integrity::SweepEnd, oom_until: i64) -> Option<String> {
         TimedOut => Some(CLAMAV_TIMED_OUT.into()),
         Failed => Some(CLAMAV_FAILED.into()),
     }
+}
+
+/// What a site's list left out, for its card.
+fn clamav_listing_notes(l: &integrity::SiteListing) -> Vec<String> {
+    let mut n = Vec::new();
+    if l.failed {
+        n.push(CLAMAV_NOT_LISTED.to_string());
+    }
+    if l.left_out > 0 {
+        n.push(format!(
+            "{} file(s) with names ClamAV can't be given (control characters or paths over {} bytes) were not scanned",
+            l.left_out,
+            integrity::MAX_LISTED_PATH
+        ));
+    }
+    if l.skipped > 0 {
+        n.push(format!(
+            "{} file(s) could not be handed to ClamAV (hard-linked, unreadable or on another filesystem)",
+            l.skipped
+        ));
+    }
+    if l.capped {
+        n.push(format!(
+            "ClamAV looked at the first {} files of this site only",
+            l.files
+        ));
+    }
+    if l.node_full {
+        n.push(CLAMAV_NODE_FULL.to_string());
+    }
+    n
+}
+
+/// Which site the list starts with this week: the ISO week number.
+fn clamav_rotation(now: i64) -> usize {
+    use chrono::Datelike;
+    chrono::DateTime::from_timestamp(now, 0).map_or(0, |t| t.iso_week().week() as usize)
 }
 
 fn join_notes(mut notes: Vec<String>, last: Option<String>) -> Option<String> {
@@ -832,6 +896,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         tz: &Tz,
         now: i64,
     ) -> Result<i64, RpcError> {
+        self.clamav_recover_interrupted(now).await;
+        let facts = self.adapters.clamav_facts().await;
+        self.clamav_refresh_facts(&facts).await;
         let last = match self.node_stamp(CLAMAV_LAST_KV).await {
             Ok(v) => v,
             Err(e) => {
@@ -843,7 +910,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             return Ok(0);
         }
         let backoff_until = self.node_stamp(CLAMAV_BACKOFF_KV).await.unwrap_or(0);
-        let facts = self.adapters.clamav_facts().await;
         let go = integrity::clamav_preflight(
             facts.installed,
             facts.mem_available,
@@ -855,7 +921,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if go == integrity::ClamPreflight::NotInstalled {
             return Ok(0);
         }
-        let sites = self.clamav_sites().await?;
+        let mut sites = self.clamav_sites().await?;
         if go != integrity::ClamPreflight::Run {
             // Not a failure and not a stamp: the next ten minutes try again, and
             // the card says why in the meantime.
@@ -872,92 +938,79 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             tracing::warn!(error = %e, "clamav: stamp not written; not starting");
             return Ok(0);
         }
+        self.set_clamav_state("started", now).await;
         let started = std::time::Instant::now();
 
-        let mut lists: Vec<(HostingId, Vec<String>)> = Vec::new();
-        let mut roots: Vec<(HostingId, String)> = Vec::new();
-        let mut notes: HashMap<HostingId, Vec<String>> = HashMap::new();
-        let mut left = CLAMAV_FILES_PER_NODE;
-        for d in &sites {
-            let cap = CLAMAV_FILES_PER_SITE.min(left);
-            if cap == 0 {
-                self.clamav_store(d, ClamUpdate::Note(Some(CLAMAV_NODE_FULL.into())))
-                    .await;
-                continue;
-            }
-            match self.adapters.clamav_file_list(&d.root_dir, cap).await {
-                Ok(list) => {
-                    left -= list.files.len();
-                    let n = notes.entry(d.id.clone()).or_default();
-                    if list.left_out > 0 {
-                        n.push(format!(
-                            "{} file(s) with unusual names were not given to ClamAV",
-                            list.left_out
-                        ));
-                    }
-                    if list.capped {
-                        n.push(format!(
-                            "ClamAV looked at the first {} files of this site only",
-                            list.files.len()
-                        ));
-                    }
-                    roots.push((d.id.clone(), d.root_dir.clone()));
-                    lists.push((d.id.clone(), list.files));
-                }
-                Err(e) => {
-                    let mut why = e.to_string();
-                    clip(&mut why, CLAMAV_LOG_BYTES);
-                    tracing::warn!(domain = %d.domain, why = ?why, "clamav: site not listed");
-                    self.clamav_store(d, ClamUpdate::Note(Some(CLAMAV_NOT_LISTED.into())))
-                        .await;
-                }
-            }
+        // The byte cap on the list cuts the sites at its end, so the end moves:
+        // the same sites aren't always the ones left short.
+        let n = sites.len();
+        if n > 0 {
+            sites.rotate_left(clamav_rotation(now) % n);
         }
-
+        let roots: Vec<(HostingId, String)> = sites
+            .iter()
+            .map(|d| (d.id.clone(), d.root_dir.clone()))
+            .collect();
         let list_path = Path::new(&self.paths.scan_dir).join("clamav-list");
-        let sweep = match self.adapters.clamav_sweep(&lists, &list_path).await {
+        let plan = match self
+            .adapters
+            .clamav_prepare(&roots, &list_path, integrity::ClamLimits::default())
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => return Ok(self.clamav_could_not_run(&sites, "list", &e, now).await),
+        };
+        let listings = plan.sites.clone();
+        let sweep = match self.adapters.clamav_run(plan).await {
             Ok(s) => s,
-            Err(e) => {
-                let mut why = e.to_string();
-                clip(&mut why, CLAMAV_LOG_BYTES);
-                tracing::warn!(why = ?why, "clamav: the pass could not start");
-                for (id, _) in &lists {
-                    if let Some(d) = sites.iter().find(|d| &d.id == id) {
-                        self.clamav_store(d, ClamUpdate::Note(Some(CLAMAV_FAILED.into())))
-                            .await;
-                    }
-                }
-                return Ok(0);
-            }
+            Err(e) => return Ok(self.clamav_could_not_run(&sites, "start", &e, now).await),
         };
         // Passes take hours, so the clock has to keep up with them.
         let finished = now + i64::try_from(started.elapsed().as_secs()).unwrap_or(0);
-        if sweep.end == integrity::SweepEnd::OutOfMemory {
-            let until = finished + integrity::OOM_BACKOFF_SECS;
-            if let Err(e) =
-                hyperion_state::node_kv::set(&self.pool, CLAMAV_BACKOFF_KV, &until.to_string(), now)
-                    .await
-            {
-                tracing::warn!(error = %e, "clamav: back-off not written");
+        self.set_clamav_state("finished", finished).await;
+        match sweep.end {
+            integrity::SweepEnd::OutOfMemory => {
+                let until = finished + integrity::OOM_BACKOFF_SECS;
+                if let Err(e) = hyperion_state::node_kv::set(
+                    &self.pool,
+                    CLAMAV_BACKOFF_KV,
+                    &until.to_string(),
+                    now,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "clamav: back-off not written");
+                }
             }
+            // The unit name was taken, or nothing started: tomorrow, not next week.
+            integrity::SweepEnd::Failed => self.clamav_retry_tomorrow(finished).await,
+            _ => {}
         }
         let end_note = clamav_end_note(sweep.end, finished + integrity::OOM_BACKOFF_SECS);
-        let mut by_site = integrity::attribute_hits(sweep.hits, &roots);
+        let mut by_site = integrity::attribute_hits(sweep.hits.clone(), &roots);
 
         let mut newly_flagged = 0i64;
-        for (id, _) in &lists {
-            let Some(d) = sites.iter().find(|d| &d.id == id) else {
-                continue;
+        for d in &sites {
+            let listing = listings.iter().find(|l| l.id == d.id);
+            let unread = sweep.unread.contains(&d.id);
+            let site_partial = unread || listing.map_or(true, integrity::SiteListing::is_partial);
+            let end = if sweep.end == integrity::SweepEnd::Complete && site_partial {
+                integrity::SweepEnd::Partial
+            } else {
+                sweep.end
             };
-            let hits = self
-                .clamav_with_restored(d.id.as_str(), by_site.remove(id).unwrap_or_default(), now)
-                .await;
-            let note = join_notes(notes.remove(id).unwrap_or_default(), end_note.clone());
+            let mut notes = listing.map(clamav_listing_notes).unwrap_or_default();
+            if unread {
+                notes.push(CLAMAV_UNREAD.into());
+            }
+            if sweep.hits_capped.contains(&d.id) {
+                notes.push(CLAMAV_TOO_MANY.into());
+            }
             let update = ClamUpdate::Pass {
-                hits,
-                end: sweep.end,
+                hits: by_site.remove(&d.id).unwrap_or_default(),
+                end,
                 started: now,
-                note,
+                note: join_notes(notes, end_note.clone()),
             };
             let Some((after, before)) = self.clamav_store(d, update).await else {
                 continue;
@@ -965,7 +1018,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let new_keys = malware_finding_keys(&after).difference(&before).count();
             // A site with nothing to compare with has no verdict beside this
             // one: until the new layers are live, its hits are shown, not sent.
-            let quiet = after.coverage.no_upstream && after.report_only;
+            let quiet = after.report_only && (after.coverage.no_upstream || !after.native_scan_ran);
             if new_keys > 0 && !quiet {
                 newly_flagged += 1;
                 self.notify_integrity_findings(&d.domain, &after, new_keys, false)
@@ -973,6 +1026,105 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         Ok(newly_flagged)
+    }
+
+    /// The pass could not be listed or started: the cards say so, and it is
+    /// tried again tomorrow night.
+    async fn clamav_could_not_run(
+        &self,
+        sites: &[HostingDetail],
+        stage: &str,
+        e: &AdapterError,
+        now: i64,
+    ) -> i64 {
+        let mut why = e.to_string();
+        clip(&mut why, CLAMAV_LOG_BYTES);
+        tracing::warn!(stage, why = ?why, "clamav: the pass could not run");
+        for d in sites {
+            self.clamav_store(d, ClamUpdate::Note(Some(CLAMAV_FAILED.into())))
+                .await;
+        }
+        self.set_clamav_state("finished", now).await;
+        self.clamav_retry_tomorrow(now).await;
+        0
+    }
+
+    /// Put the weekly stamp where the next pass is due after the next night
+    /// begins rather than a week on.
+    async fn clamav_retry_tomorrow(&self, now: i64) {
+        let stamp = now + CLAMAV_RETRY_SECS - CLAMAV_MIN_AGE_SECS;
+        if let Err(e) =
+            hyperion_state::node_kv::set(&self.pool, CLAMAV_LAST_KV, &stamp.to_string(), now).await
+        {
+            tracing::warn!(error = %e, "clamav: retry not set");
+        }
+    }
+
+    async fn set_clamav_state(&self, what: &str, at: i64) {
+        if let Err(e) =
+            hyperion_state::node_kv::set(&self.pool, CLAMAV_STATE_KV, &format!("{what} {at}"), at)
+                .await
+        {
+            tracing::warn!(error = %e, "clamav: pass state not written");
+        }
+    }
+
+    /// A pass found `started` and never `finished` belongs to an agent that is
+    /// gone (this tick runs one pass at a time): its unit may still run, with
+    /// nowhere to send what it finds. Stop it, say so on the cards, and let the
+    /// next night try again instead of a week's wait.
+    async fn clamav_recover_interrupted(&self, now: i64) {
+        let state = hyperion_state::node_kv::get(&self.pool, CLAMAV_STATE_KV)
+            .await
+            .ok()
+            .flatten();
+        if !state.is_some_and(|s| s.starts_with("started ")) {
+            return;
+        }
+        tracing::warn!("clamav: a pass was interrupted by a restart");
+        self.adapters.clamav_stop_orphan().await;
+        if let Ok(sites) = self.clamav_sites().await {
+            for d in &sites {
+                self.clamav_store(d, ClamUpdate::Note(Some(CLAMAV_INTERRUPTED.into())))
+                    .await;
+            }
+        }
+        self.set_clamav_state("finished", now).await;
+        self.clamav_retry_tomorrow(now).await;
+    }
+
+    /// Tell the cards when ClamAV appears, goes, or finishes downloading its
+    /// signatures, whatever the hour: a read of the node's facts each tick, and
+    /// the records only when they changed.
+    async fn clamav_refresh_facts(&self, facts: &integrity::ClamFacts) {
+        let kind = match (facts.installed, facts.db_present) {
+            (false, _) => "none",
+            (true, false) => "nodb",
+            (true, true) => "ready",
+        };
+        let known = hyperion_state::node_kv::get(&self.pool, CLAMAV_FACTS_KV)
+            .await
+            .ok()
+            .flatten();
+        if known.as_deref() == Some(kind) {
+            return;
+        }
+        let Ok(sites) = self.clamav_sites().await else {
+            return;
+        };
+        for d in &sites {
+            let update = match kind {
+                "none" => ClamUpdate::Gone,
+                "nodb" => ClamUpdate::Note(Some(CLAMAV_SIGNATURES.into())),
+                _ => ClamUpdate::Clear(CLAMAV_SIGNATURES),
+            };
+            self.clamav_store(d, update).await;
+        }
+        if let Err(e) =
+            hyperion_state::node_kv::set(&self.pool, CLAMAV_FACTS_KV, kind, now_secs()).await
+        {
+            tracing::warn!(error = %e, "clamav: facts not written");
+        }
     }
 
     /// An unsigned stamp from `node_kv`; absent is 0.
@@ -1002,31 +1154,51 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// The ClamAV half of one hosting's record and nothing else: a native scan's
-    /// half, written while a pass ran, stays as it is. `None` when the record
-    /// couldn't be read (nothing is written then) or there is none and nothing
-    /// to put in one. Otherwise the stored result and the malware keys it had
-    /// before.
+    /// half, written while a pass ran, stays as it is. A pass's hits are merged
+    /// with the ones a restore brought back, in the same turn with the lock.
+    /// `None` when the record couldn't be read (nothing is written then) or there
+    /// is none and nothing to put in one. Otherwise the stored result and the
+    /// malware keys it had before.
     async fn clamav_store(
         &self,
         detail: &HostingDetail,
-        update: ClamUpdate,
+        mut update: ClamUpdate,
     ) -> Option<(
         hyperion_types::WpIntegrityScanResult,
         std::collections::HashSet<String>,
     )> {
+        let id = detail.id.as_str();
         let _record = self.site_scan.record.lock().await;
-        let existing = match self.integrity_record(detail.id.as_str()).await {
+        let existing = match self.integrity_record(id).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(domain = %detail.domain, error = %e, "clamav: record unreadable");
                 return None;
             }
         };
+        let restored_keep = match &mut update {
+            ClamUpdate::Pass { hits, started, .. } => {
+                let (merged, keep) = merge_restored(
+                    std::mem::take(hits),
+                    self.clamav_restored(id).await,
+                    *started,
+                );
+                *hits = merged;
+                Some(keep)
+            }
+            _ => None,
+        };
         // A reason is for a card that exists; hits are worth a record of their own.
         if existing.is_none() && !update.has_hits() {
             return None;
         }
+        let fresh = existing.is_none();
         let mut rec = existing.unwrap_or_default();
+        if fresh {
+            // No scan has spoken for this site: it is in the pilot until the
+            // node says otherwise, so a hit here doesn't alert before then.
+            rec.result.report_only = !self.site_scan_new_layers_live();
+        }
         let before = malware_finding_keys(&rec.result);
         let was = (
             rec.result.malware.clone(),
@@ -1041,27 +1213,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             rec.clamav_at,
             rec.clamav_error.clone(),
         );
-        if was != now {
-            self.set_stored_integrity_scan(detail.id.as_str(), &rec)
-                .await;
+        if fresh || was != now {
+            self.set_stored_integrity_scan(id, &rec).await;
+        }
+        if let Some(keep) = restored_keep {
+            self.set_clamav_restored(id, &keep).await;
         }
         Some((rec.result, before))
-    }
-
-    /// A pass's hits for one hosting, with the ones a restore brought back since
-    /// it began: the pass may have looked at that place before the file was
-    /// back. Entries from before the pass are done with and go.
-    async fn clamav_with_restored(
-        &self,
-        hosting_id: &str,
-        hits: Vec<hyperion_types::WpMalwareHit>,
-        started: i64,
-    ) -> Vec<hyperion_types::WpMalwareHit> {
-        let _record = self.site_scan.record.lock().await;
-        let held = self.clamav_restored(hosting_id).await;
-        let (merged, keep) = merge_restored(hits, held, started);
-        self.set_clamav_restored(hosting_id, &keep).await;
-        merged
     }
 
     pub(super) async fn clamav_restored(&self, hosting_id: &str) -> Vec<ClamRestored> {
