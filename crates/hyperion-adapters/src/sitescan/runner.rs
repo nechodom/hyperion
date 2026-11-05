@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
+use super::accept::{writer_hash, WriterPaths};
 use super::discover::{discover, Discovery};
 use super::pressure::{host_cores, system_gate};
-use super::scan::{scan_site, ScanInput, SiteScanOutcome};
+use super::scan::{scan_site, ScanInput, SiteScanOutcome, WriterKind};
 use super::walk::TenantRoot;
 use crate::AdapterError;
 
@@ -27,7 +28,11 @@ use crate::AdapterError;
 pub const WORKER_ARG: &str = "scan-worker";
 /// Fixed, so systemd itself refuses a second worker on the node.
 pub const UNIT_NAME: &str = "hyperion-sitescan";
-/// The worker's state: `manifests/` and `baselines/`. [`unit_args`] names it.
+/// The unit the hash of a writer's files runs in. Its own name, so it isn't held
+/// behind a scan that takes hours.
+pub const ACCEPT_UNIT_NAME: &str = "hyperion-sitescan-accept";
+/// The worker's state: `manifests/`, `baselines/` and `accepted/`. [`unit_args`]
+/// names it.
 pub const SCAN_DIR: &str = "/var/lib/hyperion/scan";
 /// Replies and jobs bigger than this are refused. A reply that large is a bug or
 /// an attack, and holding it in memory would not be free.
@@ -47,6 +52,24 @@ pub enum WorkerJob {
         root: PathBuf,
     },
     Scan(ScanInput),
+    /// A writer of ours (git deploy, restore) has finished. Hash the code files
+    /// it names, or all of them, and write what the scan may accept to `out`.
+    WriterHash {
+        root: PathBuf,
+        kind: WriterKind,
+        paths: WriterPaths,
+        out: PathBuf,
+    },
+}
+
+impl WorkerJob {
+    /// The transient unit this job runs in.
+    fn unit(&self) -> &'static str {
+        match self {
+            WorkerJob::WriterHash { .. } => ACCEPT_UNIT_NAME,
+            _ => UNIT_NAME,
+        }
+    }
 }
 
 // One reply is alive per run, so the size of the variants costs nothing.
@@ -55,6 +78,12 @@ pub enum WorkerJob {
 pub enum WorkerReply {
     Discovery(Discovery),
     Scan(SiteScanOutcome),
+    /// The hash of a writer's files is written. `partial`: a cap stopped it, and
+    /// what it left unlisted gets reviewed.
+    Hashed {
+        listed: u64,
+        partial: bool,
+    },
     /// Another worker holds the node's one slot. Try again later.
     Busy,
     /// The job did not run to an answer. The message says why.
@@ -64,10 +93,14 @@ pub enum WorkerReply {
 /// Arguments for `systemd-run`, the caps included: the worker may read what a
 /// scan reads and write only its own state directory.
 pub fn unit_args(cores: usize, exe: &Path) -> Vec<String> {
+    unit_args_for(UNIT_NAME, cores, exe)
+}
+
+/// [`unit_args`] for the named unit: same caps, another name.
+pub fn unit_args_for(unit: &str, cores: usize, exe: &Path) -> Vec<String> {
     let quota = if cores <= 2 { "50%" } else { "100%" };
-    let mut args: Vec<String> = ["--unit=hyperion-sitescan", "--wait", "--pipe", "--collect"]
-        .map(String::from)
-        .to_vec();
+    let mut args = vec![format!("--unit={unit}")];
+    args.extend(["--wait", "--pipe", "--collect"].map(String::from));
     let props = [
         "MemoryMax=256M".to_string(),
         "CPUWeight=10".to_string(),
@@ -124,6 +157,7 @@ pub fn prepare_scan_dirs(base: &Path) -> std::io::Result<()> {
         base.to_path_buf(),
         base.join("manifests"),
         base.join("baselines"),
+        base.join("accepted"),
     ] {
         std::fs::create_dir_all(&dir)?;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
@@ -163,8 +197,8 @@ pub async fn run_worker(job: &WorkerJob, exe: &Path) -> Result<WorkerReply, Adap
         return run_direct(job, exe, MAX_REPLY_BYTES).await;
     }
     let mut cmd = Command::new(SYSTEMD_RUN);
-    cmd.args(unit_args(host_cores(), exe));
-    run_child(cmd, job, MAX_REPLY_BYTES, true).await
+    cmd.args(unit_args_for(job.unit(), host_cores(), exe));
+    run_child(cmd, job, MAX_REPLY_BYTES, Some(job.unit())).await
 }
 
 /// The no-systemd path, also what the tests drive.
@@ -187,14 +221,15 @@ pub async fn run_direct(
         cmd = Command::new(exe);
     }
     cmd.arg(WORKER_ARG);
-    run_child(cmd, job, max_reply, false).await
+    run_child(cmd, job, max_reply, None).await
 }
 
 async fn run_child(
     mut cmd: Command,
     job: &WorkerJob,
     max_reply: usize,
-    under_systemd: bool,
+    // The unit systemd runs it in, when it does.
+    systemd_unit: Option<&str>,
 ) -> Result<WorkerReply, AdapterError> {
     let input = serde_json::to_vec(job).map_err(|e| AdapterError::Other(e.to_string()))?;
     let program = cmd.as_std().get_program().to_string_lossy().into_owned();
@@ -272,7 +307,7 @@ async fn run_child(
         Err(e) => return Ok(failed(format!("could not wait for {program}: {e}"))),
     };
     if !status.success() {
-        if under_systemd && reply.is_empty() && is_busy_message(&tail) {
+        if systemd_unit.is_some_and(|u| reply.is_empty() && is_busy_message_for(u, &tail)) {
             return Ok(WorkerReply::Busy);
         }
         let said = if tail.is_empty() {
@@ -299,8 +334,13 @@ fn failed(msg: String) -> WorkerReply {
 /// `Failed to start transient service unit: Unit hyperion-sitescan.service was
 /// already loaded or has a fragment file.` Only a line that starts that way
 /// counts: stderr can also carry names a tenant chose.
+#[cfg(test)]
 fn is_busy_message(stderr: &str) -> bool {
-    let head = format!("Failed to start transient service unit: Unit {UNIT_NAME}.service ");
+    is_busy_message_for(UNIT_NAME, stderr)
+}
+
+fn is_busy_message_for(unit: &str, stderr: &str) -> bool {
+    let head = format!("Failed to start transient service unit: Unit {unit}.service ");
     stderr
         .lines()
         .any(|l| l.starts_with(&head) && l.contains("already"))
@@ -357,6 +397,18 @@ pub fn execute(job: WorkerJob, pause: &dyn Fn() -> bool) -> WorkerReply {
             Ok(outcome) => WorkerReply::Scan(outcome),
             Err(e) => WorkerReply::Failed(e.to_string()),
         },
+        WorkerJob::WriterHash {
+            root,
+            kind,
+            paths,
+            out,
+        } => match writer_hash(&root, kind, &paths, &out, pause) {
+            Ok(h) => WorkerReply::Hashed {
+                listed: h.listed,
+                partial: h.partial,
+            },
+            Err(e) => WorkerReply::Failed(e.to_string()),
+        },
     }
 }
 
@@ -391,7 +443,12 @@ mod tests {
         let t = tempfile::tempdir().expect("tmp");
         let base = t.path().join("hyperion/scan");
         prepare_scan_dirs(&base).expect("prepare");
-        for d in [&base, &base.join("manifests"), &base.join("baselines")] {
+        for d in [
+            &base,
+            &base.join("manifests"),
+            &base.join("baselines"),
+            &base.join("accepted"),
+        ] {
             let mode = std::fs::metadata(d).expect("meta").permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "{}", d.display());
         }
@@ -432,6 +489,30 @@ mod tests {
     }
 
     const BUSY_LINE: &str = "Failed to start transient service unit: Unit hyperion-sitescan.service was already loaded or has a fragment file.";
+
+    /// The hash of a writer's files has its own unit, so it isn't held behind a scan
+    /// of hours, and the same caps.
+    #[test]
+    fn the_hash_runs_in_its_own_capped_unit() {
+        let exe = Path::new("/usr/local/bin/hyperion-agent");
+        let hash = WorkerJob::WriterHash {
+            root: PathBuf::from("/x"),
+            kind: WriterKind::Restore,
+            paths: WriterPaths::All,
+            out: PathBuf::from("/y"),
+        };
+        assert_eq!(hash.unit(), "hyperion-sitescan-accept");
+        assert_eq!(job().unit(), UNIT_NAME);
+        let a = unit_args_for(hash.unit(), 4, exe);
+        let b = unit_args(4, exe);
+        assert!(a.iter().any(|x| x == "--unit=hyperion-sitescan-accept"));
+        assert!(!a.iter().any(|x| x == "--unit=hyperion-sitescan"));
+        assert_eq!(a[1..], b[1..], "same caps, only the name differs");
+        // Busy means its own unit was taken, not the scan's.
+        let line = "Failed to start transient service unit: Unit hyperion-sitescan-accept.service was already loaded or has a fragment file.";
+        assert!(is_busy_message_for(ACCEPT_UNIT_NAME, line));
+        assert!(!is_busy_message_for(UNIT_NAME, line));
+    }
 
     #[test]
     fn unit_args_contain_every_cap() {
@@ -540,7 +621,7 @@ mod tests {
         let _g = SCRIPTS.lock().await;
         let t = tempfile::tempdir().expect("tmp");
         let fake = script(t.path(), body);
-        run_child(Command::new(fake), &job(), MAX_REPLY_BYTES, true)
+        run_child(Command::new(fake), &job(), MAX_REPLY_BYTES, Some(UNIT_NAME))
             .await
             .expect("run")
     }
@@ -569,7 +650,7 @@ mod tests {
         let _g = SCRIPTS.lock().await;
         let t = tempfile::tempdir().expect("tmp");
         let fake = script(t.path(), &format!("{line}; exit 1"));
-        let r = run_child(Command::new(fake), &job(), MAX_REPLY_BYTES, false)
+        let r = run_child(Command::new(fake), &job(), MAX_REPLY_BYTES, None)
             .await
             .expect("run");
         assert!(matches!(r, WorkerReply::Failed(_)), "{r:?}");

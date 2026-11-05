@@ -76,6 +76,10 @@ async fn integrity_scan_on_non_wordpress_hosting_is_never_clean_and_stays_off_th
     let pool = open_memory().await.expect("open");
     let mut a = happy_mocks();
     a.expect_site_scan_worker().returning(|job| match job {
+        WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+            listed: 0,
+            partial: false,
+        },
         WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
         WorkerJob::Scan(_) => WorkerReply::Scan(SiteScanOutcome {
             coverage: hyperion_types::ScanCoverage {
@@ -560,6 +564,10 @@ mod site_scan {
     /// A worker that finds nothing to fetch and answers with `outcome`.
     fn answering(mut a: MockAdapterPort, outcome: SiteScanOutcome) -> MockAdapterPort {
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => WorkerReply::Scan(outcome.clone()),
         });
@@ -897,6 +905,10 @@ mod site_scan {
         let seen = inputs.clone();
         let mut a = happy_mocks_many();
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(input) => {
                 seen.lock().expect("lock").push(input);
@@ -939,6 +951,10 @@ mod site_scan {
         release: Arc<AtomicBool>,
     ) -> MockAdapterPort {
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { root } => {
                 order.lock().expect("lock").push(root);
                 started.store(true, Ordering::SeqCst);
@@ -1054,6 +1070,10 @@ mod site_scan {
         let counted = discovers.clone();
         let mut a = happy_mocks();
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => {
                 counted.fetch_add(1, Ordering::SeqCst);
                 WorkerReply::Discovery(Discovery::default())
@@ -1243,6 +1263,10 @@ mod site_scan {
             std::thread::sleep(std::time::Duration::from_millis(20));
             running2.fetch_sub(1, Ordering::SeqCst);
             match job {
+                WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                    listed: 0,
+                    partial: false,
+                },
                 WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
                 WorkerJob::Scan(_) => WorkerReply::Scan(upstream_verified(0)),
             }
@@ -1415,6 +1439,10 @@ mod site_scan {
             let current = reply.clone();
             let mut a = happy_mocks();
             a.expect_site_scan_worker().returning(move |job| match job {
+                WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                    listed: 0,
+                    partial: false,
+                },
                 WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
                 WorkerJob::Scan(_) => WorkerReply::Scan(current.lock().expect("lock").clone()),
             });
@@ -1502,6 +1530,10 @@ mod site_scan {
         let current = reply.clone();
         let mut a = happy_mocks();
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => WorkerReply::Scan(current.lock().expect("lock").clone()),
         });
@@ -1576,6 +1608,10 @@ mod site_scan {
         let current = reply.clone();
         let mut a = happy_mocks();
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => WorkerReply::Scan(current.lock().expect("lock").clone()),
         });
@@ -1633,6 +1669,10 @@ mod site_scan {
         a.expect_wp_plugin_action().never();
         a.expect_wp_cli().never();
         a.expect_site_scan_worker().returning(|job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => WorkerReply::Scan(upstream_verified(2)),
         });
@@ -1656,6 +1696,10 @@ mod site_scan {
         let pool = open_memory().await.expect("open");
         let mut a = happy_mocks();
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => WorkerReply::Scan(outcome.clone()),
         });
@@ -1915,6 +1959,10 @@ mod site_scan {
         outcome.coverage.partial_reasons = (0..24).map(|i| format!("worker {i}")).collect();
         let mut a = happy_mocks();
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => {
                 WorkerReply::Discovery(discovery_of(vec![plugin("akismet")]))
             }
@@ -2037,6 +2085,10 @@ mod site_scan {
         let current = reply.clone();
         let mut a = happy_mocks();
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => WorkerReply::Scan(current.lock().expect("lock").clone()),
         });
@@ -2091,6 +2143,10 @@ mod site_scan {
         let current = reply.clone();
         let mut a = happy_mocks();
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => WorkerReply::Scan(current.lock().expect("lock").clone()),
         });
@@ -2339,6 +2395,10 @@ mod site_scan {
         let now = monday_at(0, 12, 0);
         let mut a = happy_mocks();
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => {
                 let id = id_for_mock.lock().expect("lock").clone();
@@ -2429,6 +2489,10 @@ mod site_scan {
         order: Arc<StdMutex<Vec<std::path::PathBuf>>>,
     ) -> MockAdapterPort {
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { root } => {
                 order.lock().expect("lock").push(root);
                 WorkerReply::Discovery(Discovery::default())
@@ -2590,6 +2654,10 @@ mod site_scan {
         tampered.upstream.core_modified = vec!["wp-login.php".into()];
         let mut a = happy_mocks();
         a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => {
                 make_record_unreadable(&during, &slot.lock().expect("lock"));

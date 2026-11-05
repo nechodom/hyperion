@@ -9,11 +9,14 @@
 
 use super::*;
 use chrono::{Datelike, Timelike};
+use hyperion_adapters::sitescan::accept::{self, WriterPaths};
 use hyperion_adapters::sitescan::discover::Discovery;
 use hyperion_adapters::sitescan::manifest::ComponentKind;
 use hyperion_adapters::sitescan::runner::{WorkerJob, WorkerReply};
-use hyperion_adapters::sitescan::scan::{ScanInput, ScanMode, SiteScanOutcome, WriterKind};
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use hyperion_adapters::sitescan::scan::{
+    ScanInput, ScanMode, SiteScanOutcome, WriterAccepted, WriterKind,
+};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 pub(super) use hyperion_adapters::sitescan::runner::SCAN_DIR;
@@ -42,10 +45,6 @@ const SCAN_REQUEST_HONOURED_KV_KEY: &str = "scan_request_honoured_at";
 /// A site's requests are honoured this far apart at most. Anyone with `WpManage`
 /// can ask, a customer included, and the node has one worker.
 const SCAN_REQUEST_MIN_GAP_SECS: i64 = 10 * 60;
-
-/// `hosting_kv` key: `<writer>:<unix seconds>`, set before a git deploy or a
-/// restore writes into the tree. The next scan that stores its result clears it.
-const SCAN_PENDING_ACCEPT_KV_KEY: &str = "scan_pending_accept";
 
 /// `node_kv` key: unix seconds the manifest cache and the quarantine were last swept.
 const EVICT_LAST_RUN_KV: &str = "site_scan_evict_last_run_at";
@@ -83,22 +82,6 @@ const SITE_SCAN_BUSY: &str = "another site scan is still running on this node; t
 pub(super) const SITE_SCAN_NO_FILES: &str = "a reverse proxy has no files of its own to scan";
 const SITE_SCAN_NOT_STORED: &str = "the scan's result could not be stored; try again shortly";
 const SITE_SCAN_CUT_SHORT: &str = "the scan did not finish; part of the site was not looked at";
-
-fn writer_name(kind: WriterKind) -> &'static str {
-    match kind {
-        WriterKind::GitDeploy => "git_deploy",
-        WriterKind::Restore => "restore",
-    }
-}
-
-/// `<writer>:<unix seconds>`.
-fn parse_pending_accept(raw: &str) -> Option<(WriterKind, i64)> {
-    let (name, since) = raw.trim().split_once(':')?;
-    let kind = [WriterKind::GitDeploy, WriterKind::Restore]
-        .into_iter()
-        .find(|k| writer_name(*k) == name)?;
-    Some((kind, since.parse().ok().filter(|s| *s > 0)?))
-}
 
 /// False for a hosting with no files of its own to scan. A redirect from the
 /// wizard is a `static` row with a docroot, so it counts as having files.
@@ -315,49 +298,77 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Some(id)
     }
 
-    /// Say that a writer of ours is about to change the tree: what it leaves, if no
-    /// rule objects, is not for a person to review. Call it BEFORE the writer
-    /// starts, so no file it writes has a change time before the mark, and call
-    /// [`scan_writer_done`](Self::scan_writer_done) when it ends, whatever came of
-    /// it. A site that isn't scanned is not marked. A failed write only costs the
-    /// files a review.
-    pub(super) async fn scan_mark_writer(&self, hosting_id: &str, kind: WriterKind) {
-        if !self.integrity_scan_enabled(hosting_id).await {
+    fn accepted_path(&self, hosting_id: &str) -> PathBuf {
+        Path::new(&self.paths.scan_dir)
+            .join("accepted")
+            .join(hosting_id)
+    }
+
+    /// What a writer of ours left for this site, if anything is pending.
+    async fn scan_accepted(
+        &self,
+        hosting_id: &str,
+        now: i64,
+    ) -> Option<(WriterAccepted, accept::Stamp)> {
+        let path = self.accepted_path(hosting_id);
+        let loaded = tokio::task::spawn_blocking(move || accept::load_accepted(&path, now))
+            .await
+            .ok()?;
+        match loaded {
+            accept::Loaded::Found(accepted, stamp) => Some((accepted, stamp)),
+            accept::Loaded::Nothing => None,
+        }
+    }
+
+    /// What Hyperion's per-site mail module should be on this site: rendered
+    /// from the same inputs the install tick uses, so the scan can compare the
+    /// file with it instead of taking it on trust.
+    async fn scan_own_expected(&self, detail: &HostingDetail) -> BTreeMap<String, [u8; 32]> {
+        use hyperion_adapters::{wpmail, wpplugin};
+        let id = detail.id.as_str();
+        let from = self.wp_mail_from_address(id, &detail.domain).await;
+        let (policy, _) = self.wp_mail_policy(id).await;
+        let log = wpmail::failure_log_path(detail.root_dir.trim())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let body = wpmail::render_mu_plugin(&detail.domain, &from, &log, policy);
+        BTreeMap::from([(
+            wpplugin::module_rel(wpplugin::Module::Mail),
+            wpplugin::expected_digest(&body),
+        )])
+    }
+
+    /// A writer of ours has finished changing the site's files: hash what it left,
+    /// in the worker's own unit so it doesn't wait behind a scan, and queue the
+    /// site's scan. If the hash fails nothing is recorded and the scan reviews the
+    /// changes like any others. Call it after the writer's last step, permission
+    /// repair included. A site that isn't scanned is left alone.
+    pub(super) async fn scan_writer_done(
+        &self,
+        detail: &HostingDetail,
+        kind: WriterKind,
+        paths: WriterPaths,
+    ) {
+        let id = detail.id.as_str();
+        if !kind_has_files(&detail.kind) || !self.integrity_scan_enabled(id).await {
             return;
         }
-        let now = now_secs();
-        let value = format!("{}:{now}", writer_name(kind));
-        if let Err(e) = hyperion_state::hosting_kv::set(
-            &self.pool,
-            hosting_id,
-            SCAN_PENDING_ACCEPT_KV_KEY,
-            &value,
-            now,
-        )
-        .await
-        {
-            tracing::warn!(error = %e, "site scan: writer not marked");
+        let job = WorkerJob::WriterHash {
+            root: PathBuf::from(&detail.root_dir),
+            kind,
+            paths,
+            out: self.accepted_path(id),
+        };
+        match self.adapters.site_scan_worker(job).await {
+            WorkerReply::Hashed { listed, partial } => {
+                tracing::debug!(domain = %detail.domain, listed, partial, "site scan: writer's files hashed");
+            }
+            other => tracing::warn!(
+                domain = %detail.domain, why = ?other,
+                "site scan: the writer's files were not hashed; its changes get reviewed"
+            ),
         }
-    }
-
-    /// The writer is finished: scan this site next, ahead of the schedule. Does
-    /// nothing for a site [`scan_mark_writer`](Self::scan_mark_writer) left alone.
-    pub(super) async fn scan_writer_done(&self, hosting_id: &str) {
-        if self.scan_pending_accept(hosting_id).await.is_some() {
-            self.request_rescan(hosting_id).await;
-        }
-    }
-
-    /// The mark a writer left, as stored and as the scan takes it. A value that
-    /// makes no sense marks nothing.
-    async fn scan_pending_accept(&self, hosting_id: &str) -> Option<(String, WriterKind, i64)> {
-        let raw =
-            hyperion_state::hosting_kv::get(&self.pool, hosting_id, SCAN_PENDING_ACCEPT_KV_KEY)
-                .await
-                .ok()
-                .flatten()?;
-        let (kind, since) = parse_pending_accept(&raw)?;
-        Some((raw, kind, since))
+        self.request_rescan(id).await;
     }
 
     /// The value of this hosting's request, if one stands.
@@ -366,24 +377,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .ok()
             .flatten()
-    }
-
-    /// The scan that saw `seen` has stored its result. A newer mark stays.
-    async fn clear_pending_accept(&self, hosting_id: &str, seen: &str) {
-        let still =
-            hyperion_state::hosting_kv::get(&self.pool, hosting_id, SCAN_PENDING_ACCEPT_KV_KEY)
-                .await
-                .ok()
-                .flatten();
-        if still.as_deref() != Some(seen) {
-            return;
-        }
-        if let Err(e) =
-            hyperion_state::hosting_kv::delete(&self.pool, hosting_id, SCAN_PENDING_ACCEPT_KV_KEY)
-                .await
-        {
-            tracing::warn!(error = %e, "site scan: writer mark not cleared");
-        }
     }
 
     async fn clear_scan_request(&self, hosting_id: &str) {
@@ -615,15 +608,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         prior: Option<&StoredIntegrityScan>,
         now: i64,
     ) -> SiteScanRun {
-        // Read before the scan starts: a writer that marks again meanwhile is
-        // about files this scan may not have seen, so its mark stays.
-        let pending = self.scan_pending_accept(detail.id.as_str()).await;
-        let accept_since = pending.as_ref().map(|(_, kind, since)| (*kind, *since));
-        let outcome = match self.native_site_scan(detail, mode, now, accept_since).await {
+        // Read before the scan starts: a writer that finishes meanwhile leaves a
+        // newer list, which this scan hasn't seen and which stays.
+        let accepted = self.scan_accepted(detail.id.as_str(), now).await;
+        let outcome = match self
+            .native_site_scan(detail, mode, now, accepted.as_ref().map(|(a, _)| a.clone()))
+            .await
+        {
             NativeScan::Busy => return SiteScanRun::Busy,
             NativeScan::Failed => None,
             NativeScan::Ran(outcome) => Some(outcome),
         };
+        // Spent only by a scan that looked at everything: a stopped one never saw
+        // part of what the writer left.
+        let complete = outcome.as_ref().is_some_and(|o| !o.stopped && !o.capped);
         let native_ran = outcome.is_some();
         let report_only = !self.site_scan_new_layers_live();
         let auto_accepted = outcome
@@ -671,8 +669,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.prune_scan_trust(detail.id.as_str(), &reported, &trust_gone)
             .await;
         drop(record_lock);
-        if let (Some((raw, ..)), true) = (pending, native_ran) {
-            self.clear_pending_accept(detail.id.as_str(), &raw).await;
+        if let (Some((_, stamp)), true) = (accepted, complete) {
+            accept::spend_accepted(&self.accepted_path(detail.id.as_str()), &stamp);
         }
 
         let r = &stored.result;
@@ -704,7 +702,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         detail: &HostingDetail,
         mode: ScanMode,
         now: i64,
-        accept_since: Option<(WriterKind, i64)>,
+        accepted: Option<WriterAccepted>,
     ) -> NativeScan {
         let root = PathBuf::from(&detail.root_dir);
         let job = WorkerJob::Discover { root: root.clone() };
@@ -727,7 +725,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             mode,
             now,
             wporg_known_slugs: pass.known_slugs,
-            accept_since,
+            accepted,
+            own_expected: self.scan_own_expected(detail).await,
             own_files_since: self.site_scan.started_at,
             trusted: self.scan_trust_map(detail.id.as_str()).await,
         });
@@ -909,6 +908,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             return;
         }
         self.site_scan_purge_quarantine(now).await;
+        let accepted = Path::new(&self.paths.scan_dir).join("accepted");
+        let _ = tokio::task::spawn_blocking(move || accept::purge_expired(&accepted, now)).await;
         let _gate = self.site_scan.node.lock().await;
         let dir = Path::new(&self.paths.scan_dir).join("manifests");
         self.adapters.site_scan_evict_manifests(&dir).await;
@@ -1313,7 +1314,7 @@ pub(super) fn clamp_scan_outcome(o: &mut SiteScanOutcome) {
     clip_list(&mut c.partial_reasons, MAX_REASONS, MAX_REASON_BYTES);
 }
 
-/// What a purged site leaves here: its baseline and its quarantine. Neither may
+/// What a purged site leaves here: its baseline, its writer's list and its quarantine. Neither may
 /// exist. An id that could name anything but one entry of these root-owned
 /// directories is refused, since one of them is removed recursively.
 pub(super) async fn remove_site_scan_state(paths: &HostingPaths, hosting_id: &str) {
@@ -1328,6 +1329,12 @@ pub(super) async fn remove_site_scan_state(paths: &HostingPaths, hosting_id: &st
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => tracing::error!(error = %e, hosting_id, "purge: baseline not removed"),
+    }
+    let accepted = Path::new(&paths.scan_dir).join("accepted").join(hosting_id);
+    match tokio::fs::remove_file(&accepted).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::error!(error = %e, hosting_id, "purge: accepted list not removed"),
     }
     let quarantine = Path::new(&paths.quarantine_dir).join(hosting_id);
     match tokio::fs::remove_dir_all(&quarantine).await {

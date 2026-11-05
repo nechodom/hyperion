@@ -484,6 +484,7 @@ pub(super) fn assemble_integrity_result(
         report_only,
         findings: outcome.findings,
         review: outcome.review,
+        accepted_by_writer: outcome.accepted_by_writer,
         coverage: outcome.coverage,
         ..Default::default()
     }

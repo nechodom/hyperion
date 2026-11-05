@@ -490,33 +490,55 @@ pub fn render_loader() -> String {
     LOADER_TEMPLATE.replace("{{VERSION}}", &LOADER_VERSION.to_string())
 }
 
+/// What Hyperion keeps at one of its paths, as far as the site scan can know it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedContent {
+    /// The same bytes on every site; this binary writes exactly these.
+    Fixed(String),
+    /// Rendered per site from settings only the agent knows (the mail module:
+    /// domain, From address, log path, policy). The agent says what it should be.
+    PerSite,
+    /// The status page: JSON data in a fixed shape, see [`status_shape_ok`].
+    Status,
+}
+
 /// One file Hyperion keeps inside a site's `mu-plugins`, for the site scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedFile {
     /// Relative to the docroot.
     pub rel: String,
-    /// What this binary writes, byte for byte. `None` when the bytes depend on
-    /// the site or on the minute (the mail module carries the domain and the log
-    /// path, `status.php` the last check), and no digest can be compiled in.
-    pub content: Option<String>,
+    pub content: ManagedContent,
 }
 
 /// Every file this plugin puts in a site, so the scan can tell ours from a
-/// tenant's. The mail module is rendered in `wpmail` and the status file above;
-/// both vary per site, so they are listed without content.
+/// tenant's. A module added to [`Module::ALL`] has to be answered for here: the
+/// match has no wildcard.
+///
+/// How the scan treats a mismatch: a file that isn't what this binary writes is
+/// a finding, but for the first hour after the agent starts it is an item to
+/// review, since the previous version's file may still be there until the install
+/// tick rewrites it. A High rule hit in it is a finding even then; a Medium one
+/// stays a review item within that hour, like the mismatch itself.
 pub fn managed_files() -> Vec<ManagedFile> {
-    let file = |rel: String, content: Option<String>| ManagedFile { rel, content };
-    let module = |m: Module, content: Option<String>| {
-        file(format!("{}/{}", module_dir_rel(), m.file()), content)
-    };
-    vec![
-        file(format!("{}/{LOADER_FILE}", mu_rel()), Some(render_loader())),
-        module(Module::Mail, None),
-        module(Module::RegGuard, Some(crate::regguard::render_mu_plugin())),
-        module(Module::Preview, Some(PREVIEW_MODULE.to_string())),
-        module(Module::Cron, Some(CRON_MODULE.to_string())),
-        file(format!("{}/{STATUS_FILE}", module_dir_rel()), None),
-    ]
+    let file = |rel: String, content: ManagedContent| ManagedFile { rel, content };
+    let mut out = vec![file(
+        format!("{}/{LOADER_FILE}", mu_rel()),
+        ManagedContent::Fixed(render_loader()),
+    )];
+    for m in Module::ALL {
+        let content = match m {
+            Module::Mail => ManagedContent::PerSite,
+            Module::RegGuard => ManagedContent::Fixed(crate::regguard::render_mu_plugin()),
+            Module::Preview => ManagedContent::Fixed(PREVIEW_MODULE.to_string()),
+            Module::Cron => ManagedContent::Fixed(CRON_MODULE.to_string()),
+        };
+        out.push(file(format!("{}/{}", module_dir_rel(), m.file()), content));
+    }
+    out.push(file(
+        format!("{}/{STATUS_FILE}", module_dir_rel()),
+        ManagedContent::Status,
+    ));
+    out
 }
 
 /// What the agent tells the status page. Every field is optional on the PHP
@@ -559,11 +581,35 @@ pub struct BackupStatus {
 /// direct HTTP request — it names the site's sender and node.
 pub fn render_status(status: &SiteStatus) -> String {
     let json = serde_json::to_string(status).unwrap_or_else(|_| "{}".into());
-    format!(
-        "<?php\n// Written by Hyperion — what the server last checked. Edits are overwritten.\n\
-         if (!defined('ABSPATH')) {{ exit; }}\nreturn json_decode('{}', true);\n",
-        php_single_quoted(&json)
-    )
+    format!("{STATUS_HEAD}{}{STATUS_TAIL}", php_single_quoted(&json))
+}
+
+const STATUS_HEAD: &str =
+    "<?php\n// Written by Hyperion — what the server last checked. Edits are overwritten.\n\
+     if (!defined('ABSPATH')) { exit; }\nreturn json_decode('";
+const STATUS_TAIL: &str = "', true);\n";
+
+/// Is this exactly the shape [`render_status`] writes: the fixed head, one
+/// single-quoted literal whose only escapes are `\\` and `\'`, and the fixed
+/// tail, with nothing else. Its content is data the agent chose each hour, so no
+/// digest can be compiled in, but code in it (a quote that ends the literal, a
+/// second statement) can be told from data without running or guessing at it.
+pub fn status_shape_ok(file: &str) -> bool {
+    let Some(rest) = file.strip_prefix(STATUS_HEAD) else {
+        return false;
+    };
+    let Some(literal) = rest.strip_suffix(STATUS_TAIL) else {
+        return false;
+    };
+    let mut chars = literal.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => return false,
+            '\\' if !matches!(chars.next(), Some('\\' | '\'')) => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Escape for a PHP single-quoted string: only `\` and `'` are special there.
@@ -582,6 +628,17 @@ pub fn module_path(root_dir: &str, module: Module) -> PathBuf {
         .join("wp-content/mu-plugins")
         .join(MODULE_DIR)
         .join(module.file())
+}
+
+/// `wp-content/mu-plugins/hyperion/<module>`, relative to the docroot.
+pub fn module_rel(module: Module) -> String {
+    format!("{}/{}", module_dir_rel(), module.file())
+}
+
+/// The digest the site scan compares a file with.
+pub fn expected_digest(content: &str) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(content.as_bytes()).into()
 }
 
 /// `<root>/wp-content/mu-plugins/hyperion.php` — logical, as above.
@@ -1021,5 +1078,39 @@ mod tests {
         assert!(std::fs::read_to_string(dir.join(STATUS_FILE))
             .expect("status")
             .contains("json_decode"));
+    }
+
+    #[test]
+    fn the_status_shape_is_exactly_what_the_agent_writes() {
+        let st = SiteStatus {
+            domain: "o'brien\\x.cz".into(),
+            ..Default::default()
+        };
+        let body = render_status(&st);
+        assert!(status_shape_ok(&body), "{body}");
+        for bad in [
+            format!("{body}echo 1;\n"),
+            format!("{body}\n"),
+            body.replace("exit; }", "exit; } system('id');"),
+            body.replace("return json_decode('", "return json_decode('\\x"),
+            body.replace("', true);", "'); evil(); //', true);"),
+            body.replace("<?php", "<?php /* */"),
+            String::new(),
+        ] {
+            assert!(!status_shape_ok(&bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_module_is_listed_once() {
+        let files = managed_files();
+        for m in Module::ALL {
+            assert_eq!(
+                files.iter().filter(|f| f.rel == module_rel(m)).count(),
+                1,
+                "{m:?}"
+            );
+        }
+        assert_eq!(files.len(), Module::ALL.len() + 2);
     }
 }

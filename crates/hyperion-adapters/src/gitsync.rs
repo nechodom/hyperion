@@ -15,6 +15,7 @@
 //! answered on port 22 every single time.
 
 use crate::cmd;
+use crate::sitescan::accept::WriterPaths;
 use crate::AdapterError;
 use hyperion_types::gitsync::{parse_repo, GitSyncCheck, GitSyncLast, RepoRef};
 use std::time::Duration;
@@ -376,6 +377,21 @@ pub async fn check(p: SyncParams<'_>) -> GitSyncCheck {
 /// failure the error is already explained for the operator (see
 /// [`explain`]) and carried as `(message, detail)`.
 pub async fn sync(p: SyncParams<'_>) -> Result<GitSyncLast, (String, String)> {
+    sync_with_paths(p).await.map(|d| d.last)
+}
+
+/// A deploy, and which code files it changed in the webroot.
+pub struct Deployed {
+    pub last: GitSyncLast,
+    /// Relative to the webroot. [`WriterPaths::All`] when the deploy can't say:
+    /// a first checkout, or a diff that didn't come out.
+    pub paths: WriterPaths,
+}
+
+/// [`sync`], with the names of the files the commit changed. They come from
+/// `git diff` run as the site user over a repository the tenant's own repo
+/// supplied, so they are only ever paths to open through the scan's jail.
+pub async fn sync_with_paths(p: SyncParams<'_>) -> Result<Deployed, (String, String)> {
     let kind = p.auth.kind();
     let branch = p.branch.trim().to_string();
     let repo = validate(&p).map_err(|e| (e.to_string(), String::new()))?;
@@ -499,7 +515,7 @@ async fn sync_inner(
     p: &SyncParams<'_>,
     repo: &RepoRef,
     run_dir: &str,
-) -> Result<GitSyncLast, AdapterError> {
+) -> Result<Deployed, AdapterError> {
     let htdocs = p.htdocs.trim().trim_end_matches('/');
     let repo_dir = checkout_dir(p.home_dir, p.site_key);
     let branch = p.branch.trim();
@@ -555,6 +571,18 @@ async fn sync_inner(
         )
         .await?;
     }
+    // Where the checkout was before this deploy, for the list of what changed.
+    let before = if has_git {
+        git(
+            in_repo(&["rev-parse", "--verify", "-q", "HEAD"]),
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .ok()
+        .map(|s| s.trim().to_string())
+    } else {
+        None
+    };
     let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
     git(
         in_repo(&[
@@ -578,6 +606,31 @@ async fn sync_inner(
     // Nothing but the commit's own files may reach the webroot: drop anything
     // untracked or ignored that a previous build or a tenant left behind.
     git(in_repo(&["clean", "-q", "-ffdx"]), LOCAL_TIMEOUT).await?;
+    let after = git(
+        in_repo(&["rev-parse", "--verify", "-q", "HEAD"]),
+        LOCAL_TIMEOUT,
+    )
+    .await
+    .ok()
+    .map(|s| s.trim().to_string());
+    let paths = match (before, after) {
+        (Some(b), Some(a)) if is_rev(&b) && is_rev(&a) => {
+            if b == a {
+                WriterPaths::List(Vec::new())
+            } else {
+                match git(
+                    in_repo(&["diff", "--name-only", "-z", "--no-renames", &b, &a]),
+                    LOCAL_TIMEOUT,
+                )
+                .await
+                {
+                    Ok(out) => changed_paths(&out, p.subdir),
+                    Err(_) => WriterPaths::All,
+                }
+            }
+        }
+        _ => WriterPaths::All,
+    };
 
     // Mirror the tree (or a sub-directory of it) into the webroot, dropping
     // `.git` so history is never served. A trailing slash on the source makes
@@ -622,12 +675,46 @@ async fn sync_inner(
         .chars()
         .take(200)
         .collect::<String>();
-    Ok(GitSyncLast {
-        commit: sha,
-        status: "ok".into(),
-        message: subject,
-        ..Default::default()
+    Ok(Deployed {
+        last: GitSyncLast {
+            commit: sha,
+            status: "ok".into(),
+            message: subject,
+            ..Default::default()
+        },
+        paths,
     })
+}
+
+/// A full object name, as git prints it. Checked before it goes back to git as an
+/// argument.
+fn is_rev(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Most names a diff may carry before the deploy just says "everything".
+const CHANGED_MAX: usize = 200_000;
+
+/// The webroot-relative names in `git diff --name-only -z` output. The checkout
+/// holds the whole branch and only `subdir` of it is deployed, so a name outside
+/// it changed nothing in the webroot and one inside it loses the prefix.
+fn changed_paths(diff: &str, subdir: &str) -> WriterPaths {
+    let sub = subdir.trim().trim_matches('/');
+    let mut out = Vec::new();
+    for name in diff.split('\0').filter(|n| !n.is_empty()) {
+        if out.len() >= CHANGED_MAX {
+            return WriterPaths::All;
+        }
+        let rel = if sub.is_empty() {
+            name
+        } else if let Some(rest) = name.strip_prefix(sub).and_then(|r| r.strip_prefix('/')) {
+            rest
+        } else {
+            continue;
+        };
+        out.push(rel.to_string());
+    }
+    WriterPaths::List(out)
 }
 
 /// Remove the checkout and git's private HOME (on disconnect). Runs as the
@@ -877,6 +964,44 @@ fn random_tag() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_diff_names_become_webroot_paths() {
+        let diff = "index.php\0web/app.php\0web/img/a.png\0docs/x.php\0";
+        // Whole repo: every name.
+        let WriterPaths::List(all) = changed_paths(diff, "") else {
+            panic!("not a list")
+        };
+        assert_eq!(all.len(), 4);
+        // A sub-directory deploy: only what is under it, without the prefix.
+        assert_eq!(
+            changed_paths(diff, "/web/"),
+            WriterPaths::List(vec!["app.php".into(), "img/a.png".into()])
+        );
+        // A name that merely starts with it is another directory.
+        assert_eq!(
+            changed_paths("website/a.php\0", "web"),
+            WriterPaths::List(Vec::new())
+        );
+        // No change at all is an empty list, not "everything".
+        assert_eq!(changed_paths("", ""), WriterPaths::List(Vec::new()));
+    }
+
+    #[test]
+    fn a_huge_diff_just_says_everything() {
+        let diff = "a.php\0".repeat(CHANGED_MAX + 1);
+        assert_eq!(changed_paths(&diff, ""), WriterPaths::All);
+    }
+
+    #[test]
+    fn only_a_full_object_name_goes_back_to_git() {
+        assert!(is_rev(&"a".repeat(40)));
+        assert!(is_rev(&"0f".repeat(32)));
+        assert!(!is_rev("--output=/etc/passwd"));
+        assert!(!is_rev(&"g".repeat(40)));
+        assert!(!is_rev("abc1234"));
+        assert!(!is_rev(""));
+    }
 
     #[test]
     fn repo_urls() {

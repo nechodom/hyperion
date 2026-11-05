@@ -13,6 +13,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use hyperion_adapters::sitescan::accept::{self, WriterPaths};
 use hyperion_adapters::sitescan::baseline::{Baseline, BaselineEntry};
 use hyperion_adapters::sitescan::discover::discover;
 use hyperion_adapters::sitescan::manifest::{
@@ -20,7 +21,8 @@ use hyperion_adapters::sitescan::manifest::{
 };
 use hyperion_adapters::sitescan::rules::RULE_PACK_VERSION;
 use hyperion_adapters::sitescan::scan::{
-    metadata_hash, own_manifest, scan_site, ScanInput, ScanMode, SiteScanOutcome, WriterKind,
+    metadata_hash, own_manifest, scan_site, ScanInput, ScanMode, SiteScanOutcome, WriterAccepted,
+    WriterKind,
 };
 use hyperion_adapters::sitescan::TenantRoot;
 use hyperion_types::{FindingKind, SiteFileFinding};
@@ -56,8 +58,10 @@ struct Site {
     known: Option<BTreeSet<String>>,
     /// What the agent would hand the scan as vouched for.
     trusted: std::cell::RefCell<BTreeMap<String, [u8; 32]>>,
-    /// What the agent would hand the scan when a deploy or a restore just wrote.
-    accept_since: Cell<Option<(WriterKind, i64)>>,
+    /// What the agent would hand the scan after a deploy or a restore.
+    accepted: std::cell::RefCell<Option<WriterAccepted>>,
+    /// What the agent says the per-site files should hold.
+    own_expected: std::cell::RefCell<BTreeMap<String, [u8; 32]>>,
     /// When the running agent started, for the grace on Hyperion's own files.
     own_files_since: Cell<i64>,
 }
@@ -74,7 +78,8 @@ impl Site {
             baseline: base.join("baselines").join("7"),
             known: Some(BTreeSet::new()),
             trusted: Default::default(),
-            accept_since: Cell::new(None),
+            accepted: Default::default(),
+            own_expected: Default::default(),
             own_files_since: Cell::new(0),
             _t: t,
         }
@@ -244,7 +249,8 @@ impl Site {
             mode,
             now: NOW,
             wporg_known_slugs: self.known.clone(),
-            accept_since: self.accept_since.get(),
+            accepted: self.accepted.borrow().clone(),
+            own_expected: self.own_expected.borrow().clone(),
             own_files_since: self.own_files_since.get(),
             trusted: self.trusted.borrow().clone(),
         };
@@ -264,6 +270,23 @@ impl Site {
         self.trusted
             .borrow_mut()
             .insert(rel.to_string(), link_sha(target));
+    }
+
+    /// A writer of ours has finished: the worker's hash job runs over the tree and
+    /// the agent reads its list back, as a scan will.
+    fn writer_done(&self, kind: WriterKind, paths: WriterPaths) -> accept::Hashed {
+        let out = self
+            .baseline
+            .parent()
+            .expect("dir")
+            .join("accepted")
+            .join("7");
+        let h = accept::writer_hash(&self.root, kind, &paths, &out, &|| false).expect("hash");
+        match accept::load_accepted(&out, unix_now()) {
+            accept::Loaded::Found(a, _) => *self.accepted.borrow_mut() = Some(a),
+            accept::Loaded::Nothing => panic!("no list written"),
+        }
+        h
     }
 
     fn trust(&self, rel: &str) {
@@ -1777,7 +1800,8 @@ fn a_root_that_cannot_be_opened_is_an_error_not_a_clean_scan() {
         mode: ScanMode::Delta,
         now: NOW,
         wporg_known_slugs: None,
-        accept_since: None,
+        accepted: None,
+        own_expected: BTreeMap::new(),
         own_files_since: 0,
         trusted: BTreeMap::new(),
     };
@@ -2626,23 +2650,30 @@ const LOADER: &str = "wp-content/mu-plugins/hyperion.php";
 const MAIL_MODULE: &str = "wp-content/mu-plugins/hyperion/mail.php";
 const STATUS_MODULE: &str = "wp-content/mu-plugins/hyperion/status.php";
 
+fn rendered_mail() -> String {
+    hyperion_adapters::wpmail::render_mu_plugin(
+        "example.cz",
+        "wordpress@example.cz",
+        "/home/u/example.cz/logs/wp-mail-failures.log",
+        hyperion_adapters::wpmail::MailPolicy::PinFrom,
+    )
+}
+
 /// What the install tick leaves in `mu-plugins`: every embedded file as the
-/// running binary renders it, and the two it writes per site.
+/// running binary renders it, and the two it writes per site. The agent says
+/// what the mail module should hold.
 fn install_hyperion_plugin(s: &Site) {
+    use hyperion_adapters::wpplugin::ManagedContent;
     for f in hyperion_adapters::wpplugin::managed_files() {
-        if let Some(body) = f.content {
+        if let ManagedContent::Fixed(body) = f.content {
             s.write(&f.rel, body);
         }
     }
-    s.write(
-        MAIL_MODULE,
-        hyperion_adapters::wpmail::render_mu_plugin(
-            "example.cz",
-            "wordpress@example.cz",
-            "/home/u/example.cz/logs/wp-mail-failures.log",
-            hyperion_adapters::wpmail::MailPolicy::PinFrom,
-        ),
-    );
+    let mail = rendered_mail();
+    s.write(MAIL_MODULE, &mail);
+    s.own_expected
+        .borrow_mut()
+        .insert(MAIL_MODULE.to_string(), sha_of(mail.as_bytes()));
     s.write(
         STATUS_MODULE,
         hyperion_adapters::wpplugin::render_status(&Default::default()),
@@ -2669,6 +2700,12 @@ fn the_manifest_is_built_from_what_the_binary_embeds() {
         );
     }
     assert!(!m.contains_key(MAIL_MODULE) && !m.contains_key(STATUS_MODULE));
+    // Every module is accounted for, from the list the plugin itself keeps.
+    use hyperion_adapters::wpplugin::{managed_files, module_rel, Module};
+    let files: Vec<String> = managed_files().into_iter().map(|f| f.rel).collect();
+    for module in Module::ALL {
+        assert!(files.contains(&module_rel(module)), "{module:?}");
+    }
 }
 
 #[test]
@@ -2692,6 +2729,7 @@ fn own_mu_plugin_matches_after_agent_update_no_review() {
     assert!(b
         .verified
         .contains_key("wp-content/mu-plugins/hyperion/regguard.php"));
+    assert!(b.verified.contains_key(MAIL_MODULE));
 
     // And a rewrite with the same bytes is still nothing.
     settle();
@@ -2779,24 +2817,121 @@ fn a_rule_hit_in_an_own_file_is_a_finding_even_in_the_grace() {
 }
 
 #[test]
-fn the_per_site_modules_get_the_rules_and_no_change_detection() {
+fn a_tampered_mail_module_is_a_finding() {
     let s = Site::new();
     s.wordpress();
     install_hyperion_plugin(&s);
     s.scan();
     settle();
-    // A new domain, a new status: the agent rewrites these constantly.
+    // Code that hits no rule: only the agent's rendering knows it isn't ours.
+    s.append(
+        MAIL_MODULE,
+        b"\nadd_action('init', function () { $x = 1; });\n",
+    );
+    let out = s.scan();
+    let f = item(&out.findings, MAIL_MODULE);
+    assert_eq!(f.kind, FindingKind::UpstreamModified);
+    assert_eq!(f.source_label.as_deref(), Some("hyperion"));
+
+    // Rewritten for another domain, and the agent says so: fine again.
+    settle();
+    let other = hyperion_adapters::wpmail::render_mu_plugin(
+        "other.cz",
+        "wordpress@other.cz",
+        "/x/log",
+        hyperion_adapters::wpmail::MailPolicy::HandsOff,
+    );
+    s.write(MAIL_MODULE, &other);
+    s.own_expected
+        .borrow_mut()
+        .insert(MAIL_MODULE.to_string(), sha_of(other.as_bytes()));
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+
+    // The grace is the same one.
+    settle();
+    s.append(MAIL_MODULE, b"\n// old\n");
+    s.own_files_since.set(NOW - 60);
+    let out = s.scan();
+    assert_eq!(
+        item(&out.review, MAIL_MODULE).kind,
+        FindingKind::UpstreamModified
+    );
+}
+
+#[test]
+fn a_mail_module_the_agent_gave_no_expectation_for_has_only_the_rules() {
+    let s = Site::new();
+    s.wordpress();
+    install_hyperion_plugin(&s);
+    s.own_expected.borrow_mut().clear();
+    s.scan();
+    settle();
     s.write(MAIL_MODULE, "<?php // another domain\n");
-    s.write(STATUS_MODULE, "<?php return array();\n");
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    settle();
+    s.append(MAIL_MODULE, &EVAL[5..]);
+    assert_eq!(
+        item(&s.scan().findings, MAIL_MODULE).kind,
+        FindingKind::RuleHit
+    );
+}
+
+#[test]
+fn the_status_page_is_judged_by_its_shape() {
+    let s = Site::new();
+    s.wordpress();
+    install_hyperion_plugin(&s);
+    s.scan();
+    settle();
+    // The agent rewrites it every hour with new data: nothing to review.
+    let status = hyperion_adapters::wpplugin::SiteStatus {
+        checked_at: 1_800_000_123,
+        domain: "it's.example.cz".into(),
+        ..Default::default()
+    };
+    s.write(
+        STATUS_MODULE,
+        hyperion_adapters::wpplugin::render_status(&status),
+    );
     let out = s.scan();
     assert_eq!(rels(&out.review), Vec::<&str>::new());
     assert_eq!(rels(&out.findings), Vec::<&str>::new());
 
-    // But what is in them is still inspected.
+    // A second statement, or a quote that ends the literal, is code.
+    for evil in [
+        format!(
+            "{}echo 1;\n",
+            hyperion_adapters::wpplugin::render_status(&status)
+        ),
+        hyperion_adapters::wpplugin::render_status(&status)
+            .replace("'{", "'{'); system($_GET[0]); $x = ('"),
+        "<?php\nreturn array();\n".to_string(),
+    ] {
+        settle();
+        s.write(STATUS_MODULE, &evil);
+        let out = s.scan();
+        let f = item(&out.findings, STATUS_MODULE);
+        assert_eq!(f.kind, FindingKind::UpstreamModified, "{evil}");
+        assert_eq!(f.source_label.as_deref(), Some("hyperion"));
+    }
+
+    // The right shape does not excuse what the rules find in it.
     settle();
-    s.append(MAIL_MODULE, &EVAL[5..]);
-    let out = s.scan();
-    assert_eq!(item(&out.findings, MAIL_MODULE).kind, FindingKind::RuleHit);
+    let hit = hyperion_adapters::wpplugin::SiteStatus {
+        domain: "eval(base64_decode($_POST[0]))".into(),
+        ..Default::default()
+    };
+    let body = hyperion_adapters::wpplugin::render_status(&hit);
+    assert!(hyperion_adapters::wpplugin::status_shape_ok(&body));
+    s.write(STATUS_MODULE, &body);
+    assert_eq!(
+        item(&s.scan().findings, STATUS_MODULE).kind,
+        FindingKind::RuleHit
+    );
 }
 
 /// A site that has been scanned once, with a theme of its own and a root file.
@@ -2810,13 +2945,19 @@ fn deployable_site() -> Site {
     s
 }
 
+fn list(names: &[&str]) -> WriterPaths {
+    WriterPaths::List(names.iter().map(|n| n.to_string()).collect())
+}
+
 #[test]
 fn git_deploy_changes_accepted_when_no_rule_hit() {
     let s = deployable_site();
-    s.accept_since
-        .set(Some((WriterKind::GitDeploy, unix_now() - 5)));
     s.write("custom.php", "<?php // deployed\n");
     s.write("wp-content/themes/kid/new.php", "<?php // new\n");
+    s.writer_done(
+        WriterKind::GitDeploy,
+        list(&["custom.php", "wp-content/themes/kid/new.php"]),
+    );
     let out = s.scan();
     assert_eq!(rels(&out.review), Vec::<&str>::new());
     assert_eq!(rels(&out.findings), Vec::<&str>::new());
@@ -2829,8 +2970,8 @@ fn git_deploy_changes_accepted_when_no_rule_hit() {
     assert_eq!(a.source_label.as_deref(), Some("changed by deploy"));
     assert_eq!(a.sha256, hex::encode(sha_of(b"<?php // deployed\n")));
 
-    // Remembered: with the mark gone nothing is pending.
-    s.accept_since.set(None);
+    // Remembered: with the list gone nothing is pending.
+    *s.accepted.borrow_mut() = None;
     let next = s.scan();
     assert_eq!(rels(&next.review), Vec::<&str>::new());
     assert!(next.auto_accepted.is_empty());
@@ -2839,10 +2980,12 @@ fn git_deploy_changes_accepted_when_no_rule_hit() {
 #[test]
 fn git_deploy_rule_hit_is_finding() {
     let s = deployable_site();
-    s.accept_since
-        .set(Some((WriterKind::GitDeploy, unix_now() - 5)));
     s.write("wp-content/themes/kid/shell.php", EVAL);
     s.write("custom.php", "<?php // deployed\n");
+    s.writer_done(
+        WriterKind::GitDeploy,
+        list(&["custom.php", "wp-content/themes/kid/shell.php"]),
+    );
     let out = s.scan();
     assert_eq!(
         item(&out.findings, "wp-content/themes/kid/shell.php").kind,
@@ -2857,13 +3000,17 @@ fn git_deploy_rule_hit_is_finding() {
 }
 
 #[test]
+fn a_rule_hit_in_a_deploy_is_a_finding() {
+    git_deploy_rule_hit_is_finding();
+}
+
+#[test]
 fn restore_of_infected_backup_is_flagged() {
     let s = deployable_site();
-    s.accept_since
-        .set(Some((WriterKind::Restore, unix_now() - 5)));
     s.write("wp-content/themes/kid/footer.php", SHELL);
     s.write("wp-content/themes/kid/functions.php", FOOTER);
     s.write("custom.php", "<?php // restored\n");
+    s.writer_done(WriterKind::Restore, WriterPaths::All);
     let out = s.scan();
     let flagged = rels(&out.findings);
     assert!(
@@ -2875,7 +3022,7 @@ fn restore_of_infected_backup_is_flagged() {
             || rels(&out.review).contains(&"wp-content/themes/kid/functions.php"),
         "the appended footer hook must not be accepted"
     );
-    assert_eq!(out.auto_accepted, ["custom.php"]);
+    assert!(out.auto_accepted.contains(&"custom.php".to_string()));
     assert_eq!(
         item(&out.accepted_by_writer, "custom.php")
             .source_label
@@ -2884,29 +3031,101 @@ fn restore_of_infected_backup_is_flagged() {
     );
 }
 
+/// A restore chmods and chowns the whole tree, so every change time in it is new.
+/// The list is by hash, and a file that was already waiting for review is not on
+/// it, whatever its ctime says.
 #[test]
-fn a_file_older_than_the_mark_is_judged_as_usual() {
+fn a_pending_file_isnt_laundered_by_a_restore() {
+    use std::os::unix::fs::PermissionsExt;
     let s = deployable_site();
-    s.write("custom.php", "<?php // edited over FTP\n");
+    // Planted by someone, evading every rule: waiting for a person.
+    s.write("wp-content/themes/kid/planted.php", "<?php // quiet\n");
+    let pending = s.scan();
+    assert_eq!(rels(&pending.review), ["wp-content/themes/kid/planted.php"]);
     settle();
-    // The deploy came after the edit.
-    s.accept_since
-        .set(Some((WriterKind::GitDeploy, unix_now() + 100)));
+
+    // The restore puts back one file, then repairs permissions on everything.
+    s.write("custom.php", "<?php // restored\n");
+    for rel in ["custom.php", "wp-content/themes/kid/planted.php"] {
+        fs::set_permissions(s.path(rel), fs::Permissions::from_mode(0o600)).expect("chmod");
+        fs::set_permissions(s.path(rel), fs::Permissions::from_mode(0o644)).expect("chmod");
+    }
+    s.writer_done(WriterKind::Restore, list(&["custom.php"]));
     let out = s.scan();
-    assert_eq!(rels(&out.review), ["custom.php"]);
+    assert_eq!(out.auto_accepted, ["custom.php"]);
+    assert_eq!(rels(&out.review), ["wp-content/themes/kid/planted.php"]);
+}
+
+/// A restore that can't say what it wrote lists everything, and then a file that
+/// was already waiting is on the list at its present hash. That is the restore's
+/// own tree: the planted file is the restored file only if their bytes match.
+#[test]
+fn a_file_written_after_the_hash_stays_review() {
+    let s = deployable_site();
+    s.write("custom.php", "<?php // deployed\n");
+    s.writer_done(WriterKind::GitDeploy, list(&["custom.php"]));
+    // The tenant swaps it for something else before the scan gets there.
+    settle();
+    s.write("custom.php", "<?php // swapped\n");
+    let out = s.scan();
     assert!(out.auto_accepted.is_empty());
+    assert_eq!(rels(&out.review), ["custom.php"]);
     assert!(out.accepted_by_writer.is_empty());
 }
 
 #[test]
-fn a_file_changed_in_the_marks_own_second_is_accepted() {
+fn a_noop_deploy_accepts_nothing() {
+    let s = deployable_site();
+    // Someone edits a file over FTP; the deploy then changes nothing.
+    s.write("custom.php", "<?php // edited over FTP\n");
+    s.writer_done(WriterKind::GitDeploy, WriterPaths::List(Vec::new()));
+    let out = s.scan();
+    assert!(out.auto_accepted.is_empty());
+    assert_eq!(rels(&out.review), ["custom.php"]);
+}
+
+#[test]
+fn an_unnamed_file_during_a_deploy_stays_review() {
     let s = deployable_site();
     s.write("custom.php", "<?php // deployed\n");
-    let ctime = fs::metadata(s.path("custom.php")).expect("stat").ctime();
-    s.accept_since.set(Some((WriterKind::GitDeploy, ctime)));
+    s.write(
+        "wp-content/themes/kid/other.php",
+        "<?php // not in the diff\n",
+    );
+    s.writer_done(WriterKind::GitDeploy, list(&["custom.php"]));
     let out = s.scan();
-    assert_eq!(rels(&out.review), Vec::<&str>::new());
     assert_eq!(out.auto_accepted, ["custom.php"]);
+    assert_eq!(rels(&out.review), ["wp-content/themes/kid/other.php"]);
+}
+
+#[test]
+fn accepted_past_the_cap_goes_to_review() {
+    let s = deployable_site();
+    let names: Vec<String> = (0..205).map(|i| format!("deploy/f{i:03}.php")).collect();
+    for n in &names {
+        s.write(n, format!("<?php // {n}\n"));
+    }
+    s.writer_done(WriterKind::GitDeploy, WriterPaths::List(names.clone()));
+    let out = s.scan();
+    assert_eq!(out.auto_accepted.len(), 200);
+    assert_eq!(out.accepted_by_writer.len(), 200);
+    // The rest are in front of a person, and not remembered as accepted.
+    assert_eq!(out.review.len(), 5);
+    assert!(out.review.iter().all(|f| f.rel.starts_with("deploy/")));
+    // The scan was complete, so the list is spent.
+    *s.accepted.borrow_mut() = None;
+    let again = s.scan();
+    assert_eq!(again.review.len(), 5, "still pending, not silently kept");
+}
+
+#[test]
+fn a_failed_hash_job_means_normal_review() {
+    let s = deployable_site();
+    s.write("custom.php", "<?php // deployed\n");
+    // Nothing was handed to the scan.
+    assert!(s.accepted.borrow().is_none());
+    let out = s.scan();
+    assert_eq!(rels(&out.review), ["custom.php"]);
 }
 
 #[test]
@@ -2916,13 +3135,12 @@ fn a_manifest_mismatch_is_not_overridden_by_a_writer() {
     s.verified_plugin("elementor", "3.25.0", &[("a.php", b"<?php // a\n")]);
     s.scan();
     settle();
-    s.accept_since
-        .set(Some((WriterKind::GitDeploy, unix_now() - 5)));
     s.write(
         "wp-content/plugins/elementor/a.php",
         "<?php // not upstream\n",
     );
     s.write("wp-includes/load.php", "<?php // not core\n");
+    s.writer_done(WriterKind::Restore, WriterPaths::All);
     let out = s.scan();
     assert!(out.auto_accepted.is_empty(), "{:?}", out.auto_accepted);
     item(&out.findings, "wp-content/plugins/elementor/a.php");
@@ -2941,15 +3159,14 @@ fn file_manager_edit_is_review() {
 #[test]
 fn copied_site_starts_fresh_with_rules() {
     // The destination of a Move/Copy has no baseline: everything is looked at
-    // by the rules, and the writer's mark doesn't turn the first scan into a
-    // list of accepted files.
+    // by the rules, and a writer's list doesn't turn the first scan into a list
+    // of accepted files.
     let s = Site::new();
     s.wordpress();
     s.child_theme("kid");
     s.write("wp-content/themes/kid/footer.php", SHELL);
     s.write("custom.php", "<?php // copied\n");
-    s.accept_since
-        .set(Some((WriterKind::Restore, unix_now() - 5)));
+    s.writer_done(WriterKind::Restore, WriterPaths::All);
     let out = s.scan();
     assert_eq!(
         item(&out.findings, "wp-content/themes/kid/footer.php").kind,
@@ -2958,4 +3175,214 @@ fn copied_site_starts_fresh_with_rules() {
     assert_eq!(rels(&out.review), Vec::<&str>::new());
     assert!(out.auto_accepted.is_empty());
     assert!(out.accepted_by_writer.is_empty());
+}
+
+// The hash job itself.
+
+#[test]
+fn the_hash_covers_code_types_only() {
+    let s = Site::new();
+    s.wordpress();
+    for (rel, body) in [
+        ("a.php", "<?php\n"),
+        ("b.phtml", "<?php\n"),
+        ("c.js", "var c;\n"),
+        ("d.mjs", "export {};\n"),
+        (".htaccess", "Require all granted\n"),
+        (".user.ini", "a=b\n"),
+        ("e.txt", "text\n"),
+        ("f.css", "a{}\n"),
+        ("g.png", "png\n"),
+        (".maintenance", "<?php\n"),
+        ("sub/dir/h.php", "<?php\n"),
+    ] {
+        s.write(rel, body);
+    }
+    let out = s.baseline.parent().expect("dir").join("accepted").join("7");
+    let h = accept::writer_hash(
+        &s.root,
+        WriterKind::Restore,
+        &WriterPaths::All,
+        &out,
+        &|| false,
+    )
+    .expect("hash");
+    let accept::Loaded::Found(a, _) = accept::load_accepted(&out, unix_now()) else {
+        panic!("no list")
+    };
+    let mut names: Vec<&str> = a.files.keys().map(String::as_str).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            ".htaccess",
+            ".user.ini",
+            "a.php",
+            "b.phtml",
+            "c.js",
+            "d.mjs",
+            "index.php",
+            "sub/dir/h.php",
+            "wp-admin/admin.php",
+            "wp-config.php",
+            "wp-includes/load.php",
+            "wp-includes/version.php",
+            "wp-load.php",
+            "wp-settings.php"
+        ]
+    );
+    assert!(!a.files.contains_key("e.txt") && !a.files.contains_key("f.css"));
+    assert!(!a.files.contains_key(".maintenance") && !a.files.contains_key("g.png"));
+    assert!(a.files.contains_key("sub/dir/h.php") && a.files.contains_key(".htaccess"));
+    assert!(!h.partial);
+    // Root-only.
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&out).expect("meta").permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn the_hash_does_not_follow_links_or_names_that_leave_the_tree() {
+    let s = Site::new();
+    s.write("a.php", "<?php\n");
+    let outside = s._t.path().join("outside.php");
+    fs::write(&outside, "<?php // outside\n").expect("write");
+    std::os::unix::fs::symlink(&outside, s.path("link.php")).expect("link");
+    let out = s.baseline.parent().expect("dir").join("accepted").join("7");
+    accept::writer_hash(
+        &s.root,
+        WriterKind::GitDeploy,
+        &list(&[
+            "a.php",
+            "link.php",
+            "../outside.php",
+            "/etc/passwd",
+            "",
+            "a/../a.php",
+        ]),
+        &out,
+        &|| false,
+    )
+    .expect("hash");
+    let accept::Loaded::Found(a, _) = accept::load_accepted(&out, unix_now()) else {
+        panic!("no list")
+    };
+    assert_eq!(a.files.keys().collect::<Vec<_>>(), ["a.php"]);
+}
+
+#[test]
+fn two_deploys_before_a_scan_add_up_and_another_kind_replaces() {
+    let s = Site::new();
+    s.write("a.php", "<?php // a\n");
+    s.write("b.php", "<?php // b\n");
+    let out = s.baseline.parent().expect("dir").join("accepted").join("7");
+    let hash = |kind, names: &[&str]| {
+        accept::writer_hash(&s.root, kind, &list(names), &out, &|| false).expect("hash");
+        match accept::load_accepted(&out, unix_now()) {
+            accept::Loaded::Found(a, _) => a,
+            accept::Loaded::Nothing => panic!("no list"),
+        }
+    };
+    hash(WriterKind::GitDeploy, &["a.php"]);
+    let both = hash(WriterKind::GitDeploy, &["b.php"]);
+    assert_eq!(both.files.len(), 2);
+    let restore = hash(WriterKind::Restore, &["b.php"]);
+    assert_eq!(restore.kind, WriterKind::Restore);
+    assert_eq!(restore.files.keys().collect::<Vec<_>>(), ["b.php"]);
+}
+
+#[test]
+fn a_stopped_hash_is_partial_and_lists_what_it_got() {
+    let s = Site::new();
+    for i in 0..600 {
+        s.write(&format!("d/f{i:03}.php"), format!("<?php // {i}\n"));
+    }
+    let out = s.baseline.parent().expect("dir").join("accepted").join("7");
+    let calls = Cell::new(0);
+    let h = accept::writer_hash(
+        &s.root,
+        WriterKind::Restore,
+        &WriterPaths::All,
+        &out,
+        &|| {
+            calls.set(calls.get() + 1);
+            calls.get() > 1
+        },
+    )
+    .expect("hash");
+    assert!(h.partial);
+    assert!(h.listed > 0 && h.listed < 600, "{}", h.listed);
+}
+
+#[test]
+fn a_list_is_old_after_seven_days_and_the_sweep_removes_dead_ones() {
+    let s = Site::new();
+    s.write("a.php", "<?php\n");
+    let dir = s.baseline.parent().expect("dir").join("accepted");
+    let out = dir.join("7");
+    accept::writer_hash(
+        &s.root,
+        WriterKind::GitDeploy,
+        &list(&["a.php"]),
+        &out,
+        &|| false,
+    )
+    .expect("hash");
+    let week = 7 * 24 * 3600;
+    assert!(matches!(
+        accept::load_accepted(&out, unix_now() + week - 60),
+        accept::Loaded::Found(..)
+    ));
+    assert!(matches!(
+        accept::load_accepted(&out, unix_now() + week + 60),
+        accept::Loaded::Nothing
+    ));
+    assert!(!out.exists(), "removed on the read that found it old");
+
+    accept::writer_hash(
+        &s.root,
+        WriterKind::GitDeploy,
+        &list(&["a.php"]),
+        &out,
+        &|| false,
+    )
+    .expect("hash");
+    assert_eq!(accept::purge_expired(&dir, unix_now() + week - 60), 0);
+    assert_eq!(accept::purge_expired(&dir, unix_now() + week + 60), 1);
+}
+
+#[test]
+fn a_spent_list_goes_but_a_newer_one_stays() {
+    let s = Site::new();
+    s.write("a.php", "<?php\n");
+    s.write("b.php", "<?php\n");
+    let out = s.baseline.parent().expect("dir").join("accepted").join("7");
+    accept::writer_hash(
+        &s.root,
+        WriterKind::GitDeploy,
+        &list(&["a.php"]),
+        &out,
+        &|| false,
+    )
+    .expect("hash");
+    let accept::Loaded::Found(_, read) = accept::load_accepted(&out, unix_now()) else {
+        panic!("no list")
+    };
+    accept::writer_hash(
+        &s.root,
+        WriterKind::GitDeploy,
+        &list(&["b.php"]),
+        &out,
+        &|| false,
+    )
+    .expect("hash");
+    accept::spend_accepted(&out, &read);
+    assert!(out.exists());
+    let accept::Loaded::Found(_, now) = accept::load_accepted(&out, unix_now()) else {
+        panic!("no list")
+    };
+    accept::spend_accepted(&out, &now);
+    assert!(!out.exists());
 }

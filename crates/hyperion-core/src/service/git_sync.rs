@@ -340,14 +340,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 Err(e) => Err((e.to_string(), String::new())),
                 Ok(auth) => {
                     let home = self.home_dir_for(detail.system_user.as_str());
-                    // What the checkout changes is ours to account for: the scan
-                    // runs its rules over it instead of asking anyone to review it.
-                    self.scan_mark_writer(
-                        id,
-                        hyperion_adapters::sitescan::scan::WriterKind::GitDeploy,
-                    )
-                    .await;
-                    let synced = g::sync(g::SyncParams {
+                    g::sync_with_paths(g::SyncParams {
                         repo: &config.repo,
                         branch: config.effective_branch(),
                         subdir: &config.subdir,
@@ -357,11 +350,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         site_key: detail.id.as_str(),
                         auth,
                     })
-                    .await;
-                    self.scan_writer_done(id).await;
-                    synced
+                    .await
                 }
             }
+        };
+        self.git_sync_finish(&detail, outcome, trigger, actor).await
+    }
+
+    /// What a deploy leaves behind once git and rsync are done: the card's last
+    /// run and history, the audit line, the page cache, and the scan's list of
+    /// what the deploy wrote. A deploy that failed records no list: part of the
+    /// tree may be changed, and the scan reviews it like any other change.
+    pub(super) async fn git_sync_finish(
+        &self,
+        detail: &HostingDetail,
+        outcome: Result<hyperion_adapters::gitsync::Deployed, (String, String)>,
+        trigger: String,
+        actor: String,
+    ) -> Result<hyperion_types::gitsync::GitSyncLast, RpcError> {
+        use hyperion_types::gitsync as t;
+        let id = detail.id.as_str();
+        let (outcome, paths) = match outcome {
+            Ok(d) => (Ok(d.last), Some(d.paths)),
+            Err(e) => (Err(e), None),
         };
         let last = match outcome {
             Ok(l) => t::GitSyncLast {
@@ -414,6 +425,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             return Err(RpcError::Validation {
                 message: last.message.clone(),
             });
+        }
+        if let Some(paths) = paths {
+            self.scan_writer_done(
+                detail,
+                hyperion_adapters::sitescan::scan::WriterKind::GitDeploy,
+                paths,
+            )
+            .await;
         }
         self.purge_page_cache_after(id, "hosting.gitsync.deploy")
             .await;

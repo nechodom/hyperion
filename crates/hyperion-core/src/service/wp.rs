@@ -1419,6 +1419,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_adapters::wpcli::emergency_rename_plugin(&detail.root_dir, &slug, false)
             .await
             .map_err(|e| RpcError::Internal_with(e.to_string()))?;
+        self.scan_writer_done(
+            &detail,
+            hyperion_adapters::sitescan::scan::WriterKind::Restore,
+            hyperion_adapters::sitescan::accept::WriterPaths::All,
+        )
+        .await;
         let _ = self
             .wp_plugin_action(
                 sel,

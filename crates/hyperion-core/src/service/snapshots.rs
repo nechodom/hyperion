@@ -596,6 +596,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // removed it before the permission repair (see restore_from_staging).
         let _ = tokio::fs::remove_dir_all(&staging).await;
         let (secure_dump, kept_aside) = staged?;
+        if mode.restores_files() {
+            // The restored tree is whatever the snapshot held, infected or not:
+            // the scan accepts what hashes to it and the rules pass.
+            self.scan_writer_done(
+                &detail,
+                hyperion_adapters::sitescan::scan::WriterKind::Restore,
+                hyperion_adapters::sitescan::accept::WriterPaths::All,
+            )
+            .await;
+        }
 
         let mut db_restored = false;
         if let (Some(db), Some(dump)) = (detail.database.as_ref(), secure_dump.as_deref()) {

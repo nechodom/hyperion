@@ -7,6 +7,7 @@ use hyperion_adapters::sitescan::runner::{WorkerJob, WorkerReply};
 use hyperion_adapters::sitescan::scan::SiteScanOutcome;
 use hyperion_types::{FindingKind, QuarantineList, QuarantinedFile, SiteFileFinding};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Mutex as StdMutex;
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -765,6 +766,10 @@ async fn the_worker_is_handed_the_trust_list() {
     let log = inputs.clone();
     let mut a = happy_mocks();
     a.expect_site_scan_worker().returning(move |job| match job {
+        WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+            listed: 0,
+            partial: false,
+        },
         WorkerJob::Discover { .. } => WorkerReply::Discovery(Default::default()),
         WorkerJob::Scan(i) => {
             log.lock().expect("lock").push(i);
@@ -790,6 +795,10 @@ async fn the_worker_is_handed_the_trust_list() {
 async fn trust_cleared_when_content_changes() {
     let mut a = happy_mocks();
     a.expect_site_scan_worker().returning(move |job| match job {
+        WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+            listed: 0,
+            partial: false,
+        },
         WorkerJob::Discover { .. } => WorkerReply::Discovery(Default::default()),
         WorkerJob::Scan(_) => WorkerReply::Scan(SiteScanOutcome {
             review: vec![finding("changed.php", FindingKind::BaselineChange, SHA2)],
@@ -935,6 +944,10 @@ fn verified_clean() -> hyperion_types::WpIntegrityScanResult {
 async fn an_edited_record_is_not_clean_until_a_scan_stores_one() {
     let mut a = happy_mocks();
     a.expect_site_scan_worker().returning(move |job| match job {
+        WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+            listed: 0,
+            partial: false,
+        },
         WorkerJob::Discover { .. } => WorkerReply::Discovery(Default::default()),
         WorkerJob::Scan(_) => WorkerReply::Scan(SiteScanOutcome {
             upstream: hyperion_adapters::sitescan::scan::UpstreamResult {
@@ -1060,6 +1073,10 @@ async fn quarantine_then_restore_keeps_the_clamav_hit() {
         .returning(move |_| Ok(take.lock().expect("lock").clone().expect("was held")));
     // The scan that follows finds nothing wrong: it doesn't speak for ClamAV.
     a.expect_site_scan_worker().returning(move |job| match job {
+        WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+            listed: 0,
+            partial: false,
+        },
         WorkerJob::Discover { .. } => WorkerReply::Discovery(Default::default()),
         WorkerJob::Scan(_) => WorkerReply::Scan(SiteScanOutcome {
             upstream: hyperion_adapters::sitescan::scan::UpstreamResult {
@@ -1354,211 +1371,370 @@ async fn reinstall_theme_needs_a_version() {
     assert!(e.to_string().contains("scan again"), "{e}");
 }
 
-// A writer of ours (git deploy, restore) marks the tree before it writes, and the
-// scan that follows is told.
+// A writer of ours (git deploy, restore) hashes what it left; the scan after it is
+// handed that list, and spends it only when it has looked at everything.
 
+use hyperion_adapters::sitescan::accept::{self, AcceptedRecord, WriterPaths};
+use hyperion_adapters::sitescan::runner::execute;
 use hyperion_adapters::sitescan::scan::{ScanInput, WriterKind};
 
-const PENDING_KEY: &str = "scan_pending_accept";
+type Jobs = Arc<StdMutex<Vec<WorkerJob>>>;
 
-/// A site whose worker logs every scan input it is handed.
-async fn watched_worker(
-    reply: impl Fn() -> WorkerReply + Send + Sync + 'static,
-) -> (
-    HostingService<MockAdapterPort>,
-    SqlitePool,
-    String,
-    Arc<StdMutex<Vec<ScanInput>>>,
-) {
-    let inputs = Arc::new(StdMutex::new(Vec::new()));
-    let log = inputs.clone();
-    let mut a = happy_mocks();
-    a.expect_site_scan_worker().returning(move |job| match job {
-        WorkerJob::Discover { .. } => WorkerReply::Discovery(Default::default()),
-        WorkerJob::Scan(i) => {
-            log.lock().expect("lock").push(i);
-            reply()
-        }
-    });
-    a.expect_site_scan_evict_manifests().returning(|_| ());
-    let (s, pool, _, id) = fixture(a, result(vec![], vec![])).await;
-    (s, pool, id, inputs)
+/// One site on a node whose scan directory and docroot are real, with a worker
+/// that logs what it is asked and, for a hash job, really does it.
+struct Rig {
+    s: HostingService<MockAdapterPort>,
+    pool: SqlitePool,
+    detail: HostingDetail,
+    scan_dir: std::path::PathBuf,
+    inputs: Arc<StdMutex<Vec<ScanInput>>>,
+    hashes: Jobs,
+    _t: tempfile::TempDir,
 }
 
-async fn pending(pool: &SqlitePool, id: &str) -> Option<String> {
-    hyperion_state::hosting_kv::get(pool, id, PENDING_KEY)
-        .await
-        .expect("kv")
-}
-
-#[tokio::test]
-async fn the_scan_after_a_writer_is_told_and_clears_the_mark_when_stored() {
-    let (s, pool, id, inputs) =
-        watched_worker(|| WorkerReply::Scan(SiteScanOutcome::default())).await;
-    s.scan_mark_writer(&id, WriterKind::GitDeploy).await;
-    let mark = pending(&pool, &id).await.expect("marked");
-    let (name, since) = mark.split_once(':').expect("kind:ts");
-    assert_eq!(name, "git_deploy");
-    let since: i64 = since.parse().expect("ts");
-    // Marking alone queues nothing: the writer hasn't finished.
-    assert_eq!(s.scan_request_flag(&id).await, None);
-
-    s.scan_writer_done(&id).await;
-    assert!(s.scan_request_flag(&id).await.is_some());
-    s.site_scan_tick_at(&chrono::Utc, 2_000_000)
-        .await
-        .expect("tick");
-
-    {
-        let got = inputs.lock().expect("lock");
-        assert_eq!(got[0].accept_since, Some((WriterKind::GitDeploy, since)));
-        assert_eq!(got[0].own_files_since, s.site_scan.started_at);
-        assert!(got[0].own_files_since > 0);
-        // Any scheduled scan that follows is told nothing.
-        assert!(got[1..].iter().all(|i| i.accept_since.is_none()));
-    }
-    assert_eq!(pending(&pool, &id).await, None, "cleared with the result");
-}
-
-#[tokio::test]
-async fn a_scan_with_no_writer_is_told_nothing() {
-    let (s, _pool, id, inputs) =
-        watched_worker(|| WorkerReply::Scan(SiteScanOutcome::default())).await;
-    s.wp_integrity_scan_request(HostingSelector::Id(
-        s.get(HostingSelector::Id(HostingId(id.clone())))
-            .await
-            .expect("get")
-            .id,
-    ))
-    .await
-    .expect("request");
-    s.site_scan_tick_at(&chrono::Utc, 2_000_000)
-        .await
-        .expect("tick");
-    assert_eq!(inputs.lock().expect("lock")[0].accept_since, None);
-}
-
-#[tokio::test]
-async fn a_scan_that_did_not_run_leaves_the_mark() {
-    let (s, pool, id, inputs) = watched_worker(|| WorkerReply::Failed("boom".into())).await;
-    s.scan_mark_writer(&id, WriterKind::Restore).await;
-    s.scan_writer_done(&id).await;
-    s.site_scan_tick_at(&chrono::Utc, 2_000_000)
-        .await
-        .expect("tick");
-    assert!(!inputs.lock().expect("lock").is_empty());
-    let mark = pending(&pool, &id).await.expect("still marked");
-    assert!(mark.starts_with("restore:"), "{mark}");
-}
-
-/// A deploy that marks again while a scan runs is about files that scan may not
-/// have seen.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_newer_mark_made_during_the_scan_stays() {
-    let pool = open_memory().await.expect("open");
-    let id_slot = Arc::new(StdMutex::new(String::new()));
-    let (during, slot) = (pool.clone(), id_slot.clone());
-    // Every scan of the tick finds the writer marking again while it runs.
-    let scans = Arc::new(std::sync::atomic::AtomicI64::new(0));
-    let counted = scans.clone();
-    let mut a = happy_mocks();
-    a.expect_site_scan_worker().returning(move |job| match job {
-        WorkerJob::Discover { .. } => WorkerReply::Discovery(Default::default()),
-        WorkerJob::Scan(_) => {
-            let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            let id = slot.lock().expect("lock").clone();
-            let pool = during.clone();
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let mark = format!("git_deploy:{}", 3_000_000_000 + n);
-                    hyperion_state::hosting_kv::set(&pool, &id, PENDING_KEY, &mark, 1)
-                        .await
-                        .expect("kv")
-                })
-            });
-            WorkerReply::Scan(SiteScanOutcome::default())
-        }
-    });
-    a.expect_site_scan_evict_manifests().returning(|_| ());
-    let s = svc(pool.clone(), a);
-    let site = s.create(req("acts.cz")).await.expect("create");
-    let id = site.id.as_str().to_string();
-    *id_slot.lock().expect("lock") = id.clone();
-    s.set_stored_integrity_scan(
-        &id,
-        &StoredIntegrityScan {
-            scanned_at: 1_000,
-            result: result(vec![], vec![]),
+impl Rig {
+    async fn new(
+        hash: fn(WorkerJob) -> WorkerReply,
+        scan: impl Fn(&Path) -> SiteScanOutcome + Send + Sync + 'static,
+    ) -> Rig {
+        let t = tempfile::tempdir().expect("tmp");
+        let base = t.path().canonicalize().expect("canonical");
+        let scan_dir = base.join("scan");
+        let inputs = Arc::new(StdMutex::new(Vec::new()));
+        let hashes: Jobs = Arc::new(StdMutex::new(Vec::new()));
+        let (log, hlog) = (inputs.clone(), hashes.clone());
+        let accepted_dir = scan_dir.join("accepted");
+        let mut a = happy_mocks();
+        a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::Discover { .. } => WorkerReply::Discovery(Default::default()),
+            WorkerJob::Scan(i) => {
+                log.lock().expect("lock").push(i);
+                WorkerReply::Scan(scan(&accepted_dir))
+            }
+            job @ WorkerJob::WriterHash { .. } => {
+                hlog.lock().expect("lock").push(job.clone());
+                hash(job)
+            }
+        });
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), a).with_paths(HostingPaths {
+            home_root: base.join("home").display().to_string(),
+            scan_dir: scan_dir.display().to_string(),
+            backup_root: base.join("backups").display().to_string(),
             ..Default::default()
-        },
+        });
+        let site = s.create(req("acts.cz")).await.expect("create");
+        let detail = s.get(HostingSelector::Id(site.id)).await.expect("get");
+        std::fs::create_dir_all(&detail.root_dir).expect("docroot");
+        std::fs::create_dir_all(scan_dir.join("accepted")).expect("accepted");
+        s.set_stored_integrity_scan(
+            detail.id.as_str(),
+            &StoredIntegrityScan {
+                scanned_at: 1_000,
+                result: result(vec![], vec![]),
+                ..Default::default()
+            },
+        )
+        .await;
+        Rig {
+            s,
+            pool,
+            detail,
+            scan_dir,
+            inputs,
+            hashes,
+            _t: t,
+        }
+    }
+
+    fn id(&self) -> &str {
+        self.detail.id.as_str()
+    }
+
+    fn list_path(&self) -> std::path::PathBuf {
+        self.scan_dir.join("accepted").join(self.id())
+    }
+
+    fn write(&self, rel: &str, body: &str) {
+        let p = Path::new(&self.detail.root_dir).join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(p, body).expect("write");
+    }
+
+    async fn tick(&self) {
+        self.s
+            .site_scan_tick_at(&chrono::Utc, 2_000_000)
+            .await
+            .expect("tick");
+    }
+}
+
+fn clean_scan(_: &Path) -> SiteScanOutcome {
+    SiteScanOutcome::default()
+}
+
+/// The hash job as the worker does it.
+fn really_hash(job: WorkerJob) -> WorkerReply {
+    execute(job, &|| false)
+}
+
+fn sha_hex(b: &str) -> String {
+    hex::encode(hyperion_adapters::wpplugin::expected_digest(b))
+}
+
+#[tokio::test]
+async fn a_finished_writer_is_hashed_in_the_workers_own_unit_and_its_scan_queued() {
+    let r = Rig::new(really_hash, clean_scan).await;
+    r.write("a.php", "<?php // a\n");
+    r.s.scan_writer_done(
+        &r.detail,
+        WriterKind::GitDeploy,
+        WriterPaths::List(vec![
+            "a.php".into(),
+            "../etc/passwd".into(),
+            "notes.txt".into(),
+        ]),
     )
     .await;
-    hyperion_state::hosting_kv::set(&pool, &id, PENDING_KEY, "git_deploy:3000000000", 1)
-        .await
-        .expect("kv");
-    s.scan_writer_done(&id).await;
-    s.site_scan_tick_at(&chrono::Utc, 2_000_000)
-        .await
-        .expect("tick");
-    let n = scans.load(std::sync::atomic::Ordering::SeqCst);
-    assert!(n >= 1);
-    assert_eq!(
-        pending(&pool, &id).await,
-        Some(format!("git_deploy:{}", 3_000_000_000 + n))
+
+    let jobs = r.hashes.lock().expect("lock").clone();
+    let [WorkerJob::WriterHash {
+        root,
+        kind,
+        paths,
+        out,
+    }] = jobs.as_slice()
+    else {
+        panic!("{jobs:?}")
+    };
+    assert_eq!(root, Path::new(&r.detail.root_dir));
+    assert_eq!(*kind, WriterKind::GitDeploy);
+    assert!(matches!(paths, WriterPaths::List(l) if l.len() == 3));
+    assert_eq!(out, &r.list_path());
+    assert!(r.s.scan_request_flag(r.id()).await.is_some());
+
+    // Only the code file named, by the hash of what was there; the traversal and
+    // the text file were not opened.
+    let accept::Loaded::Found(got, _) = accept::load_accepted(&r.list_path(), 1) else {
+        panic!("no list")
+    };
+    assert_eq!(got.kind, WriterKind::GitDeploy);
+    let want = hex::decode(sha_hex("<?php // a\n")).expect("hex");
+    assert_eq!(got.files.len(), 1);
+    assert_eq!(got.files["a.php"].as_slice(), want.as_slice());
+}
+
+#[tokio::test]
+async fn the_scan_after_a_writer_is_handed_its_list_and_spends_it() {
+    let r = Rig::new(really_hash, clean_scan).await;
+    r.write("a.php", "<?php // a\n");
+    r.s.scan_writer_done(
+        &r.detail,
+        WriterKind::Restore,
+        WriterPaths::List(vec!["a.php".into()]),
+    )
+    .await;
+    r.tick().await;
+
+    let inputs = r.inputs.lock().expect("lock");
+    let got = inputs[0].accepted.as_ref().expect("handed the list");
+    assert_eq!(got.kind, WriterKind::Restore);
+    assert!(got.files.contains_key("a.php"));
+    assert_eq!(inputs[0].own_files_since, r.s.site_scan.started_at);
+    assert!(inputs[0].own_files_since > 0);
+    // Any scan after that is told nothing: the list was spent with the result.
+    assert!(inputs[1..].iter().all(|i| i.accepted.is_none()));
+    drop(inputs);
+    assert!(!r.list_path().exists(), "spent by a complete scan");
+}
+
+#[tokio::test]
+async fn a_scan_that_did_not_finish_leaves_the_list() {
+    let r = Rig::new(really_hash, |_| SiteScanOutcome {
+        stopped: true,
+        ..Default::default()
+    })
+    .await;
+    r.write("a.php", "<?php // a\n");
+    r.s.scan_writer_done(
+        &r.detail,
+        WriterKind::GitDeploy,
+        WriterPaths::List(vec!["a.php".into()]),
+    )
+    .await;
+    r.tick().await;
+    assert!(!r.inputs.lock().expect("lock").is_empty());
+    assert!(
+        r.list_path().exists(),
+        "a stopped scan never saw part of it"
     );
 }
 
 #[tokio::test]
-async fn a_mark_that_makes_no_sense_marks_nothing() {
-    for junk in [
-        "",
-        "git_deploy",
-        "git_deploy:soon",
-        "git_deploy:0",
-        "ftp:5",
-        "restore:-3",
-    ] {
-        let (s, pool, id, inputs) =
-            watched_worker(|| WorkerReply::Scan(SiteScanOutcome::default())).await;
-        hyperion_state::hosting_kv::set(&pool, &id, PENDING_KEY, junk, 1)
-            .await
-            .expect("kv");
-        s.scan_writer_done(&id).await;
-        s.site_scan_tick_at(&chrono::Utc, 2_000_000)
-            .await
-            .expect("tick");
-        assert_eq!(
-            inputs.lock().expect("lock")[0].accept_since,
-            None,
-            "{junk:?}"
-        );
-    }
+async fn a_list_written_during_the_scan_stays() {
+    let r = Rig::new(really_hash, |accepted| {
+        // A second deploy finishes while the scan runs, for another kind of
+        // writer: its list replaces the first.
+        for ent in std::fs::read_dir(accepted).expect("ls").flatten() {
+            let rec = AcceptedRecord {
+                kind: WriterKind::Restore,
+                written_at: 1_999_999_999,
+                files: [("later.php".to_string(), "00".repeat(32))].into(),
+            };
+            std::fs::write(ent.path(), serde_json::to_vec(&rec).expect("json")).expect("write");
+        }
+        SiteScanOutcome::default()
+    })
+    .await;
+    r.write("a.php", "<?php // a\n");
+    r.s.scan_writer_done(
+        &r.detail,
+        WriterKind::GitDeploy,
+        WriterPaths::List(vec!["a.php".into()]),
+    )
+    .await;
+    r.tick().await;
+    let accept::Loaded::Found(left, _) = accept::load_accepted(&r.list_path(), 1) else {
+        panic!("the newer list was spent with the older one")
+    };
+    assert!(left.files.contains_key("later.php"));
 }
 
 #[tokio::test]
-async fn a_site_that_is_not_scanned_is_not_marked() {
-    let (s, pool, id, _inputs) =
-        watched_worker(|| WorkerReply::Scan(SiteScanOutcome::default())).await;
-    hyperion_state::hosting_kv::set(&pool, &id, "integrity_scan_enabled", "off", 1)
+async fn a_list_older_than_seven_days_is_ignored_and_removed() {
+    let r = Rig::new(really_hash, clean_scan).await;
+    let rec = AcceptedRecord {
+        kind: WriterKind::GitDeploy,
+        // The tick runs at 2_000_000.
+        written_at: 2_000_000 - 7 * 24 * 3600,
+        files: [("a.php".to_string(), "00".repeat(32))].into(),
+    };
+    std::fs::write(r.list_path(), serde_json::to_vec(&rec).expect("json")).expect("write");
+    r.tick().await;
+    assert!(r.inputs.lock().expect("lock")[0].accepted.is_none());
+    assert!(!r.list_path().exists());
+}
+
+#[tokio::test]
+async fn a_failed_hash_job_means_normal_review() {
+    let r = Rig::new(|_| WorkerReply::Failed("boom".into()), clean_scan).await;
+    r.write("a.php", "<?php // a\n");
+    r.s.scan_writer_done(
+        &r.detail,
+        WriterKind::GitDeploy,
+        WriterPaths::List(vec!["a.php".into()]),
+    )
+    .await;
+    // Nothing recorded, so nothing is handed to the scan, which still runs.
+    assert!(!r.list_path().exists());
+    assert!(r.s.scan_request_flag(r.id()).await.is_some());
+    r.tick().await;
+    assert!(r.inputs.lock().expect("lock")[0].accepted.is_none());
+}
+
+#[tokio::test]
+async fn a_site_that_is_not_scanned_is_not_hashed() {
+    let r = Rig::new(really_hash, clean_scan).await;
+    hyperion_state::hosting_kv::set(&r.pool, r.id(), "integrity_scan_enabled", "off", 1)
         .await
         .expect("kv");
-    s.scan_mark_writer(&id, WriterKind::GitDeploy).await;
-    s.scan_writer_done(&id).await;
-    assert_eq!(pending(&pool, &id).await, None);
-    assert_eq!(s.scan_request_flag(&id).await, None);
+    r.s.scan_writer_done(&r.detail, WriterKind::GitDeploy, WriterPaths::All)
+        .await;
+    assert!(r.hashes.lock().expect("lock").is_empty());
+    assert_eq!(r.s.scan_request_flag(r.id()).await, None);
 }
 
-/// A restore marks before it extracts and queues the scan after it. The archive
-/// is a real tar.gz, extracted by the real sandboxed extractor.
 #[tokio::test]
-async fn a_restore_marks_the_site_and_queues_its_scan() {
-    let dir = tempfile::tempdir().expect("tmp");
-    let base = dir.path().canonicalize().expect("canonical");
+async fn a_purged_site_leaves_no_list() {
+    let r = Rig::new(really_hash, clean_scan).await;
+    r.write("a.php", "<?php // a\n");
+    r.s.scan_writer_done(
+        &r.detail,
+        WriterKind::GitDeploy,
+        WriterPaths::List(vec!["a.php".into()]),
+    )
+    .await;
+    assert!(r.list_path().exists());
+    remove_site_scan_state(&r.s.paths, r.id()).await;
+    assert!(!r.list_path().exists());
+}
+
+#[tokio::test]
+async fn the_mail_module_is_handed_to_the_scan_as_rendered() {
+    use hyperion_adapters::{wpmail, wpplugin};
+    let r = Rig::new(really_hash, clean_scan).await;
+    r.tick().await;
+    let inputs = r.inputs.lock().expect("lock");
+    let log = wpmail::failure_log_path(&r.detail.root_dir)
+        .expect("log")
+        .display()
+        .to_string();
+    let body = wpmail::render_mu_plugin(
+        &r.detail.domain,
+        &wpmail::default_from(&r.detail.domain),
+        &log,
+        wpmail::MailPolicy::PinFrom,
+    );
+    assert_eq!(
+        inputs[0].own_expected[&wpplugin::module_rel(wpplugin::Module::Mail)],
+        wpplugin::expected_digest(&body)
+    );
+}
+
+/// The deploy's half: its record, then the hash of exactly what it named.
+#[tokio::test]
+async fn a_successful_deploy_hashes_what_it_changed_and_a_failed_one_nothing() {
+    use hyperion_adapters::gitsync::Deployed;
+    use hyperion_types::gitsync::GitSyncLast;
+    let r = Rig::new(really_hash, clean_scan).await;
+    r.write("a.php", "<?php // a\n");
+    let ok = Deployed {
+        last: GitSyncLast {
+            commit: "abc1234".into(),
+            status: "ok".into(),
+            ..Default::default()
+        },
+        paths: WriterPaths::List(vec!["a.php".into()]),
+    };
+    r.s.git_sync_finish(&r.detail, Ok(ok), "manual".into(), "me".into())
+        .await
+        .expect("recorded");
+    {
+        let jobs = r.hashes.lock().expect("lock");
+        let [WorkerJob::WriterHash { kind, paths, .. }] = jobs.as_slice() else {
+            panic!("{jobs:?}")
+        };
+        assert_eq!(*kind, WriterKind::GitDeploy);
+        assert_eq!(*paths, WriterPaths::List(vec!["a.php".into()]));
+    }
+
+    r.hashes.lock().expect("lock").clear();
+    let err =
+        r.s.git_sync_finish(
+            &r.detail,
+            Err(("rsync failed".into(), String::new())),
+            "manual".into(),
+            "me".into(),
+        )
+        .await;
+    assert!(err.is_err());
+    assert!(r.hashes.lock().expect("lock").is_empty());
+}
+
+/// The restore's half, through the real extractor: the archive's own members are
+/// what gets hashed.
+#[tokio::test]
+async fn a_restore_hashes_the_archive_members() {
+    let r = Rig::new(really_hash, clean_scan).await;
+    let base = r.scan_dir.parent().expect("base").to_path_buf();
     let backups = base.join("backups");
     let src = base.join("src");
     std::fs::create_dir_all(&backups).expect("mkdir");
-    std::fs::create_dir_all(src.join("htdocs")).expect("mkdir");
+    std::fs::create_dir_all(src.join("htdocs/wp-content")).expect("mkdir");
     std::fs::write(src.join("htdocs/index.php"), "<?php // restored\n").expect("write");
+    std::fs::write(src.join("htdocs/wp-content/x.js"), "var x;\n").expect("write");
+    std::fs::write(src.join("htdocs/readme.txt"), "text\n").expect("write");
     let archive = backups.join("a.tar.gz");
     let tar = std::process::Command::new("tar")
         .env("COPYFILE_DISABLE", "1")
@@ -1571,24 +1747,30 @@ async fn a_restore_marks_the_site_and_queues_its_scan() {
         .expect("tar");
     assert!(tar.success());
 
-    let pool = open_memory().await.expect("open");
-    let s = svc(pool.clone(), happy_mocks()).with_paths(HostingPaths {
-        home_root: base.join("home").display().to_string(),
-        backup_root: backups.display().to_string(),
-        ..Default::default()
-    });
-    let site = s.create(req("acts.cz")).await.expect("create");
-    let id = site.id.as_str().to_string();
-
-    s.backup_restore(
-        HostingSelector::Id(site.id.clone()),
+    r.s.backup_restore(
+        HostingSelector::Id(r.detail.id.clone()),
         archive.display().to_string(),
         hyperion_types::BackupRestoreMode::FilesOnly,
     )
     .await
     .expect("restore");
 
-    let mark = pending(&pool, &id).await.expect("marked");
-    assert!(mark.starts_with("restore:"), "{mark}");
-    assert!(s.scan_request_flag(&id).await.is_some());
+    let jobs = r.hashes.lock().expect("lock").clone();
+    let [WorkerJob::WriterHash { kind, paths, .. }] = jobs.as_slice() else {
+        panic!("{jobs:?}")
+    };
+    assert_eq!(*kind, WriterKind::Restore);
+    let WriterPaths::List(names) = paths else {
+        panic!("not a list: {paths:?}")
+    };
+    let mut names = names.clone();
+    names.sort();
+    assert_eq!(names, ["index.php", "readme.txt", "wp-content/x.js"]);
+    assert!(r.s.scan_request_flag(r.id()).await.is_some());
+    // Hashed after the extraction: the code files are on the list, with the
+    // content they have now.
+    let accept::Loaded::Found(got, _) = accept::load_accepted(&r.list_path(), 1) else {
+        panic!("no list")
+    };
+    assert_eq!(got.files.len(), 2);
 }

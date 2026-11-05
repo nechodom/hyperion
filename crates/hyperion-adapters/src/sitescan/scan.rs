@@ -38,6 +38,7 @@ use super::rules::{
     inspect, inspect_as_php, is_php_like, RuleHit, Severity, INSPECT_MAX_BYTES, RULE_PACK_VERSION,
 };
 use super::walk::{FileMeta, SkipReason, TenantRoot, WalkEvent, WalkOpts, WalkStats};
+use crate::wpplugin::{managed_files, status_shape_ok, ManagedContent};
 use crate::AdapterError;
 
 const PAUSE_EVERY_FILES: u64 = 256;
@@ -147,6 +148,14 @@ pub enum WriterKind {
     Restore,
 }
 
+/// The hashed list a writer left, as the agent read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriterAccepted {
+    pub kind: WriterKind,
+    #[serde(default)]
+    pub files: BTreeMap<String, [u8; 32]>,
+}
+
 impl WriterKind {
     /// What the card says next to a file this writer changed.
     pub fn label(self) -> &'static str {
@@ -170,11 +179,16 @@ pub struct ScanInput {
     /// the answer wasn't available, and then no slug gets it.
     #[serde(default)]
     pub wporg_known_slugs: Option<BTreeSet<String>>,
-    /// A writer (git deploy, backup restore) wrote into the tree at or after this
-    /// time. What it changed, with no rule hit, is accepted and listed rather than
-    /// sent to review. Rule hits and manifest comparisons are unaffected.
+    /// What a writer of ours (git deploy, restore) left, by path and hash. A new
+    /// or changed file whose content is exactly that, and which no rule hits, is
+    /// accepted and listed rather than sent to review. Rule hits and manifest
+    /// comparisons are unaffected, and so is every file not on the list.
     #[serde(default)]
-    pub accept_since: Option<(WriterKind, i64)>,
+    pub accepted: Option<WriterAccepted>,
+    /// What Hyperion's own per-site files should hold (the mail module), by path,
+    /// as the agent renders them. A file with no entry here has only the rules.
+    #[serde(default)]
+    pub own_expected: BTreeMap<String, [u8; 32]>,
     /// When the running agent started. Hyperion's own files from an older version
     /// are review, not findings, for the hour after. 0 means no grace.
     #[serde(default)]
@@ -354,6 +368,12 @@ fn runs_as_php(rel: &str) -> bool {
     is_php_like(rel) || rel == MAINTENANCE
 }
 
+/// The file types a writer's hash covers: PHP, JavaScript and the files PHP
+/// obeys. `.maintenance` is left out, as a deploy never writes it.
+pub(super) fn is_layer_b_code(rel: &str) -> bool {
+    is_php_like(rel) || is_js(rel) || is_php_settings(rel)
+}
+
 /// The file types Layer B looks at. These are what counts as code.
 fn in_scope(rel: &str) -> bool {
     runs_as_php(rel) || is_js(rel) || is_php_settings(rel)
@@ -439,25 +459,47 @@ fn short_name(rel: &str) -> String {
 }
 
 /// Hyperion's own files in a docroot, by path, with the digest the running
-/// binary expects. A file whose bytes depend on the site (the mail module, the
-/// status page) has no digest and is not in here.
+/// binary expects. A file whose bytes depend on the site (the mail module) or on
+/// the hour (the status page) has no compiled-in digest and is not in here.
 pub fn own_manifest() -> BTreeMap<String, Digest> {
-    crate::wpplugin::managed_files()
+    managed_files()
         .into_iter()
-        .filter_map(|f| {
-            let digest = Sha256::digest(f.content?.as_bytes()).into();
-            Some((f.rel, Digest::Sha256(digest)))
+        .filter_map(|f| match f.content {
+            ManagedContent::Fixed(body) => Some((
+                f.rel,
+                Digest::Sha256(Sha256::digest(body.as_bytes()).into()),
+            )),
+            _ => None,
         })
         .collect()
 }
 
-/// The ones that have no digest: rules inspect them, and nothing watches them
-/// for change, since the agent rewrites them whenever the site's settings do.
-fn own_per_site() -> HashSet<String> {
-    crate::wpplugin::managed_files()
+/// How one of Hyperion's own files is judged.
+#[derive(Clone)]
+enum OwnCheck {
+    /// By a digest: compiled in, or the agent's rendering of it.
+    Digest(Digest),
+    /// By its shape, then the rules.
+    Status,
+    /// Only the rules: the agent gave no expected content for it.
+    RulesOnly,
+}
+
+fn own_checks(expected: &BTreeMap<String, [u8; 32]>) -> BTreeMap<String, OwnCheck> {
+    managed_files()
         .into_iter()
-        .filter(|f| f.content.is_none())
-        .map(|f| f.rel)
+        .map(|f| {
+            let check = match f.content {
+                ManagedContent::Fixed(body) => {
+                    OwnCheck::Digest(Digest::Sha256(Sha256::digest(body.as_bytes()).into()))
+                }
+                ManagedContent::PerSite => expected.get(&f.rel).map_or(OwnCheck::RulesOnly, |h| {
+                    OwnCheck::Digest(Digest::Sha256(*h))
+                }),
+                ManagedContent::Status => OwnCheck::Status,
+            };
+            (f.rel, check)
+        })
         .collect()
 }
 
@@ -720,8 +762,7 @@ struct Scan<'a> {
     /// Index of core, when it has a manifest.
     core: Option<usize>,
     /// What Hyperion writes into a docroot.
-    own: BTreeMap<String, Digest>,
-    own_per_site: HashSet<String>,
+    own: BTreeMap<String, OwnCheck>,
     by_root: HashMap<&'a str, usize>,
     seen: Seen,
     skip_counts: BTreeMap<SkipReason, (u64, String)>,
@@ -855,8 +896,7 @@ impl<'a> Scan<'a> {
             rules_bumped,
             comps,
             core,
-            own: own_manifest(),
-            own_per_site: own_per_site(),
+            own: own_checks(&input.own_expected),
             by_root,
             seen: Seen {
                 state: RandomState::new(),
@@ -1100,8 +1140,10 @@ impl<'a> Scan<'a> {
     }
 
     fn route(&self, rel: &str) -> Route {
-        if self.own.contains_key(rel) {
-            return Route::Own;
+        match self.own.get(rel) {
+            Some(OwnCheck::RulesOnly) => return Route::RulesOnly(None),
+            Some(_) => return Route::Own,
+            None => {}
         }
         let owner = self.owner(rel);
         match owner {
@@ -1134,9 +1176,6 @@ impl<'a> Scan<'a> {
     fn route_unverified(&self, rel: &str, owner: Option<usize>) -> Route {
         if !in_scope(rel) {
             return Route::Ignore;
-        }
-        if self.own_per_site.contains(rel) {
-            return Route::RulesOnly(owner);
         }
         if rel == MAINTENANCE {
             return Route::RulesOnly(owner);
@@ -1307,13 +1346,17 @@ impl<'a> Scan<'a> {
         self.remember_verified(m, &read, id);
     }
 
-    /// One of Hyperion's own files: the digest the binary was built with speaks
-    /// for it, and a match needs no rules.
+    /// One of Hyperion's own files: the digest it was written from speaks for it
+    /// and a match needs no rules. The status page is judged by its shape, then by
+    /// the rules.
     fn own_file(&mut self, m: &FileMeta) {
-        let Some(digest) = self.own.get(&m.rel).cloned() else {
+        let Some(check) = self.own.get(&m.rel).cloned() else {
             return;
         };
-        let id = own_id(&digest);
+        let id = match &check {
+            OwnCheck::Digest(d) => own_id(d),
+            _ => "hyperion/shape".to_string(),
+        };
         self.baseline.churn.remove(&m.rel);
         if self.input.mode == ScanMode::Delta
             && self.baseline.verified.get(&m.rel) == Some(&id)
@@ -1328,11 +1371,27 @@ impl<'a> Scan<'a> {
         let Some(read) = self.read(m, false) else {
             return;
         };
-        if digest_matches(&digest, &read) {
+        let fits = match &check {
+            OwnCheck::Digest(d) => digest_matches(d, &read),
+            _ => {
+                read.head.len() <= INSPECT_MAX_BYTES
+                    && std::str::from_utf8(&read.head).is_ok_and(status_shape_ok)
+            }
+        };
+        let rules = !matches!(check, OwnCheck::Digest(_)) || !fits;
+        let hits = if rules {
+            rules_for(&m.rel, &read.head)
+        } else {
+            Vec::new()
+        };
+        if fits && hits.is_empty() {
             return self.remember_verified(m, &read, id);
         }
         self.forget(&m.rel);
-        let hits = rules_for(&m.rel, &read.head);
+        if fits {
+            // Its shape is right, so only what the rules found is the news.
+            return self.report_hits(m, None, &read.sha256, &hits);
+        }
         self.own_mismatch(m, Some(&read.sha256), &hits);
     }
 
@@ -1600,10 +1659,12 @@ impl<'a> Scan<'a> {
             }
             return;
         }
-        // Something we did: the rules found nothing, so it is what we meant.
-        if let Some(label) = self.written_by(m) {
-            self.remember_entry(m, &read);
-            if self.auto_accepted.len() < AUTO_ACCEPTED_CAP {
+        // Something we wrote, and exactly as we wrote it: the rules found nothing,
+        // so it is what we meant. Past the audit cap nothing is remembered
+        // unlisted: it goes to review instead.
+        if self.auto_accepted.len() < AUTO_ACCEPTED_CAP {
+            if let Some(label) = self.written_by(m, &read.sha256) {
+                self.remember_entry(m, &read);
                 self.auto_accepted.push(m.rel.clone());
                 let item = SiteFileFinding {
                     component: self.component_of(owner),
@@ -1611,8 +1672,8 @@ impl<'a> Scan<'a> {
                     ..self.base_item(&m.rel, FindingKind::BaselineChange, Some(&read.sha256))
                 };
                 self.accepted_by_writer.push(item);
+                return;
             }
-            return;
         }
         // With the baseline full, "no entry" says nothing about the file: the
         // rules found nothing, and the partial reason covers the rest.
@@ -1627,11 +1688,10 @@ impl<'a> Scan<'a> {
         self.push_review(item);
     }
 
-    /// The writer that changed this file, if one was at work: its change time is
-    /// at or after the mark. A tenant can set a file's mtime but not its ctime.
-    fn written_by(&self, m: &FileMeta) -> Option<&'static str> {
-        let (kind, since) = self.input.accept_since?;
-        (m.ctime >= since).then(|| kind.label())
+    /// The writer whose list holds this path with exactly this content.
+    fn written_by(&self, m: &FileMeta, sha: &[u8; 32]) -> Option<&'static str> {
+        let acc = self.input.accepted.as_ref()?;
+        (acc.files.get(&m.rel) == Some(sha)).then(|| acc.kind.label())
     }
 
     /// Churn paths: rules on what's new by its metadata, and nothing else. A
@@ -2040,7 +2100,8 @@ mod tests {
             mode: ScanMode::Delta,
             now: 1,
             wporg_known_slugs: Some(BTreeSet::new()),
-            accept_since: None,
+            accepted: None,
+            own_expected: BTreeMap::new(),
             own_files_since: 0,
             trusted: BTreeMap::new(),
         }

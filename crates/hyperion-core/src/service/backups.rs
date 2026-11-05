@@ -2,6 +2,8 @@
 //! settings.
 
 use super::*;
+use hyperion_adapters::sitescan::accept::WriterPaths;
+use hyperion_adapters::sitescan::scan::WriterKind;
 
 impl<A: AdapterPort + 'static> HostingService<A> {
     /// The full backup taken before an automatic update batch. Local only
@@ -1888,21 +1890,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             tracing::info!(domain = %detail.domain, archive = %canonical.display(),
                 mode = mode.as_str(), "restoring backup files");
             // The archive can be infected, so the scan still runs its rules over
-            // what it puts back; it only isn't asked to review every file.
-            self.scan_mark_writer(
-                detail.id.as_str(),
-                hyperion_adapters::sitescan::scan::WriterKind::Restore,
-            )
-            .await;
+            // what it puts back; what it may accept is the archive's own list of
+            // files, hashed after the permission repair below.
             let restore_result =
-                hyperion_adapters::backup::restore_archive(&canonical, &host_root).await;
-            if let Err(e) = restore_result {
-                self.scan_writer_done(detail.id.as_str()).await;
-                return Err(RpcError::ProvisioningFailed {
-                    stage: "tar_extract".into(),
-                    reason: e.to_string(),
-                });
-            }
+                hyperion_adapters::backup::restore_archive_listing(&canonical, &host_root).await;
+            let listed = match restore_result {
+                Ok((_, names)) => names,
+                Err(e) => {
+                    // Part of the archive may be in the tree.
+                    self.scan_writer_done(&detail, WriterKind::Restore, WriterPaths::All)
+                        .await;
+                    return Err(RpcError::ProvisioningFailed {
+                        stage: "tar_extract".into(),
+                        reason: e.to_string(),
+                    });
+                }
+            };
             // `tar -xzf` as root PRESERVES the archive's ownership, so a
             // restore from another box — or from a backup taken when the uid
             // differed — leaves the tree owned by someone the site user is
@@ -1916,7 +1919,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "restore: permission repair failed — the site may be unwritable"
                 );
             }
-            self.scan_writer_done(detail.id.as_str()).await;
+            let paths = listed.map_or(WriterPaths::All, WriterPaths::List);
+            self.scan_writer_done(&detail, WriterKind::Restore, paths)
+                .await;
         }
 
         // 2. Look for sibling .sql dump and restore it if hosting has a DB

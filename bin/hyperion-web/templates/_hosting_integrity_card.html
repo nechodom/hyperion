@@ -356,6 +356,22 @@
     {% endif %}
     {% endif %}
 
+    {# Files our own deploy or restore wrote that no rule objected to. Closed by
+       default: it is a record, not a to-do. #}
+    {% if !scan.accepted_by_writer.is_empty() %}
+    <details class="chk-fold">
+      <summary>{{ scan.accepted_by_writer.len() }} file(s) changed by deploy or restore</summary>
+      <ul class="chk-list chk-files">
+        {% for f in scan.accepted_by_writer %}{% if loop.index0 < 50 %}
+        <li><span class="chk-dot"></span><code>{{ f.rel|tenant_text }}</code>{% if let Some(l) = f.source_label %}<span class="chk-detail">{{ l|tenant_text }}</span>{% endif %}</li>
+        {% endif %}{% endfor %}
+      </ul>
+      {% if scan.accepted_by_writer.len() > 50 %}
+      <p class="chk-note">Showing 50 of {{ scan.accepted_by_writer.len() }} files.</p>
+      {% endif %}
+    </details>
+    {% endif %}
+
     {# ── ClamAV ──────────────────────────────────────────────────────── #}
     {% if !scan.malware.is_empty() %}
     <h4 class="chk-sub">ClamAV detections — {{ scan.malware.len() }}</h4>

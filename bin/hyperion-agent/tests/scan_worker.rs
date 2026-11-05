@@ -60,7 +60,8 @@ async fn a_scan_job_comes_back_as_an_outcome_and_writes_the_baseline() {
         mode: ScanMode::Delta,
         now: 1_700_000_000,
         wporg_known_slugs: None,
-        accept_since: None,
+        accepted: None,
+        own_expected: Default::default(),
         own_files_since: 0,
         trusted: Default::default(),
     });
@@ -73,6 +74,38 @@ async fn a_scan_job_comes_back_as_an_outcome_and_writes_the_baseline() {
     assert!(!out.stopped);
     assert!(out.files_hashed >= 1, "{out:?}");
     assert!(baseline_path.exists());
+}
+
+#[tokio::test]
+async fn a_writer_hash_job_writes_the_list_and_answers_in_one_line() {
+    use hyperion_adapters::sitescan::accept::{load_accepted, Loaded, WriterPaths};
+    use hyperion_adapters::sitescan::scan::WriterKind;
+    let (t, root) = docroot();
+    let out = t
+        .path()
+        .canonicalize()
+        .expect("canonical")
+        .join("accepted/7");
+    let job = WorkerJob::WriterHash {
+        root,
+        kind: WriterKind::GitDeploy,
+        paths: WriterPaths::List(vec!["index.php".into(), "gone.php".into()]),
+        out: out.clone(),
+    };
+    let reply = run_direct(&job, Path::new(AGENT), MAX_REPLY_BYTES)
+        .await
+        .expect("run");
+    assert_eq!(
+        reply,
+        WorkerReply::Hashed {
+            listed: 1,
+            partial: false
+        }
+    );
+    let Loaded::Found(a, _) = load_accepted(&out, 0) else {
+        panic!("no list")
+    };
+    assert_eq!(a.files.keys().collect::<Vec<_>>(), ["index.php"]);
 }
 
 #[test]

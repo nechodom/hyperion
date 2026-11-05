@@ -724,6 +724,10 @@ pub struct WpIntegrityScanResult {
     /// Changes to review: the lower bucket.
     #[serde(default)]
     pub review: Vec<SiteFileFinding>,
+    /// Files a git deploy or a restore changed that no rule objected to, accepted
+    /// without review. `source_label` says which. Not a verdict on them.
+    #[serde(default)]
+    pub accepted_by_writer: Vec<SiteFileFinding>,
     /// Themes with at least one file that failed comparison.
     #[serde(default)]
     pub themes_failed: Vec<WpIntegrityPluginResult>,
