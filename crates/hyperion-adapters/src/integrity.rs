@@ -631,34 +631,23 @@ enum ErrLine {
 }
 
 /// `LibClamAV Warning: cli_scanswf: GETWORD: Can't read file or file truncated`,
-/// `LibClamAV Error: cli_scanxz: decompress error: 1`: a `cli_*` function of the
-/// scanning engine, no path. The ones that load the database or the bytecode,
-/// `cl_*` calls, the unrecognised and the rest stay unknown, and so fail closed.
+/// `LibClamAV Error: cli_scanxz: decompress error: 1`: one of the engine's
+/// `cli_scan*` or `cli_magic_scan*` functions, no path. Everything else, the
+/// functions that load the database or the bytecode, `cl_*` calls and names not
+/// seen yet, stays unknown, and so fails closed.
 fn is_parser_noise(line: &str) -> bool {
-    const NOT_PARSERS: &[&str] = &[
-        "cli_bytecode",
-        "cli_load",
-        "cli_cvd",
-        "cli_dconf",
-        "cli_pcre",
-        "cli_yara",
-        "cli_ref",
-    ];
     let Some(rest) = line
-        .strip_prefix("LibClamAV Warning: cli_")
-        .or_else(|| line.strip_prefix("LibClamAV Error: cli_"))
+        .strip_prefix("LibClamAV Warning: ")
+        .or_else(|| line.strip_prefix("LibClamAV Error: "))
     else {
         return false;
     };
     // `cli_scanswf: …`: a function name, then a colon.
-    let name_end = rest.find(':').unwrap_or(0);
-    name_end > 0
-        && rest[..name_end]
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !NOT_PARSERS
-            .iter()
-            .any(|p| format!("cli_{rest}").starts_with(p))
+    let Some((name, _)) = rest.split_once(':') else {
+        return false;
+    };
+    (name.starts_with("cli_scan") || name.starts_with("cli_magic_scan"))
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn classify_err_line(line: &str, listed: &HashSet<u128>, prev: &mut Option<String>) -> ErrLine {
@@ -1600,6 +1589,7 @@ exit {exit}"#,
         for line in [
             "LibClamAV Warning: cli_scanswf: GETWORD: Can't read file or file truncated",
             "LibClamAV Error: cli_scanxz: decompress error: 1",
+            "LibClamAV Warning: cli_magic_scan_buff: x",
         ] {
             assert_eq!(c(line), ErrLine::Noise, "{line}");
         }
@@ -1611,6 +1601,8 @@ exit {exit}"#,
             "LibClamAV Error: cli_scan : weird",
             "LibClamAV Error: cli_loadhdb: Malformed database",
             "LibClamAV Warning: cli_: x",
+            "LibClamAV Warning: cli_engine_something_new: x",
+            "LibClamAV Error: cli_magic_foo: x",
             "ERROR: Can't open file",
         ] {
             assert_eq!(c(line), ErrLine::Unknown, "{line}");
