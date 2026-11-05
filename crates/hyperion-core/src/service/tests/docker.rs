@@ -1745,8 +1745,109 @@ async fn ingest_sends_docker_alert_outbound() {
     assert_eq!(slack_sends(&s).await, 1, "one Slack post");
     let mail = mail_sends(&s).await;
     assert_eq!(mail.len(), 1, "one mail to the one address: {mail:?}");
-    assert_eq!(mail[0].0, "Docker project has a problem");
+    assert_eq!(mail[0].0, "Docker project has a problem (node_a)");
     assert!(mail[0].1.contains("x: web: exited (1)"), "{mail:?}");
+    assert!(mail[0].1.contains("node_a"), "the body names the node too");
+}
+
+/// A master whose agent.toml gives the panel address `panel.example`.
+async fn panel_master(admins: &[&str]) -> (HostingService<MockAdapterPort>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("dir");
+    let cfg = dir.path().join("agent.toml");
+    std::fs::write(&cfg, b"[cluster]\npanel_hostname = \"panel.example\"\n").expect("write");
+    let s = outbound_master(admins).await.with_agent_config_path(cfg);
+    (s, dir)
+}
+
+#[tokio::test]
+async fn outbound_text_names_the_node_and_links_the_panel() {
+    let (s, _dir) = panel_master(&["boss"]).await;
+    hyperion_state::nodes::insert(
+        &s.pool,
+        &hyperion_state::nodes::NewNode {
+            node_id: "node_a".into(),
+            label: "Tes One".into(),
+            master_url: None,
+            agent_version: "t".into(),
+            public_ip: None,
+            enrolled_via_hash: "h".into(),
+            secret_hash: "s".into(),
+        },
+        1,
+    )
+    .await
+    .expect("node");
+    s.notifications_ingest("node_a", vec![outbox_item(1, "docker.project:x")])
+        .await
+        .expect("ingest");
+    let mail = mail_sends(&s).await;
+    assert_eq!(mail.len(), 1, "{mail:?}");
+    assert_eq!(mail[0].0, "Docker project has a problem (Tes One)");
+    assert!(mail[0].1.contains("Server: Tes One"), "{mail:?}");
+    assert!(
+        mail[0].1.ends_with("\nhttps://panel.example/docker"),
+        "the link is absolute and last: {mail:?}"
+    );
+
+    // What Slack gets is the same subject and body, set into the template.
+    let (subject, body) = (mail[0].0.clone(), mail[0].1.clone());
+    let text = docker_outbound_text(&subject, &body);
+    assert_eq!(
+        text,
+        "*Docker project has a problem (Tes One)*\nServer: Tes One\nx: web: exited (1)\nhttps://panel.example/docker"
+    );
+}
+
+#[tokio::test]
+async fn the_masters_own_alert_says_master_and_a_node_alert_is_not_relabelled() {
+    let (s, _dir) = panel_master(&["boss"]).await;
+    s.notify_admins(
+        "error",
+        "Docker project has a problem",
+        "x: web: exited (1)",
+        "/docker",
+        "docker.project:x",
+    )
+    .await;
+    s.notify_admins(
+        "error",
+        "Docker node has gone silent",
+        "Tes One has not answered",
+        "/docker",
+        "docker.node:node_a",
+    )
+    .await;
+    let mail = mail_sends(&s).await;
+    assert_eq!(mail.len(), 2, "{mail:?}");
+    assert_eq!(mail[0].0, "Docker project has a problem (master)");
+    assert!(mail[0].1.contains("Server: master"), "{mail:?}");
+    assert_eq!(
+        mail[1].0, "Docker node has gone silent",
+        "it is about another node and names it already"
+    );
+    assert!(!mail[1].1.contains("Server:"), "{mail:?}");
+}
+
+#[tokio::test]
+async fn with_no_panel_address_no_relative_link_is_sent() {
+    let s = outbound_master(&["boss"]).await;
+    s.notify_admins("error", "T", "B", "/docker", "docker.daemon")
+        .await;
+    let mail = mail_sends(&s).await;
+    assert_eq!(mail.len(), 1);
+    assert!(!mail[0].1.contains("/docker"), "{mail:?}");
+}
+
+#[test]
+fn the_daemon_letters_do_not_say_this_server() {
+    use crate::letters::{LetterCatalog, LetterLang};
+    for id in ["ops.docker_daemon_down.body", "ops.docker_daemon_up.body"] {
+        for lang in [LetterLang::En, LetterLang::Cs] {
+            let text = LetterCatalog::new(lang).render(id, &[("error", "e")]);
+            assert!(!text.to_lowercase().contains("this server"), "{text}");
+            assert!(!text.contains("tomto serveru"), "{text}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -1872,7 +1973,8 @@ async fn worker_parks_and_does_not_send() {
 
     s.notify_admins("error", "t", "b", "/docker", "docker.project:x")
         .await;
-    s.docker_outbound("t", "b", "docker.project:x").await;
+    s.docker_outbound("master", "t", "b", "/docker", "docker.project:x")
+        .await;
 
     assert_eq!(alerts(&s).await.len(), 1, "parked for the master");
     assert_eq!(slack_sends(&s).await, 0);
@@ -1936,13 +2038,17 @@ async fn a_flood_is_capped_then_summarised_and_the_graver_news_goes_first() {
     );
     let mail = mail_sends(&s).await;
     assert_eq!(mail.len(), OUTBOUND_PER_INGEST + 1, "{mail:?}");
-    assert_eq!(mail[0].0, "docker.daemon");
+    assert_eq!(mail[0].0, "docker.daemon (node_a)");
     assert_eq!(mail[1].0, "docker.node:node_b");
     assert!(mail[2].0.starts_with("docker.project:p"), "{mail:?}");
     let (subject, body) = &mail[OUTBOUND_PER_INGEST];
     assert_eq!(subject, "More Docker alerts");
     assert!(body.contains("20 more"), "30 - 10 = 20 unsent: {body}");
-    assert!(body.contains("/docker"), "and where to read them: {body}");
+    assert!(body.contains("node_a"), "from which server: {body}");
+    assert!(
+        !body.contains("/docker"),
+        "no panel address, no relative link: {body}"
+    );
 }
 
 #[tokio::test]

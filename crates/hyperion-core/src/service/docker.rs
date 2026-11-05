@@ -215,10 +215,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if !changed {
             return Ok(false);
         }
-        let label = match hyperion_state::nodes::get_by_node_id(&self.pool, node_id).await {
-            Ok(Some(n)) if !n.label.trim().is_empty() => n.label,
-            _ => node_id.to_string(),
-        };
+        let label = self.docker_node_label(node_id).await;
         let kind = format!("docker.node:{node_id}");
         if silent {
             self.notify_admins_say(

@@ -743,7 +743,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         admins.sort_unstable();
         let mut written = 0;
         // Docker alerts that were new, to go out once the rows are committed.
-        let mut outbound: Vec<(String, String, String)> = Vec::new();
+        let mut outbound: Vec<(String, String, String, String)> = Vec::new();
         let mut failed = None;
         'items: for it in items {
             let row = hyperion_state::notifications::OutboxRow {
@@ -802,7 +802,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // Queued even when a later admin's write failed: the first
             // admin's row is there now and reads as "seen" on the next pass.
             if lead_written && is_outbound_docker_kind(&row.kind) {
-                outbound.push((row.title, row.body, row.kind));
+                outbound.push((row.title, row.body, row.href, row.kind));
             }
             if failed.is_some() {
                 break 'items;
@@ -813,28 +813,35 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // sent then.
         // The daemon and the node are the rarer, graver news, so they go
         // before project alerts; the sort is stable.
-        outbound.sort_by_key(|(_, _, kind)| kind.starts_with("docker.project"));
+        outbound.sort_by_key(|(_, _, _, kind)| kind.starts_with("docker.project"));
         let over = outbound.len().saturating_sub(OUTBOUND_PER_INGEST);
         outbound.truncate(OUTBOUND_PER_INGEST);
-        for (title, body, kind) in &outbound {
-            self.docker_outbound(title, body, kind).await;
+        // The alert was written on the node; the master names it, since the
+        // text Slack and the mailbox get has no panel row around it to say so.
+        let label = if outbound.is_empty() && over == 0 {
+            String::new()
+        } else {
+            self.docker_node_label(node_id).await
+        };
+        for (title, body, href, kind) in &outbound {
+            self.docker_outbound(&label, title, body, href, kind).await;
         }
         if over > 0 {
             // Past the cap nothing is dropped unsaid: ONE message says how
             // many more there are and where to read them.
-            let panel = self.notify_panel_url();
-            let link = format!("{panel}{DOCKER_PAGE}");
             let count = over.to_string();
             let cat = self.operator_catalog();
-            let args = [("count", count.as_str()), ("link", link.as_str())];
+            let args = [("count", count.as_str()), ("node", label.as_str())];
             let title = cat.render("ops.docker_more.title", &args);
             let body = cat.render("ops.docker_more.body", &args);
+            let body = self.with_panel_link(body, DOCKER_PAGE);
             tracing::warn!(
                 node = node_id,
                 over,
                 "docker alerts from one batch beyond the per-batch cap, summarised"
             );
-            self.docker_outbound(&title, &body, "docker.more").await;
+            self.docker_outbound_send(&title, &body, "docker.more")
+                .await;
         }
         if let Some(e) = failed {
             return Err(RpcError::Internal_with(format!(
@@ -955,7 +962,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // A worker's reaches the same place through the ingest above and
         // never through this branch.
         if is_outbound_docker_kind(kind) {
-            self.docker_outbound(title, body, kind).await;
+            self.docker_outbound(MASTER_LABEL, title, body, href, kind)
+                .await;
         }
     }
 
@@ -969,13 +977,62 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// never container log text. Nothing here fails the caller: a send that
     /// does not work is logged at warn WITHOUT the message and the alert
     /// stays in the bell.
-    pub(crate) async fn docker_outbound(&self, subject: &str, body: &str, kind: &str) {
+    ///
+    /// `node_label` is the server the alert is about, named in the subject
+    /// and the body, and `href` is the panel page it points at: the link is
+    /// added only when the panel address is known, never as a relative path
+    /// a mail client cannot open. An alert about ANOTHER node (`docker.node:`,
+    /// raised here by the master) already names it and is left as written.
+    pub(crate) async fn docker_outbound(
+        &self,
+        node_label: &str,
+        subject: &str,
+        body: &str,
+        href: &str,
+        kind: &str,
+    ) {
         if self.is_worker_node() {
             return;
         }
+        let (subject, body) = if kind.starts_with("docker.node:") || node_label.is_empty() {
+            (subject.to_string(), body.to_string())
+        } else {
+            let cat = self.operator_catalog();
+            let args = [("title", subject), ("body", body), ("node", node_label)];
+            (
+                cat.render("ops.docker_alert.title", &args),
+                cat.render("ops.docker_alert.body", &args),
+            )
+        };
+        let body = self.with_panel_link(body, href);
+        self.docker_outbound_send(&subject, &body, kind).await;
+    }
+
+    /// Send already composed text to the master's global channels.
+    async fn docker_outbound_send(&self, subject: &str, body: &str, kind: &str) {
         self.outbound_global_slack(subject, body, kind, "notify.docker.slack")
             .await;
         self.outbound_global_email(subject, body).await;
+    }
+
+    /// `text` with the absolute panel link on its own last line, when the
+    /// panel address is set and `href` is an internal path. Without an
+    /// address there is nothing to link to, so nothing is added.
+    pub(super) fn with_panel_link(&self, text: String, href: &str) -> String {
+        let panel = self.notify_panel_url();
+        if panel.is_empty() || !is_internal_href(href) {
+            return text;
+        }
+        format!("{text}\n{panel}{href}")
+    }
+
+    /// How the master names a node in text that leaves the panel: its label,
+    /// else its id.
+    pub(super) async fn docker_node_label(&self, node_id: &str) -> String {
+        match hyperion_state::nodes::get_by_node_id(&self.pool, node_id).await {
+            Ok(Some(n)) if !n.label.trim().is_empty() => n.label,
+            _ => node_id.to_string(),
+        }
     }
 
     /// The master's default Slack webhook, if it has one. `audit` names the
@@ -1035,6 +1092,8 @@ pub fn is_outbound_docker_kind(kind: &str) -> bool {
 pub(super) const OUTBOUND_PER_INGEST: usize = 10;
 /// Where the summary message points.
 const DOCKER_PAGE: &str = "/docker";
+/// How the master's own alerts name their server.
+const MASTER_LABEL: &str = "master";
 
 /// The Slack text for a Docker alert: title and body, nothing else.
 pub(super) fn docker_outbound_text(subject: &str, body: &str) -> String {

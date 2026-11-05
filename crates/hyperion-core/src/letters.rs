@@ -1623,8 +1623,8 @@ pub static STRINGS: &[LetterString] = &[
         id: "ops.docker_daemon_down.body",
         group: "Operator alerts — Docker",
         note: "Token: {error}. Docker's own error line; never container log text.",
-        en: "Docker on this server has not answered for several minutes: {error}",
-        cs: "Docker na tomto serveru několik minut neodpovídá: {error}",
+        en: "Docker has not answered for several minutes: {error}",
+        cs: "Docker několik minut neodpovídá: {error}",
     },
     LetterString {
         id: "ops.docker_daemon_up.title",
@@ -1637,8 +1637,8 @@ pub static STRINGS: &[LetterString] = &[
         id: "ops.docker_daemon_up.body",
         group: "Operator alerts — Docker",
         note: "No tokens.",
-        en: "Docker on this server answers again.",
-        cs: "Docker na tomto serveru zase odpovídá.",
+        en: "Docker answers again.",
+        cs: "Docker zase odpovídá.",
     },
     LetterString {
         id: "ops.docker_node_silent.title",
@@ -1683,6 +1683,20 @@ pub static STRINGS: &[LetterString] = &[
         cs: "{node}: obrazy s novější verzí pod stejným tagem, který běží: {count}. Hyperion to jen hlásí, nikdy nestahuje obraz ani nevytváří kontejner znovu.",
     },
     LetterString {
+        id: "ops.docker_alert.title",
+        group: "Operator alerts — Docker",
+        note: "Slack and mail subject of a Docker alert. Tokens: {title} {node}, the server's label (\"master\" for the master itself).",
+        en: "{title} ({node})",
+        cs: "{title} ({node})",
+    },
+    LetterString {
+        id: "ops.docker_alert.body",
+        group: "Operator alerts — Docker",
+        note: "Slack and mail text of a Docker alert. Tokens: {node} {body}. The panel link is added on its own line, and only when the panel address is set.",
+        en: "Server: {node}\n{body}",
+        cs: "Server: {node}\n{body}",
+    },
+    LetterString {
         id: "ops.docker_more.title",
         group: "Operator alerts — Docker",
         note: "Sent instead of the Docker alerts of one batch that are past the sending cap.",
@@ -1692,9 +1706,9 @@ pub static STRINGS: &[LetterString] = &[
     LetterString {
         id: "ops.docker_more.body",
         group: "Operator alerts — Docker",
-        note: "Tokens: {count} {link}. The link is the panel's Docker page.",
-        en: "{count} more Docker alerts arrived at once. See the panel: {link}",
-        cs: "Najednou dorazilo dalších {count} Docker upozornění. Podívejte se v panelu: {link}",
+        note: "Tokens: {count} {node}. The panel link is added on its own line, and only when the panel address is set.",
+        en: "{count} more Docker alerts from {node} arrived at once. See the Docker page in the panel.",
+        cs: "Ze serveru {node} najednou dorazilo dalších {count} Docker upozornění. Podívejte se na stránku Docker v panelu.",
     },
     LetterString {
         id: "ops.url_down.title",
