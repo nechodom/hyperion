@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use regex::bytes::{Regex, RegexSet, RegexSetBuilder};
 
 /// Bumped whenever a rule changes; a bump re-inspects the Layer B scope once.
-pub const RULE_PACK_VERSION: u32 = 1;
+pub const RULE_PACK_VERSION: u32 = 2;
 
 /// Bytes of one file that are inspected. A larger inspected file (PHP,
 /// JavaScript, HTML, PHP settings) is reported as `too_large_to_inspect` (never
@@ -75,9 +75,25 @@ struct Rule {
     severity: Severity,
     scope: Scope,
     pattern: &'static str,
-    /// A second condition that must hold somewhere in the same file.
-    also: Option<&'static str>,
+    guard: Option<Guard>,
 }
+
+/// A second look at each match, for what one pattern can't say.
+#[derive(Clone, Copy)]
+enum Guard {
+    /// This must match within [`NEAR_BYTES`] of it.
+    Near(&'static str),
+    /// This must not match inside it.
+    Unless(&'static str),
+}
+
+/// How far a hook and its payload can be apart. A long literal elsewhere in a big
+/// file is that file's business: wordfence has one 177 kB from its `wp_head` hook.
+const NEAR_BYTES: usize = 8 * 1024;
+
+/// The script is added and a cleanup function is what comes next: React's
+/// `useEffect` idiom, which removes the tag when the component goes away.
+const CLEANUP_AFTER_APPEND: &str = r"(?-u)appendChild\s*\([^)]{0,64}\)\s*[,;]?\s*(?:return\s*)?(?:\(\s*\)\s*=>|function\s*\(\s*\))";
 
 /// An encoded string literal over about 3 kB. A `data:` URI never matches: the
 /// run of base64 starts after a comma, not after the opening quote.
@@ -91,35 +107,35 @@ const RULES: &[Rule] = &[
         severity: Severity::High,
         scope: Scope::Php,
         pattern: r"(?i-u)\b(?:eval|assert)\s*\(\s*@?\s*(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|convert_uudecode|hex2bin|strrev|rawurldecode)\s*\(",
-        also: None,
+        guard: None,
     },
     Rule {
         id: "request_to_exec",
         severity: Severity::High,
         scope: Scope::Php,
         pattern: r"(?i-u)\b(?:eval|assert|system|passthru|shell_exec|exec|popen|proc_open|pcntl_exec)\s*\(\s*@?\s*(?:(?:stripslashes|base64_decode|trim)\s*\(\s*)?@?\$_(?:GET|POST|REQUEST|COOKIE)\b",
-        also: None,
+        guard: None,
     },
     Rule {
         id: "request_callable",
         severity: Severity::High,
         scope: Scope::Php,
         pattern: r"(?-u)\$_(?:GET|POST|REQUEST|COOKIE)\s*\[[^\]\n]{1,64}\]\s*\(",
-        also: None,
+        guard: None,
     },
     Rule {
         id: "webshell_marker",
         severity: Severity::High,
         scope: Scope::Php,
         pattern: r"(?i-u)\b(?:b374k|c99\s*shell|c99\s*madshell|r57\s*shell|filesman|wso\s*shell|wso_version|wsosetcookie|indoxploit|p0wny\s*shell|alfa_data|weevely|china\s*chopper)\b",
-        also: None,
+        guard: None,
     },
     Rule {
         id: "footer_hook_payload",
         severity: Severity::High,
         scope: Scope::Php,
         pattern: r#"(?i-u)\badd_action\s*\(\s*['"](?:wp_footer|wp_head)['"]"#,
-        also: Some(PAYLOAD_LITERAL),
+        guard: Some(Guard::Near(PAYLOAD_LITERAL)),
     },
     Rule {
         id: "js_self_removing_loader",
@@ -129,14 +145,14 @@ const RULES: &[Rule] = &[
         // removes its own tag afterwards. Plain widget loaders (chat, analytics)
         // leave their tag in place and stay at js_remote_script.
         pattern: r#"(?i-u)createElement\s*\(\s*['"]script['"]\s*\)(?s:.){0,300}?(?:\.src\s*=|setAttribute\s*\(\s*['"]src['"]\s*,)\s*['"]?(?:https?:)?//[a-z0-9](?s:.){0,300}?(?:removeChild\s*\(|\.remove\s*\(\s*\))"#,
-        also: None,
+        guard: Some(Guard::Unless(CLEANUP_AFTER_APPEND)),
     },
     Rule {
         id: "encoded_literal_large",
         severity: Severity::Medium,
         scope: Scope::Php,
         pattern: BIG_LITERAL,
-        also: None,
+        guard: None,
     },
     Rule {
         id: "js_remote_script",
@@ -145,14 +161,14 @@ const RULES: &[Rule] = &[
         // A script element given a remote src, or document.write of a remote
         // <script>. A relative or same-origin path has no `//` after the quote.
         pattern: r#"(?i-u)(?:createElement\s*\(\s*['"]script['"]\s*\)(?s:.){0,300}?(?:\.src\s*=|setAttribute\s*\(\s*['"]src['"]\s*,)\s*['"]?(?:https?:)?//[a-z0-9]|document\.write\s*\(\s*['"]<script[^>]{0,160}?\ssrc\s*=\s*\\?['"]?(?:https?:)?//[a-z0-9])"#,
-        also: None,
+        guard: None,
     },
     Rule {
         id: "js_atob_eval",
         severity: Severity::Medium,
         scope: Scope::Script,
         pattern: r"(?-u)\b(?:eval|Function)\s*\([^;{}]{0,80}?\batob\s*\(",
-        also: None,
+        guard: None,
     },
     Rule {
         id: "php_prepend_setting",
@@ -162,14 +178,14 @@ const RULES: &[Rule] = &[
         scope: Scope::PhpSettings,
         // `R`: PHP's ini parser takes a bare CR as a line end too.
         pattern: r"(?imR-u)^[ \t]*(?:php_value[ \t]+)?auto_(?:prepend|append)_file\b",
-        also: None,
+        guard: None,
     },
 ];
 
 struct Compiled {
     rule: &'static Rule,
     re: Regex,
-    also: Option<Regex>,
+    guard: Option<(Guard, Regex)>,
 }
 
 struct Pack {
@@ -185,7 +201,13 @@ fn build_pack() -> Result<Pack, regex::Error> {
         rules.push(Compiled {
             rule,
             re: Regex::new(rule.pattern)?,
-            also: rule.also.map(Regex::new).transpose()?,
+            guard: rule
+                .guard
+                .map(|g| {
+                    let (Guard::Near(p) | Guard::Unless(p)) = g;
+                    Regex::new(p).map(|re| (g, re))
+                })
+                .transpose()?,
         });
     }
     // Scheme (or a quote for a protocol-relative URL), optional userinfo, then
@@ -306,11 +328,23 @@ fn inspect_with(rel_path: &str, bytes: &[u8], php: bool) -> Vec<RuleHit> {
         if !applies {
             continue;
         }
-        if c.also.as_ref().is_some_and(|a| !a.is_match(body)) {
-            continue;
-        }
+        // A whole-file search, so a literal longer than the window still counts.
+        let near: Vec<(usize, usize)> = match &c.guard {
+            Some((Guard::Near(_), re)) => {
+                re.find_iter(body).map(|m| (m.start(), m.end())).collect()
+            }
+            _ => Vec::new(),
+        };
         let spans: Vec<(usize, usize)> =
             c.re.find_iter(body)
+                .filter(|m| match &c.guard {
+                    None => true,
+                    Some((Guard::Near(_), _)) => near.iter().any(|(s, e)| {
+                        *s <= m.end().saturating_add(NEAR_BYTES)
+                            && *e >= m.start().saturating_sub(NEAR_BYTES)
+                    }),
+                    Some((Guard::Unless(_), re)) => !re.is_match(m.as_bytes()),
+                })
                 .take(MAX_HITS)
                 .map(|m| (m.start(), m.end()))
                 .collect();
@@ -766,6 +800,67 @@ mod tests {
         let crisp = b"<?php add_action('wp_footer', function () { echo '<script>window.$crisp=[];var d=document,s=d.createElement(\"script\");s.src=\"https://client.crisp.chat/l.js\";s.async=1;d.getElementsByTagName(\"head\")[0].appendChild(s);</script>'; });";
         let h = inspect("wp-content/themes/x/functions.php", crisp);
         assert_eq!(worst(&h), Some(Severity::Medium), "{h:?}");
+    }
+
+    /// Real shape: wordfence's `wordfenceClass.php` hooks `wp_head` at byte 60054
+    /// and holds a 258-byte character set at byte 236931.
+    #[test]
+    fn a_hook_far_from_a_long_literal_is_not_a_payload() {
+        let literal = "A".repeat(258);
+        let filler = "// ordinary code\n".repeat(2000);
+        let far = format!("<?php\nadd_action('wp_head','x');\n{filler}$c='{literal}';\n");
+        let h = inspect("wp-content/plugins/p/p.php", far.as_bytes());
+        assert!(!ids(&h).contains(&"footer_hook_payload"), "{h:?}");
+        let far = format!("<?php\n$c='{literal}';\n{filler}add_action('wp_head','x');\n");
+        let h = inspect("wp-content/plugins/p/p.php", far.as_bytes());
+        assert!(!ids(&h).contains(&"footer_hook_payload"), "{h:?}");
+    }
+
+    #[test]
+    fn a_hook_next_to_a_literal_of_any_size_is_a_payload() {
+        for size in [300, 8_000, 200_000] {
+            let literal = "A".repeat(size);
+            for src in [
+                format!("<?php\nadd_action('wp_footer','x');\n$c='{literal}';\n"),
+                format!("<?php\n$c='{literal}';\nadd_action('wp_footer','x');\n"),
+            ] {
+                let h = inspect("wp-content/themes/t/functions.php", src.as_bytes());
+                assert!(ids(&h).contains(&"footer_hook_payload"), "{size}: {h:?}");
+            }
+        }
+    }
+
+    /// Real shape: really-simple-ssl's bundle. React's `useEffect` cleanup removes
+    /// the tag when the component goes away, not once it has loaded. A remote script
+    /// is still worth a look, at the lower severity.
+    #[test]
+    fn a_reacts_cleanup_is_not_a_self_removing_loader() {
+        for src in [
+            &br#"const l=document.createElement("script");return l.src="https://hcaptcha.example/1/api.js",l.async=!0,l.onload=()=>{go()},document.body.appendChild(l),()=>{window.h&&window.h.reset(),l&&l.remove()}"#[..],
+            br#"const script = document.createElement('script');
+script.src = 'https://widget.example/w.js';
+document.body.appendChild(script);
+return () => {
+  document.body.removeChild(script);
+};"#,
+            br#"var s=document.createElement('script');s.src='https://widget.example/w.js';document.body.appendChild(s);return function(){document.body.removeChild(s)};"#,
+        ] {
+            let h = inspect("a.js", src);
+            assert!(!ids(&h).contains(&"js_self_removing_loader"), "{h:?}");
+            assert!(ids(&h).contains(&"js_remote_script"), "{h:?}");
+        }
+    }
+
+    #[test]
+    fn removal_when_it_has_loaded_stays_a_self_removing_loader() {
+        for src in [
+            &br#"var s=document.createElement('script');s.src='https://x.example/a.js';s.onload=()=>s.remove();document.head.appendChild(s);"#[..],
+            br#"var s=document.createElement('script');s.src='https://x.example/a.js';s.onload=function(){s.parentNode.removeChild(s)};document.head.appendChild(s);"#,
+            br#"var s=document.createElement('script');s.src='https://x.example/a.js';document.head.appendChild(s);s.onload=()=>{s.remove()};"#,
+        ] {
+            let h = inspect("a.js", src);
+            assert!(ids(&h).contains(&"js_self_removing_loader"), "{h:?}");
+        }
     }
 
     #[test]
