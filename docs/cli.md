@@ -749,8 +749,12 @@ Prints the verdict the panel shows (`clean`, `findings`, `review`, `partial`,
 - **Coverage:** files watched and since when, large files only partly read,
   symlinks not followed, and anything that could not be looked at. A scan that
   missed part of the site is `partial`, never `clean`.
-- **ClamAV** is optional. When it ran, its hits are listed; when it did not, the
-  line says so.
+- **ClamAV** is optional and is not part of a scan: one `clamscan` runs for the
+  whole node once a week, overnight, when the node has 2 GiB of memory free. When
+  it ran, its hits are listed; when it did not (skipped for memory, signatures
+  still downloading, stopped for lack of memory and resting for a week), the line
+  says so, and that is never a failed scan. A pass that was cut short keeps the
+  hits it found and says it was partial.
 - **The database is not scanned.**
 
 While the new scan is in its pilot (`[integrity] new_layers_live` off in

@@ -417,6 +417,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         let file = done?;
+        // A ClamAV pass running now may already have been past this place.
+        self.clamav_note_restored(detail.id.as_str(), &file.malware, now_secs())
+            .await;
         self.after_file_action(&detail, |rec| {
             drop_file(&mut rec.result, &file.rel);
             for hit in &file.malware {

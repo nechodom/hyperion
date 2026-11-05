@@ -417,19 +417,33 @@ impl AdapterPort for RealAdapter {
         .map_err(|e| AdapterError::Other(format!("quarantine: {e}")))?
     }
 
-    async fn clamav_facts(&self) -> (bool, bool) {
-        (
-            hyperion_adapters::integrity::clamav_available(),
-            hyperion_adapters::integrity::clamav_db_present(),
-        )
+    async fn clamav_facts(&self) -> hyperion_adapters::integrity::ClamFacts {
+        hyperion_adapters::integrity::ClamFacts::read()
     }
 
-    async fn clamav_scan(
+    async fn clamav_file_list(
         &self,
         root: &str,
-        niceness: i32,
-    ) -> Result<hyperion_adapters::integrity::MalwareScan, AdapterError> {
-        hyperion_adapters::integrity::scan_malware_niced(root, niceness).await
+        cap: usize,
+    ) -> Result<hyperion_adapters::integrity::ClamList, AdapterError> {
+        let root = std::path::PathBuf::from(root);
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::integrity::clamav_file_list(&root, cap)
+        })
+        .await
+        .map_err(|e| AdapterError::Other(format!("clamav list: {e}")))?
+        .map_err(AdapterError::from)
+    }
+
+    async fn clamav_sweep(
+        &self,
+        lists: &[(HostingId, Vec<String>)],
+        list_path: &std::path::Path,
+    ) -> Result<hyperion_adapters::integrity::ClamSweep, AdapterError> {
+        if let Some(dir) = list_path.parent() {
+            hyperion_adapters::sitescan::runner::prepare_scan_dirs(dir)?;
+        }
+        hyperion_adapters::integrity::clamav_sweep(lists, list_path).await
     }
 
     async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError> {

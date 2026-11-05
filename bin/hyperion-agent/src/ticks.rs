@@ -602,9 +602,10 @@ fn spawn_vendor_sweep(svc: &Svc) {
     });
 }
 
-/// ClamAV over each scanned site's docroot, about daily per site and one at a
-/// time. Beside the site scan rather than in it: a pass can take hours, and a
-/// "Scan now" must not wait behind one.
+/// The node's weekly ClamAV pass: one `clamscan` over every scanned site, in the
+/// night window. The tick only checks whether it is due, so asking every ten
+/// minutes is cheap. Beside the site scan rather than in it: a pass can take
+/// hours, and a "Scan now" must not wait behind one.
 fn spawn_clamav_sweep(svc: &Svc) {
     every(svc, 8 * MIN, 10 * MIN, |svc| async move {
         match svc.site_scan_clamav_tick().await {

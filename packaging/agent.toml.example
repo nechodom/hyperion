@@ -356,8 +356,6 @@ strategy = "mobile"
 # Site scan. Scanning never runs wp-cli or any tenant PHP.
 #
 # [integrity]
-# How much ClamAV yields to everything else, 0-19. Default: by core count.
-# scan_niceness = 10
 # Rule hits, changes to review and theme comparisons show in the panel only, with
 # no alerts and no effect on care reports, until this is true. Default false.
 # new_layers_live = false

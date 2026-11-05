@@ -480,41 +480,6 @@ async fn a_trashed_site_leaves_no_nameless_row_on_the_cluster_lists() {
     );
 }
 
-/// A failed ClamAV pass holds the next one off for an hour — the card scans
-/// on view, and a failure that repeats otherwise re-walked the whole docroot
-/// on every page load — and a good one for the usual daily cadence.
-#[test]
-fn clamav_pass_backs_off_after_a_failure() {
-    use super::super::wp_integrity::{
-        clamav_pass_held_off, CLAMAV_FAILED_RETRY_SECS, CLAMAV_MIN_INTERVAL_SECS,
-    };
-    let now = 1_700_000_000;
-    let rec = |clamav_at, clamav_failed_at| StoredIntegrityScan {
-        scanned_at: now,
-        clamav_at,
-        clamav_failed_at,
-        ..Default::default()
-    };
-    assert!(!clamav_pass_held_off(None, now), "never ran");
-    assert!(!clamav_pass_held_off(Some(&rec(0, 0)), now));
-    assert!(
-        clamav_pass_held_off(Some(&rec(now - 60, 0)), now),
-        "fresh pass"
-    );
-    assert!(!clamav_pass_held_off(
-        Some(&rec(now - CLAMAV_MIN_INTERVAL_SECS, 0)),
-        now
-    ));
-    assert!(
-        clamav_pass_held_off(Some(&rec(0, now - 60)), now),
-        "just failed"
-    );
-    assert!(!clamav_pass_held_off(
-        Some(&rec(0, now - CLAMAV_FAILED_RETRY_SECS)),
-        now
-    ));
-}
-
 /// Opening the WordPress tab reads what the last scan left behind; it must
 /// never start one. The mock adapter has no expectation for any scan probe
 /// (plugin list, wp-cli, clamscan), so a spawn would panic the test.
@@ -577,90 +542,189 @@ async fn wp_integrity_stored_with_no_record_is_never_scanned() {
     assert!(!r.is_clean());
 }
 
-/// clamscan exit 2 with detections: the hits are kept, the pass counts as
-/// having run (so no retry back-off), and the report says it was partial.
+/// The weekly pass is due in the night window only, a week after the last one
+/// began (a little less than a week, so a late start doesn't skip a night), and a
+/// stamp from the future doesn't hold it off.
 #[test]
-fn a_partial_clamav_pass_keeps_its_hits_without_a_backoff() {
-    use super::super::wp_integrity::malware_scan_outcome;
-    let now = 1_700_000_000;
-    let hit = webshell_hit();
-    let mut errors = Vec::new();
-    let (available, hits, at, failed_at) = malware_scan_outcome(
-        integrity::MalwareScan {
-            available: true,
-            hits: vec![hit.clone()],
-            partial: true,
-        },
-        now,
-        &mut errors,
+fn clamav_is_due_weekly_in_the_night_window() {
+    use super::super::scan_queue::clamav_sweep_due;
+    use chrono::TimeZone;
+    let at = |day: u32, hour: u32, min: u32| {
+        chrono::Utc
+            .with_ymd_and_hms(2026, 11, day, hour, min, 0)
+            .single()
+            .expect("date")
+            .timestamp()
+    };
+    let last = at(2, 3, 0);
+    assert!(clamav_sweep_due(0, at(2, 2, 0), &chrono::Utc), "never ran");
+    assert!(
+        !clamav_sweep_due(0, at(2, 1, 59), &chrono::Utc),
+        "before the window"
     );
-    assert!(available);
-    assert_eq!(hits, vec![hit]);
-    assert_eq!(at, now);
-    assert_eq!(failed_at, 0, "real hits are not a failure");
-    assert_eq!(errors.len(), 1);
-    assert!(errors[0].contains("partial"), "{errors:?}");
-
-    // A complete pass says nothing extra.
-    let mut errors = Vec::new();
-    let (available, _, at, failed_at) = malware_scan_outcome(
-        integrity::MalwareScan {
-            available: true,
-            ..Default::default()
-        },
-        now,
-        &mut errors,
+    assert!(!clamav_sweep_due(0, at(2, 6, 0), &chrono::Utc), "after it");
+    assert!(
+        !clamav_sweep_due(last, at(3, 3, 0), &chrono::Utc),
+        "next night"
     );
-    assert!(available && at == now && failed_at == 0);
-    assert!(errors.is_empty());
+    assert!(
+        !clamav_sweep_due(last, at(8, 3, 0), &chrono::Utc),
+        "six days"
+    );
+    assert!(
+        clamav_sweep_due(last, at(9, 2, 0), &chrono::Utc),
+        "a week, early in the window"
+    );
+    assert!(clamav_sweep_due(last, at(9, 5, 59), &chrono::Utc));
+    assert!(
+        !clamav_sweep_due(last, at(9, 12, 0), &chrono::Utc),
+        "a week, wrong hour"
+    );
+    // A late start still comes round on the same night next week.
+    assert!(clamav_sweep_due(at(2, 5, 50), at(9, 2, 0), &chrono::Utc));
+    // The clock went back.
+    assert!(clamav_sweep_due(at(20, 3, 0), at(9, 3, 0), &chrono::Utc));
 }
 
-/// Right after ClamAV is installed freshclam is still downloading
-/// signatures. The pass waits: it says so, carries the previous verdict,
-/// and leaves no failed stamp, so there is no back-off once they arrive.
+/// What a pass leaves in a record, and only that: a full pass is the answer, a
+/// partial one only adds, and a reason moves nothing else.
 #[test]
-fn missing_signature_db_waits_without_a_failure_stamp() {
-    use super::super::wp_integrity::malware_pass_precheck;
-    let now = 1_700_000_000;
-    let hit = webshell_hit();
-    let prior = StoredIntegrityScan {
-        scanned_at: now - 86_400,
-        clamav_at: now - 86_400,
-        result: hyperion_types::WpIntegrityScanResult {
-            clamav_available: true,
-            malware: vec![hit.clone()],
+fn a_pass_updates_the_clamav_half_and_nothing_else() {
+    use super::super::scan_queue::{apply_clamav, ClamUpdate};
+    let old = webshell_hit();
+    let new = hyperion_types::WpMalwareHit {
+        path: "/home/x/htdocs/b.php".into(),
+        signature: "Php.Trojan.Agent-1".into(),
+    };
+    let base = || {
+        let mut r = site_scan::scanned(100, 100);
+        r.clamav_at = 50;
+        r.result.clamav_available = true;
+        r.result.malware = vec![old.clone()];
+        r.result.findings = vec![hyperion_types::SiteFileFinding {
+            rel: "x.php".into(),
             ..Default::default()
-        },
-        ..Default::default()
+        }];
+        r
+    };
+    let pass = |hits, end, note: Option<&str>| ClamUpdate::Pass {
+        hits,
+        end,
+        started: 900,
+        note: note.map(String::from),
     };
 
-    // First ever pass: nothing to carry, and no failure recorded.
-    let mut errors = Vec::new();
-    let done = malware_pass_precheck(true, false, now, None, &mut errors).expect("pass is over");
-    assert_eq!(done, (false, Vec::new(), 0, 0));
-    assert_eq!(errors.len(), 1);
-    assert!(errors[0].contains("still downloading"), "{errors:?}");
-
-    // With a previous verdict: carried as it was, failed_at still 0.
-    let mut errors = Vec::new();
-    let (available, hits, at, failed_at) =
-        malware_pass_precheck(true, false, now, Some(&prior), &mut errors).expect("pass is over");
-    assert!(available);
-    assert_eq!(hits, vec![hit]);
-    assert_eq!(at, now - 86_400, "the hits keep their original age");
-    assert_eq!(failed_at, 0, "waiting is not a failure");
-
-    // Signatures present and nothing holding it off: the scan goes ahead.
-    let mut errors = Vec::new();
-    assert!(malware_pass_precheck(true, true, now, None, &mut errors).is_none());
-    assert!(errors.is_empty());
-    // Not installed: not scanned, no note.
-    let mut errors = Vec::new();
-    assert_eq!(
-        malware_pass_precheck(false, false, now, None, &mut errors),
-        Some((false, Vec::new(), 0, 0))
+    // Full: replaces, so a cleaned file stops being listed.
+    let mut r = base();
+    apply_clamav(
+        &mut r,
+        pass(vec![new.clone()], integrity::SweepEnd::Complete, None),
     );
-    assert!(errors.is_empty());
+    assert_eq!(r.result.malware, vec![new.clone()]);
+    assert_eq!((r.clamav_at, r.result.clamav_available), (900, true));
+    assert_eq!(r.result.error, None);
+    assert_eq!(r.result.findings.len(), 1, "the native half is left alone");
+    assert_eq!(r.scanned_at, 100);
+
+    // Partial: adds, and the old one stands.
+    let mut r = base();
+    apply_clamav(
+        &mut r,
+        pass(
+            vec![new.clone()],
+            integrity::SweepEnd::Partial,
+            Some("partial"),
+        ),
+    );
+    assert_eq!(r.result.malware, vec![new.clone(), old.clone()]);
+    assert_eq!(r.clamav_at, 900);
+    assert_eq!(r.result.error.as_deref(), Some("partial"));
+
+    // Partial and nothing found: proves nothing, so the last verdict stands
+    // with the note beside it, and no failure is stamped.
+    let mut r = base();
+    apply_clamav(
+        &mut r,
+        pass(vec![], integrity::SweepEnd::TimedOut, Some("out of time")),
+    );
+    assert_eq!(r.result.malware, vec![old.clone()]);
+    assert_eq!(r.clamav_at, 50);
+    assert_eq!(r.clamav_failed_at, 0);
+    assert_eq!(r.result.error.as_deref(), Some("out of time"));
+
+    // A site never covered, and a partial pass that found nothing in it.
+    let mut r = StoredIntegrityScan::default();
+    apply_clamav(
+        &mut r,
+        pass(vec![], integrity::SweepEnd::Partial, Some("partial")),
+    );
+    assert!(!r.result.clamav_available, "not scanned is not clean");
+    assert_eq!(r.clamav_at, 0);
+
+    // A reason alone.
+    let mut r = base();
+    apply_clamav(&mut r, ClamUpdate::Note(Some("less than 2 GiB".into())));
+    assert_eq!(r.result.malware, vec![old]);
+    assert_eq!((r.clamav_at, r.result.clamav_available), (50, true));
+    assert_eq!(r.result.error.as_deref(), Some("less than 2 GiB"));
+    apply_clamav(&mut r, ClamUpdate::Note(None));
+    assert_eq!(r.result.error, None);
+
+    // A flood of hits is cut, and says so.
+    let mut r = StoredIntegrityScan::default();
+    let many = (0..1500)
+        .map(|i| hyperion_types::WpMalwareHit {
+            path: format!("/home/x/htdocs/{i}.php"),
+            signature: "Php.Trojan.Agent-1".into(),
+        })
+        .collect();
+    apply_clamav(&mut r, pass(many, integrity::SweepEnd::Complete, None));
+    assert_eq!(r.result.malware.len(), 1000);
+    assert!(r.result.error.expect("said").contains("first"));
+}
+
+/// A native failure and a ClamAV note each keep their place in the card's reason.
+#[test]
+fn a_native_failure_and_a_clamav_note_are_both_said() {
+    use super::super::scan_queue::{apply_clamav, ClamUpdate};
+    let mut r = site_scan::scanned(100, 100);
+    r.failed_at = 100;
+    apply_clamav(&mut r, ClamUpdate::Note(Some("waiting".into())));
+    let said = r.result.error.expect("said");
+    assert!(
+        said.contains("could not finish") && said.contains("waiting"),
+        "{said}"
+    );
+}
+
+/// Restored hits from before the pass began are old news; from after, they stand.
+#[test]
+fn restored_hits_count_when_they_came_back_during_the_pass() {
+    use super::super::scan_queue::{merge_restored, ClamRestored};
+    let before = ClamRestored {
+        path: "/home/x/htdocs/old.php".into(),
+        signature: "Php.Trojan.Agent-1".into(),
+        restored_at: 999,
+    };
+    let during = ClamRestored {
+        path: "/home/x/htdocs/mid.php".into(),
+        signature: "Php.Trojan.Agent-1".into(),
+        restored_at: 1000,
+    };
+    let (hits, keep) = merge_restored(vec![webshell_hit()], vec![before, during.clone()], 1000);
+    assert_eq!(keep, vec![during.clone()], "older entries are dropped");
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().any(|h| h.path == during.path));
+    // Found by the pass as well: once.
+    let (hits, _) = merge_restored(
+        vec![hyperion_types::WpMalwareHit {
+            path: during.path.clone(),
+            signature: during.signature.clone(),
+        }],
+        vec![during],
+        1000,
+    );
+    assert_eq!(hits.len(), 1);
 }
 
 // The native scan's scheduler, which replaced the daily wp-cli sweep.
@@ -682,7 +746,7 @@ mod site_scan {
     }
 
     /// The record a finished native scan leaves.
-    fn scanned(at: i64, full_at: i64) -> StoredIntegrityScan {
+    pub(super) fn scanned(at: i64, full_at: i64) -> StoredIntegrityScan {
         StoredIntegrityScan {
             scanned_at: at,
             full_at,
@@ -692,12 +756,6 @@ mod site_scan {
             },
             ..Default::default()
         }
-    }
-
-    /// A node with no scanner, for the blocking scan's ClamAV half.
-    fn no_clamav(mut a: MockAdapterPort) -> MockAdapterPort {
-        a.expect_clamav_facts().returning(|| (false, false));
-        a
     }
 
     /// A worker that finds nothing to fetch and answers with `outcome`.
@@ -1524,7 +1582,7 @@ mod site_scan {
             }
         });
         a.expect_site_scan_evict_manifests().returning(|_| ());
-        let s = Arc::new(svc(pool.clone(), no_clamav(a)));
+        let s = Arc::new(svc(pool.clone(), a));
         let mut sites = Vec::new();
         for d in ["a-site.cz", "b-site.cz", "c-site.cz"] {
             sites.push(site_named(&s, d).await);
@@ -1594,7 +1652,7 @@ mod site_scan {
         a.expect_site_scan_worker()
             .returning(move |_| WorkerReply::Failed(tenant_text.to_string()));
         a.expect_site_scan_evict_manifests().returning(|_| ());
-        let s = svc(pool.clone(), no_clamav(a));
+        let s = svc(pool.clone(), a);
         let site = site_named(&s, "kos.cz").await;
         let now = monday_at(0, 12, 0);
 
@@ -1647,8 +1705,8 @@ mod site_scan {
             .expect("scan");
         assert!(!r.wp_cli_ok);
         assert!(
-            !r.clamav_available,
-            "a verdict carried from an earlier pass isn't this scan's"
+            r.clamav_available,
+            "ClamAV's verdict is the weekly pass's, whatever this scan did"
         );
         assert!(!r.is_clean());
         assert_eq!(r.core_modified, prior.result.core_modified);
@@ -1930,7 +1988,7 @@ mod site_scan {
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => WorkerReply::Scan(upstream_verified(2)),
         });
-        let s = svc(pool.clone(), no_clamav(a));
+        let s = svc(pool.clone(), a);
         let site = site_named(&s, "kos.cz").await;
         wordpress::record_install(&pool, &site.id, "https://kos.cz", "6.6.2", "h", 1)
             .await
@@ -1957,7 +2015,7 @@ mod site_scan {
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => WorkerReply::Scan(outcome.clone()),
         });
-        let s = svc(pool.clone(), no_clamav(a));
+        let s = svc(pool.clone(), a);
         let site = site_named(&s, "kos.cz").await;
         s.wp_integrity_scan(HostingSelector::Id(site.id.clone()))
             .await
@@ -2229,7 +2287,7 @@ mod site_scan {
         a.expect_site_scan_cached_manifest().returning(|_, _| None);
         a.expect_site_scan_fetch_manifest()
             .returning(|_, _| Err(AdapterError::Other("down".into())));
-        let s = svc(pool.clone(), no_clamav(a));
+        let s = svc(pool.clone(), a);
         let site = site_named(&s, "kos.cz").await;
         let r = s
             .wp_integrity_scan(HostingSelector::Id(site.id))
@@ -2470,108 +2528,591 @@ mod site_scan {
         assert!(rec.result.themes_failed.is_empty());
     }
 
-    // ---- ClamAV, beside the node's lock ----
+    // ---- ClamAV: one weekly pass for the node, beside its lock ----
 
+    const GIB: u64 = 1 << 30;
+
+    fn facts(mem_available: u64) -> integrity::ClamFacts {
+        integrity::ClamFacts {
+            installed: true,
+            db_present: true,
+            mem_available,
+        }
+    }
+
+    /// What each site hands in: two files, the second of which `found_in` names.
+    fn two_files(root: &str) -> integrity::ClamList {
+        integrity::ClamList {
+            files: vec![
+                format!("{root}/index.php"),
+                format!("{root}/wp-content/uploads/a.php"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// The detection a pass makes on the n-th site of its list.
+    fn found_in(lists: &[(HostingId, Vec<String>)], n: usize) -> hyperion_types::WpMalwareHit {
+        hyperion_types::WpMalwareHit {
+            path: lists[n].1[1].clone(),
+            signature: "Php.Trojan.Webshell-1".into(),
+        }
+    }
+
+    fn sweep(
+        end: integrity::SweepEnd,
+        hits: Vec<hyperion_types::WpMalwareHit>,
+    ) -> Result<integrity::ClamSweep, AdapterError> {
+        Ok(integrity::ClamSweep { hits, end })
+    }
+
+    /// A node with ClamAV and `mem` free. `answer` is the one pass.
     fn with_clamav(
         mut a: MockAdapterPort,
-        answer: impl Fn() -> Result<integrity::MalwareScan, AdapterError> + Send + 'static,
+        mem: u64,
+        answer: impl Fn(&[(HostingId, Vec<String>)]) -> Result<integrity::ClamSweep, AdapterError>
+            + Send
+            + 'static,
     ) -> MockAdapterPort {
-        a.expect_clamav_facts().returning(|| (true, true));
-        a.expect_clamav_scan().returning(move |_, _| answer());
+        a.expect_clamav_facts().returning(move || facts(mem));
+        a.expect_clamav_file_list()
+            .returning(|root, _| Ok(two_files(root)));
+        a.expect_clamav_sweep()
+            .returning(move |lists, _| answer(lists));
         a
     }
 
-    fn found(hits: Vec<hyperion_types::WpMalwareHit>) -> integrity::MalwareScan {
-        integrity::MalwareScan {
-            available: true,
-            hits,
-            partial: false,
-        }
+    async fn record_of(
+        s: &HostingService<MockAdapterPort>,
+        site: &HostingDetail,
+    ) -> StoredIntegrityScan {
+        s.stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record")
+    }
+
+    /// Mondays at 03:00 UTC, the middle of the night window.
+    fn night(week: u32) -> i64 {
+        monday_at(7 * week, 3, 0)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn clamav_runs_without_the_nodes_lock() {
         let pool = open_memory().await.expect("open");
-        let a = with_clamav(happy_mocks(), || Ok(found(vec![])));
+        let a = with_clamav(happy_mocks(), 4 * GIB, |_| {
+            sweep(integrity::SweepEnd::Complete, vec![])
+        });
         let s = svc(pool.clone(), a);
         let site = site_named(&s, "kos.cz").await;
-        let now = monday_at(0, 12, 0);
+        let now = night(0);
         s.set_stored_integrity_scan(site.id.as_str(), &scanned(now - 60, now))
             .await;
         let _held = s.site_scan.node.lock().await;
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            s.site_scan_clamav_tick_at(now),
+            s.site_scan_clamav_tick_at(&chrono::Utc, now),
         )
         .await
         .expect("didn't wait for the lock")
         .expect("tick");
-        let rec = s
-            .stored_integrity_scan(site.id.as_str())
-            .await
-            .expect("record");
+        let rec = record_of(&s, &site).await;
         assert_eq!(rec.clamav_at, now);
         assert!(rec.result.clamav_available);
     }
 
-    /// The sweep goes on one site at a time as before, with new hits alerting
-    /// once and a held-off site left alone.
+    /// One `clamscan` for the node: every scanned site in one list, each listed
+    /// once, and a site whose scan is off or has no files of its own left out.
+    /// Nothing is walked or scanned per site.
     #[tokio::test]
-    async fn a_new_clamav_hit_alerts_once() {
+    async fn old_per_site_pass_is_gone() {
         let pool = open_memory().await.expect("open");
-        let a = with_clamav(happy_mocks(), || Ok(found(vec![webshell_hit()])));
+        let lists_seen: Arc<StdMutex<Vec<Vec<HostingId>>>> = Arc::default();
+        let listed: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let (seen, walked) = (lists_seen.clone(), listed.clone());
+        let mut a = happy_mocks_many();
+        a.expect_clamav_facts().returning(|| facts(4 * GIB));
+        a.expect_clamav_file_list().returning(move |root, _| {
+            walked.lock().expect("lock").push(root.to_string());
+            Ok(two_files(root))
+        });
+        a.expect_clamav_sweep()
+            .times(1)
+            .returning(move |lists, path| {
+                assert!(path.ends_with("clamav-list"), "{path:?}");
+                seen.lock()
+                    .expect("lock")
+                    .push(lists.iter().map(|(id, _)| id.clone()).collect());
+                sweep(integrity::SweepEnd::Complete, vec![])
+            });
         let s = svc(pool.clone(), a);
-        let site = site_named(&s, "kos.cz").await;
-        let now = monday_at(0, 12, 0);
-        s.set_stored_integrity_scan(site.id.as_str(), &scanned(now - 60, now))
-            .await;
-        assert_eq!(s.site_scan_clamav_tick_at(now).await.expect("tick"), 1);
-        assert_eq!(
-            s.site_scan_clamav_tick_at(now + 600).await.expect("tick"),
-            0,
-            "held off for a day"
+        let (one, two, off) = (
+            site_named(&s, "one.cz").await,
+            site_named(&s, "two.cz").await,
+            site_named(&s, "off.cz").await,
         );
-        let rec = s
-            .stored_integrity_scan(site.id.as_str())
+        hyperion_state::hosting_kv::set(&pool, off.id.as_str(), INTEGRITY_ENABLED_KV_KEY, "off", 1)
             .await
-            .expect("record");
-        assert_eq!(rec.clamav_at, now);
-        assert_eq!(rec.result.malware, vec![webshell_hit()]);
-        // Past the hold-off, the same hit is standing, not new.
+            .expect("kv");
+        let now = night(0);
+        s.site_scan_clamav_tick_at(&chrono::Utc, now)
+            .await
+            .expect("tick");
+        // Later the same night: not again.
+        s.site_scan_clamav_tick_at(&chrono::Utc, now + 600)
+            .await
+            .expect("tick");
+
+        let seen = lists_seen.lock().expect("lock");
+        assert_eq!(seen.len(), 1, "one pass");
+        let mut got: Vec<&str> = seen[0].iter().map(HostingId::as_str).collect();
+        got.sort_unstable();
+        let mut want = vec![one.id.as_str(), two.id.as_str()];
+        want.sort_unstable();
+        assert_eq!(got, want);
         assert_eq!(
-            s.site_scan_clamav_tick_at(now + DAY).await.expect("tick"),
-            0
+            listed.lock().expect("lock").len(),
+            2,
+            "each site listed once"
         );
     }
 
-    /// No release to compare with: no ClamAV either, so no new alerts for sites
-    /// that never had this scan. And none before anyone knows what a site is.
-    #[tokio::test]
-    async fn clamav_skips_what_has_no_upstream() {
+    /// A pass that is cut short can still not be started twice: the stamp is
+    /// there before the process is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_stamp_is_written_before_the_pass_starts() {
         let pool = open_memory().await.expect("open");
-        let mut a = happy_mocks_many();
-        a.expect_clamav_facts().returning(|| (true, true));
-        a.expect_clamav_scan().never();
+        let during = pool.clone();
+        let stamp: Arc<StdMutex<Option<String>>> = Arc::default();
+        let slot = stamp.clone();
+        let a = with_clamav(happy_mocks(), 4 * GIB, move |_| {
+            let pool = during.clone();
+            let v = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    hyperion_state::node_kv::get(&pool, "site_scan_clamav_at")
+                        .await
+                        .expect("kv")
+                })
+            });
+            *slot.lock().expect("lock") = v;
+            sweep(integrity::SweepEnd::Complete, vec![])
+        });
         let s = svc(pool.clone(), a);
-        let plain = site_named(&s, "static.cz").await;
-        let _never_scanned = site_named(&s, "new.cz").await;
-        let mut rec = scanned(1, 1);
-        rec.result.coverage.no_upstream = true;
-        s.set_stored_integrity_scan(plain.id.as_str(), &rec).await;
+        site_named(&s, "kos.cz").await;
+        let now = night(0);
+        s.site_scan_clamav_tick_at(&chrono::Utc, now)
+            .await
+            .expect("tick");
         assert_eq!(
-            s.site_scan_clamav_tick_at(monday_at(0, 12, 0))
+            stamp.lock().expect("lock").as_deref(),
+            Some(now.to_string().as_str())
+        );
+    }
+
+    /// The stamp lives in the database: a restarted agent, or a second one on the
+    /// same state, neither re-runs the week's pass nor skips the next.
+    #[tokio::test]
+    async fn weekly_cadence_survives_restart() {
+        let pool = open_memory().await.expect("open");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let count = || {
+            let n = runs.clone();
+            with_clamav(happy_mocks(), 4 * GIB, move |_| {
+                n.fetch_add(1, Ordering::SeqCst);
+                sweep(integrity::SweepEnd::Complete, vec![])
+            })
+        };
+        let first = svc(pool.clone(), count());
+        site_named(&first, "kos.cz").await;
+        first
+            .site_scan_clamav_tick_at(&chrono::Utc, night(0))
+            .await
+            .expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        // A new process on the same database.
+        let restarted = svc(pool.clone(), count());
+        let tick = |t: i64| restarted.site_scan_clamav_tick_at(&chrono::Utc, t);
+        tick(night(0) + 600).await.expect("tick");
+        tick(night(0) + DAY).await.expect("tick");
+        tick(night(0) + 6 * DAY).await.expect("tick");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "nothing before the week is up"
+        );
+        // A week on, but at midday: not in the window.
+        tick(monday_at(7, 12, 0)).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        tick(night(1)).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "the next week's night");
+    }
+
+    /// A node that was off through the whole window waits for the next night
+    /// rather than starting a pass at midday.
+    #[tokio::test]
+    async fn a_node_that_missed_the_window_waits_for_the_next_night() {
+        let pool = open_memory().await.expect("open");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let n = runs.clone();
+        let a = with_clamav(happy_mocks(), 4 * GIB, move |_| {
+            n.fetch_add(1, Ordering::SeqCst);
+            sweep(integrity::SweepEnd::Complete, vec![])
+        });
+        let s = svc(pool.clone(), a);
+        site_named(&s, "kos.cz").await;
+        hyperion_state::node_kv::set(&pool, "site_scan_clamav_at", &night(0).to_string(), 1)
+            .await
+            .expect("stamp");
+        for t in [
+            monday_at(9, 12, 0),
+            monday_at(9, 22, 0),
+            monday_at(10, 1, 59),
+        ] {
+            s.site_scan_clamav_tick_at(&chrono::Utc, t)
+                .await
+                .expect("tick");
+        }
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "over a week late, but not in the window"
+        );
+        s.site_scan_clamav_tick_at(&chrono::Utc, monday_at(10, 3, 0))
+            .await
+            .expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    /// New hits alert once, and standing ones next week don't.
+    #[tokio::test]
+    async fn a_new_clamav_hit_alerts_once() {
+        let pool = open_memory().await.expect("open");
+        let a = with_clamav(happy_mocks(), 4 * GIB, |lists| {
+            sweep(integrity::SweepEnd::Complete, vec![found_in(lists, 0)])
+        });
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let now = night(0);
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(now - 60, now))
+            .await;
+        assert_eq!(
+            s.site_scan_clamav_tick_at(&chrono::Utc, now)
+                .await
+                .expect("tick"),
+            1
+        );
+        let rec = record_of(&s, &site).await;
+        assert_eq!(rec.clamav_at, now);
+        assert!(rec.result.clamav_available);
+        assert_eq!(rec.result.malware.len(), 1);
+        assert_eq!(
+            rec.result.malware[0].path,
+            format!("{}/wp-content/uploads/a.php", site.root_dir)
+        );
+        // Next week the same hit is standing, not new.
+        assert_eq!(
+            s.site_scan_clamav_tick_at(&chrono::Utc, night(1))
                 .await
                 .expect("tick"),
             0
         );
+        assert_eq!(record_of(&s, &site).await.clamav_at, night(1));
     }
 
-    /// The pass didn't run, so its hits still stand, its age stays, and no words
-    /// from clamscan (tenant file names) reach the record.
+    /// A site with no WordPress to compare with is covered too. Its hits show on
+    /// the card; while the new layers are in their pilot they don't alert.
     #[tokio::test]
-    async fn a_failed_clamav_pass_keeps_prior_hits_and_stores_no_tenant_text() {
+    async fn clamav_covers_sites_without_upstream_and_stays_quiet_in_the_pilot() {
+        for (report_only, alerts) in [(true, 0), (false, 1)] {
+            let pool = open_memory().await.expect("open");
+            let a = with_clamav(happy_mocks(), 4 * GIB, |lists| {
+                sweep(integrity::SweepEnd::Complete, vec![found_in(lists, 0)])
+            });
+            let s = svc(pool.clone(), a);
+            let plain = site_named(&s, "static.cz").await;
+            let mut rec = scanned(1, 1);
+            rec.result.coverage.no_upstream = true;
+            rec.result.report_only = report_only;
+            s.set_stored_integrity_scan(plain.id.as_str(), &rec).await;
+            assert_eq!(
+                s.site_scan_clamav_tick_at(&chrono::Utc, night(0))
+                    .await
+                    .expect("tick"),
+                alerts,
+                "report_only {report_only}"
+            );
+            assert_eq!(record_of(&s, &plain).await.result.malware.len(), 1);
+        }
+    }
+
+    /// A site nobody has scanned yet has no card to put a reason on, and no record
+    /// is made for it.
+    #[tokio::test]
+    async fn a_site_never_scanned_gets_no_record_from_a_quiet_pass() {
         let pool = open_memory().await.expect("open");
-        let a = with_clamav(happy_mocks(), || {
+        let a = with_clamav(happy_mocks(), 4 * GIB, |_| {
+            sweep(integrity::SweepEnd::Complete, vec![])
+        });
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "new.cz").await;
+        s.site_scan_clamav_tick_at(&chrono::Utc, night(0))
+            .await
+            .expect("tick");
+        assert!(s.stored_integrity_scan(site.id.as_str()).await.is_none());
+    }
+
+    /// Under 2 GiB free the pass is skipped: the card says so, nothing is stamped
+    /// as failed, "clean" is as clean as it was, and the next ten minutes try
+    /// again, so the first quiet moment of the night gets the pass.
+    #[tokio::test]
+    async fn low_memory_is_skip_not_failure_and_does_not_block_clean() {
+        let pool = open_memory().await.expect("open");
+        let mem = Arc::new(std::sync::atomic::AtomicU64::new(2 * GIB - 1));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (m, n) = (mem.clone(), runs.clone());
+        let mut a = happy_mocks();
+        a.expect_clamav_facts()
+            .returning(move || facts(m.load(Ordering::SeqCst)));
+        a.expect_clamav_file_list()
+            .returning(|root, _| Ok(two_files(root)));
+        a.expect_clamav_sweep().returning(move |_, _| {
+            n.fetch_add(1, Ordering::SeqCst);
+            sweep(integrity::SweepEnd::Complete, vec![])
+        });
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let mut clean = scanned(night(0) - 60, night(0));
+        clean.result.coverage.no_upstream = true;
+        clean.result.scanned_at = clean.scanned_at;
+        assert!(clean.result.is_clean());
+        s.set_stored_integrity_scan(site.id.as_str(), &clean).await;
+
+        s.site_scan_clamav_tick_at(&chrono::Utc, night(0))
+            .await
+            .expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        let rec = record_of(&s, &site).await;
+        let said = rec.result.error.clone().expect("the card says why");
+        assert!(said.contains("2 GiB"), "{said}");
+        assert_eq!(rec.clamav_failed_at, 0, "not a failure");
+        assert_eq!(rec.clamav_at, 0);
+        assert!(!rec.result.clamav_available);
+        assert!(rec.result.is_clean(), "ClamAV is not part of clean");
+        assert_eq!(rec.result.verdict(), hyperion_types::ScanVerdict::Clean);
+        assert!(
+            hyperion_state::node_kv::get(&pool, "site_scan_clamav_at")
+                .await
+                .expect("kv")
+                .is_none(),
+            "no week was used up"
+        );
+
+        // Memory frees up later the same night.
+        mem.store(3 * GIB, Ordering::SeqCst);
+        s.site_scan_clamav_tick_at(&chrono::Utc, night(0) + 600)
+            .await
+            .expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        let rec = record_of(&s, &site).await;
+        assert_eq!(rec.result.error, None, "the reason is gone");
+        assert!(rec.result.clamav_available);
+    }
+
+    /// Signatures still downloading is a state of its own, and not installed says
+    /// nothing at all.
+    #[tokio::test]
+    async fn signatures_downloading_is_its_own_state_and_not_installed_is_silent() {
+        let pool = open_memory().await.expect("open");
+        let installed = Arc::new(AtomicBool::new(true));
+        let i = installed.clone();
+        let mut a = happy_mocks();
+        a.expect_clamav_facts()
+            .returning(move || integrity::ClamFacts {
+                installed: i.load(Ordering::SeqCst),
+                db_present: false,
+                mem_available: 8 * GIB,
+            });
+        a.expect_clamav_sweep().never();
+        a.expect_clamav_file_list().never();
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(night(0) - 60, night(0)))
+            .await;
+        s.site_scan_clamav_tick_at(&chrono::Utc, night(0))
+            .await
+            .expect("tick");
+        let rec = record_of(&s, &site).await;
+        assert!(rec
+            .result
+            .error
+            .clone()
+            .expect("said")
+            .contains("downloading"));
+        assert_eq!(rec.clamav_failed_at, 0);
+
+        installed.store(false, Ordering::SeqCst);
+        let mut quiet = rec;
+        quiet.clamav_error = None;
+        quiet.result.error = None;
+        s.set_stored_integrity_scan(site.id.as_str(), &quiet).await;
+        s.site_scan_clamav_tick_at(&chrono::Utc, night(0) + 600)
+            .await
+            .expect("tick");
+        assert_eq!(record_of(&s, &site).await.result.error, None);
+    }
+
+    /// The kernel killed the pass: its hits stand, the card says so, and the node
+    /// leaves ClamAV alone for seven days.
+    #[tokio::test]
+    async fn oom_kill_backs_off_seven_days() {
+        let pool = open_memory().await.expect("open");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let n = runs.clone();
+        let a = with_clamav(happy_mocks(), 8 * GIB, move |lists| {
+            n.fetch_add(1, Ordering::SeqCst);
+            sweep(integrity::SweepEnd::OutOfMemory, vec![found_in(lists, 0)])
+        });
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(night(0) - 60, night(0)))
+            .await;
+        assert_eq!(
+            s.site_scan_clamav_tick_at(&chrono::Utc, night(0))
+                .await
+                .expect("tick"),
+            1,
+            "what it found before it died is told"
+        );
+        let rec = record_of(&s, &site).await;
+        assert_eq!(rec.result.malware.len(), 1);
+        assert!(rec.result.error.expect("said").contains("lack of memory"));
+        assert_eq!(rec.clamav_failed_at, 0);
+        let until: i64 = hyperion_state::node_kv::get(&pool, "site_scan_clamav_backoff_until")
+            .await
+            .expect("kv")
+            .expect("set")
+            .parse()
+            .expect("number");
+        assert!(
+            (night(0) + 7 * DAY..night(0) + 7 * DAY + 60).contains(&until),
+            "seven days from the kill"
+        );
+
+        // A week on, an hour into the window and before the back-off ends: no pass,
+        // and the card says when it will be tried.
+        let early = night(1) - HOUR;
+        s.site_scan_clamav_tick_at(&chrono::Utc, early)
+            .await
+            .expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        let said = record_of(&s, &site).await.result.error.expect("said");
+        assert!(said.contains("not tried again until"), "{said}");
+        // Once it is over, the next tick of the window runs it.
+        s.site_scan_clamav_tick_at(&chrono::Utc, night(1) + 600)
+            .await
+            .expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    /// Exit 2 or a stop: the hits found are kept and listed, the sites with none
+    /// aren't called clean on the strength of it, and no failure is stamped. A full
+    /// pass next week is what clears a hit.
+    #[tokio::test]
+    async fn partial_keeps_hits() {
+        let pool = open_memory().await.expect("open");
+        let end = Arc::new(StdMutex::new(integrity::SweepEnd::Partial));
+        let e = end.clone();
+        let a = with_clamav(happy_mocks_many(), 8 * GIB, move |lists| {
+            let end = *e.lock().expect("lock");
+            let hits = if end.is_partial() {
+                // One site's webshell, found before clamscan stopped.
+                lists
+                    .iter()
+                    .position(|(_, f)| f[0].contains("hit.cz"))
+                    .map(|n| vec![found_in(lists, n)])
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            };
+            sweep(end, hits)
+        });
+        let s = svc(pool.clone(), a);
+        let hit = site_named(&s, "hit.cz").await;
+        let other = site_named(&s, "other.cz").await;
+        let mut was = scanned(night(0) - 60, night(0));
+        was.clamav_at = night(0) - 7 * DAY;
+        was.result.clamav_available = true;
+        s.set_stored_integrity_scan(other.id.as_str(), &was).await;
+        s.set_stored_integrity_scan(hit.id.as_str(), &scanned(night(0) - 60, night(0)))
+            .await;
+
+        assert_eq!(
+            s.site_scan_clamav_tick_at(&chrono::Utc, night(0))
+                .await
+                .expect("tick"),
+            1
+        );
+        let rec = record_of(&s, &hit).await;
+        assert_eq!(rec.result.malware.len(), 1, "the hit is kept");
+        assert!(rec.result.clamav_available);
+        assert!(rec
+            .result
+            .error
+            .expect("said")
+            .contains("could not read every file"));
+        assert_eq!(rec.clamav_failed_at, 0, "real hits are not a failure");
+        let rec = record_of(&s, &other).await;
+        assert!(rec.result.malware.is_empty());
+        assert_eq!(
+            rec.clamav_at,
+            night(0) - 7 * DAY,
+            "last week's verdict, unchanged"
+        );
+        assert!(
+            rec.result.error.is_some(),
+            "but the card says this week's didn't finish"
+        );
+
+        // The next week's pass is whole and finds nothing: now the hit clears.
+        *end.lock().expect("lock") = integrity::SweepEnd::Complete;
+        s.site_scan_clamav_tick_at(&chrono::Utc, night(1))
+            .await
+            .expect("tick");
+        let rec = record_of(&s, &hit).await;
+        assert!(rec.result.malware.is_empty());
+        assert_eq!(rec.clamav_at, night(1));
+        assert_eq!(rec.result.error, None);
+    }
+
+    /// A partial pass doesn't clear a hit it didn't repeat.
+    #[tokio::test]
+    async fn a_partial_pass_does_not_clear_an_old_hit() {
+        let pool = open_memory().await.expect("open");
+        let a = with_clamav(happy_mocks(), 8 * GIB, |_| {
+            sweep(integrity::SweepEnd::TimedOut, vec![])
+        });
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let mut was = scanned(night(0) - 60, night(0));
+        was.clamav_at = night(0) - 7 * DAY;
+        was.result.clamav_available = true;
+        was.result.malware = vec![webshell_hit()];
+        s.set_stored_integrity_scan(site.id.as_str(), &was).await;
+        s.site_scan_clamav_tick_at(&chrono::Utc, night(0))
+            .await
+            .expect("tick");
+        let rec = record_of(&s, &site).await;
+        assert_eq!(rec.result.malware, vec![webshell_hit()]);
+        assert_eq!(rec.clamav_at, night(0) - 7 * DAY);
+        assert!(rec.result.error.expect("said").contains("six hours"));
+    }
+
+    /// The pass didn't start: hits stand, their age stays, and no words from
+    /// clamscan (tenant file names) reach the record.
+    #[tokio::test]
+    async fn a_pass_that_could_not_start_keeps_prior_hits_and_stores_no_tenant_text() {
+        let pool = open_memory().await.expect("open");
+        let a = with_clamav(happy_mocks(), 8 * GIB, |_| {
             Err(AdapterError::Command {
                 cmd: "clamscan".into(),
                 code: 2,
@@ -2580,64 +3121,181 @@ mod site_scan {
         });
         let s = svc(pool.clone(), a);
         let site = site_named(&s, "kos.cz").await;
-        let now = monday_at(0, 12, 0);
+        let now = night(0);
         let mut prior = scanned(now - 60, now);
-        prior.clamav_at = now - 2 * DAY;
+        prior.clamav_at = now - 7 * DAY;
         prior.result.clamav_available = true;
         prior.result.malware = vec![webshell_hit()];
         s.set_stored_integrity_scan(site.id.as_str(), &prior).await;
 
-        assert_eq!(s.site_scan_clamav_tick_at(now).await.expect("tick"), 0);
+        assert_eq!(
+            s.site_scan_clamav_tick_at(&chrono::Utc, now)
+                .await
+                .expect("tick"),
+            0
+        );
 
-        let rec = s
-            .stored_integrity_scan(site.id.as_str())
-            .await
-            .expect("record");
+        let rec = record_of(&s, &site).await;
         assert_eq!(rec.result.malware, vec![webshell_hit()]);
-        assert_eq!(rec.clamav_at, now - 2 * DAY);
-        assert_eq!(rec.clamav_failed_at, now);
-        assert!(!rec.result.clamav_available, "not this time");
+        assert_eq!(rec.clamav_at, now - 7 * DAY);
+        assert_eq!(rec.clamav_failed_at, 0);
+        assert!(rec.result.clamav_available, "the last pass's word stands");
         let error = rec.result.error.expect("said");
         assert!(
             !error.contains("evil") && !error.contains("/home"),
             "{error}"
         );
-        // Goes to the back of the sweep and holds off.
-        assert_eq!(
-            s.site_scan_clamav_tick_at(now + 600).await.expect("tick"),
-            0
-        );
+        // The week is spent: it isn't retried every ten minutes.
+        s.site_scan_clamav_tick_at(&chrono::Utc, now + 600)
+            .await
+            .expect("tick");
     }
 
-    /// A site that fails its pass doesn't keep the sweep to itself.
+    /// Names ClamAV wasn't given, and a list cut at its cap, are on that site's card
+    /// and nowhere else.
     #[tokio::test]
-    async fn the_clamav_sweep_takes_the_longest_waiting_first() {
+    async fn what_the_list_left_out_is_noted_on_that_site() {
         let pool = open_memory().await.expect("open");
-        let scanned_paths = Arc::new(StdMutex::new(Vec::new()));
-        let seen = scanned_paths.clone();
         let mut a = happy_mocks_many();
-        a.expect_clamav_facts().returning(|| (true, true));
-        a.expect_clamav_scan().returning(move |root, _| {
-            seen.lock().expect("lock").push(root.to_string());
-            Ok(found(vec![]))
+        a.expect_clamav_facts().returning(|| facts(8 * GIB));
+        a.expect_clamav_file_list().returning(|root, cap| {
+            assert_eq!(cap, 300_000);
+            let mut l = two_files(root);
+            if root.contains("odd") {
+                l.left_out = 3;
+                l.capped = true;
+            }
+            Ok(l)
+        });
+        a.expect_clamav_sweep()
+            .returning(|_, _| sweep(integrity::SweepEnd::Complete, vec![]));
+        let s = svc(pool.clone(), a);
+        let odd = site_named(&s, "odd.cz").await;
+        let plain = site_named(&s, "plain.cz").await;
+        for d in [&odd, &plain] {
+            s.set_stored_integrity_scan(d.id.as_str(), &scanned(night(0) - 60, night(0)))
+                .await;
+        }
+        s.site_scan_clamav_tick_at(&chrono::Utc, night(0))
+            .await
+            .expect("tick");
+        let said = record_of(&s, &odd).await.result.error.expect("said");
+        assert!(
+            said.contains("3 file(s)") && said.contains("first 2 files"),
+            "{said}"
+        );
+        assert_eq!(record_of(&s, &plain).await.result.error, None);
+    }
+
+    /// One site that can't be listed doesn't stop the others, and keeps its last
+    /// verdict.
+    #[tokio::test]
+    async fn a_site_that_cannot_be_listed_is_left_out_with_a_note() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks_many();
+        a.expect_clamav_facts().returning(|| facts(8 * GIB));
+        a.expect_clamav_file_list().returning(|root, _| {
+            if root.contains("broken") {
+                Err(AdapterError::Other("/home/x/<b>evil</b>: no".into()))
+            } else {
+                Ok(two_files(root))
+            }
+        });
+        let covered: Arc<StdMutex<usize>> = Arc::default();
+        let c = covered.clone();
+        a.expect_clamav_sweep().returning(move |lists, _| {
+            *c.lock().expect("lock") = lists.len();
+            sweep(integrity::SweepEnd::Complete, vec![])
         });
         let s = svc(pool.clone(), a);
-        let now = monday_at(0, 12, 0);
-        let failed_lately = site_named(&s, "failed.cz").await;
-        let waiting = site_named(&s, "waiting.cz").await;
-        let mut f = scanned(now - 60, now);
-        f.clamav_failed_at = now - 2 * HOUR;
-        s.set_stored_integrity_scan(failed_lately.id.as_str(), &f)
-            .await;
-        let mut w = scanned(now - 60, now);
-        w.clamav_at = now - 3 * DAY;
-        s.set_stored_integrity_scan(waiting.id.as_str(), &w).await;
-
-        s.site_scan_clamav_tick_at(now).await.expect("tick");
-        assert_eq!(
-            *scanned_paths.lock().expect("lock"),
-            vec![waiting.root_dir.clone(), failed_lately.root_dir.clone()]
+        let broken = site_named(&s, "broken.cz").await;
+        let fine = site_named(&s, "fine.cz").await;
+        for d in [&broken, &fine] {
+            s.set_stored_integrity_scan(d.id.as_str(), &scanned(night(0) - 60, night(0)))
+                .await;
+        }
+        s.site_scan_clamav_tick_at(&chrono::Utc, night(0))
+            .await
+            .expect("tick");
+        assert_eq!(*covered.lock().expect("lock"), 1);
+        let rec = record_of(&s, &broken).await;
+        assert!(!rec.result.clamav_available);
+        let said = rec.result.error.expect("said");
+        assert!(
+            said.contains("could not list") && !said.contains("evil"),
+            "{said}"
         );
+        assert!(record_of(&s, &fine).await.result.clamav_available);
+    }
+
+    /// A hit restored from quarantine while the pass ran is not lost to a pass
+    /// that looked at that place before the file was back; one restored before it
+    /// began is the pass's own business and is forgotten.
+    #[tokio::test]
+    async fn a_hit_restored_during_the_pass_is_not_lost() {
+        let pool = open_memory().await.expect("open");
+        let a = with_clamav(happy_mocks(), 8 * GIB, |_| {
+            sweep(integrity::SweepEnd::Complete, vec![])
+        });
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let now = night(0);
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(now - 60, now))
+            .await;
+        let mid = hyperion_types::WpMalwareHit {
+            path: format!("{}/wp-content/uploads/mid.php", site.root_dir),
+            signature: "Php.Trojan.Webshell-1".into(),
+        };
+        let older = hyperion_types::WpMalwareHit {
+            path: format!("{}/wp-content/uploads/older.php", site.root_dir),
+            signature: "Php.Trojan.Webshell-1".into(),
+        };
+        s.clamav_note_restored(site.id.as_str(), std::slice::from_ref(&older), now - 1)
+            .await;
+        s.clamav_note_restored(site.id.as_str(), std::slice::from_ref(&mid), now + 30)
+            .await;
+
+        assert_eq!(
+            s.site_scan_clamav_tick_at(&chrono::Utc, now)
+                .await
+                .expect("tick"),
+            1,
+            "the restored hit is told about, being new to the record"
+        );
+        let rec = record_of(&s, &site).await;
+        assert_eq!(rec.result.malware, vec![mid.clone()]);
+        let left = s.clamav_restored(site.id.as_str()).await;
+        assert_eq!(left.len(), 1, "the older entry is dropped");
+        assert_eq!(left[0].path, mid.path);
+    }
+
+    /// "Scan now" and the blocking scan leave ClamAV alone, and the weekly
+    /// verdict survives them.
+    #[tokio::test]
+    async fn the_blocking_scan_never_runs_clamav_and_keeps_its_verdict() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_clamav_facts().never();
+        a.expect_clamav_file_list().never();
+        a.expect_clamav_sweep().never();
+        a.expect_site_scan_worker()
+            .returning(|_| WorkerReply::Failed("no".into()));
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let mut prior = scanned(1, 1);
+        prior.clamav_at = 777;
+        prior.result.clamav_available = true;
+        prior.result.malware = vec![webshell_hit()];
+        s.set_stored_integrity_scan(site.id.as_str(), &prior).await;
+        let r = s
+            .wp_integrity_scan(HostingSelector::Id(site.id.clone()))
+            .await
+            .expect("scan");
+        assert!(!r.native_scan_ran);
+        assert!(r.clamav_available, "last week's pass still stands");
+        assert_eq!(r.malware, vec![webshell_hit()]);
+        assert_eq!(r.clamav_at, 777, "the card can say when it last ran");
+        assert!(r.error.is_some());
     }
 
     /// A pass that finishes while a long scan of that site runs keeps its result:
@@ -2693,25 +3351,6 @@ mod site_scan {
         assert_eq!(rec.clamav_at, now - 60);
         assert_eq!(rec.result.malware, vec![webshell_hit()]);
         assert!(rec.result.clamav_available);
-    }
-
-    /// The blocking scan `hctl` uses: both halves, and it says which ran.
-    #[tokio::test]
-    async fn the_blocking_scan_reports_a_pass_that_ran_now() {
-        let pool = open_memory().await.expect("open");
-        let mut a = with_clamav(happy_mocks(), || Ok(found(vec![webshell_hit()])));
-        a.expect_site_scan_worker()
-            .returning(|_| WorkerReply::Failed("no".into()));
-        let s = svc(pool.clone(), a);
-        let site = site_named(&s, "kos.cz").await;
-        let r = s
-            .wp_integrity_scan(HostingSelector::Id(site.id.clone()))
-            .await
-            .expect("scan");
-        assert!(!r.native_scan_ran);
-        assert!(r.clamav_available, "this one did run");
-        assert_eq!(r.malware, vec![webshell_hit()]);
-        assert!(r.error.is_some());
     }
 
     // ---- what other people read ----
@@ -2885,17 +3524,22 @@ mod site_scan {
         let pool = open_memory().await.expect("open");
         let id_slot = Arc::new(StdMutex::new(String::new()));
         let (during, slot) = (pool.clone(), id_slot.clone());
-        let a = with_clamav(happy_mocks(), move || {
+        let a = with_clamav(happy_mocks(), 8 * GIB, move |lists| {
             make_record_unreadable(&during, &slot.lock().expect("lock"));
-            Ok(found(vec![webshell_hit()]))
+            sweep(integrity::SweepEnd::Complete, vec![found_in(lists, 0)])
         });
         let s = svc(pool.clone(), a);
         let site = site_named(&s, "kos.cz").await;
         *id_slot.lock().expect("lock") = site.id.as_str().to_string();
-        let now = monday_at(0, 12, 0);
+        let now = night(0);
         s.set_stored_integrity_scan(site.id.as_str(), &scanned(now - 60, now))
             .await;
-        assert_eq!(s.site_scan_clamav_tick_at(now).await.expect("tick"), 0);
+        assert_eq!(
+            s.site_scan_clamav_tick_at(&chrono::Utc, now)
+                .await
+                .expect("tick"),
+            0
+        );
         record_was_left_alone(&s, &pool, site.id.as_str()).await;
     }
 
@@ -2952,8 +3596,8 @@ mod site_scan {
         let pool = open_memory().await.expect("open");
         let id_slot = Arc::new(StdMutex::new(String::new()));
         let (during, slot) = (pool.clone(), id_slot.clone());
-        let now = monday_at(0, 12, 0);
-        let a = with_clamav(happy_mocks(), move || {
+        let now = night(0);
+        let a = with_clamav(happy_mocks(), 8 * GIB, move |_| {
             let id = slot.lock().expect("lock").clone();
             let mut rec = scanned(now, now);
             rec.result.core_modified = vec!["wp-login.php".into()];
@@ -2966,14 +3610,19 @@ mod site_scan {
                         .expect("kv")
                 })
             });
-            Ok(found(vec![]))
+            sweep(integrity::SweepEnd::Complete, vec![])
         });
         let s = svc(pool.clone(), a);
         let site = site_named(&s, "kos.cz").await;
         *id_slot.lock().expect("lock") = site.id.as_str().to_string();
         s.set_stored_integrity_scan(site.id.as_str(), &scanned(now - 60, now))
             .await;
-        assert_eq!(s.site_scan_clamav_tick_at(now).await.expect("tick"), 0);
+        assert_eq!(
+            s.site_scan_clamav_tick_at(&chrono::Utc, now)
+                .await
+                .expect("tick"),
+            0
+        );
         let rec = s
             .stored_integrity_scan(site.id.as_str())
             .await

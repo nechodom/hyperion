@@ -1095,7 +1095,7 @@ async fn quarantine_then_restore_keeps_the_clamav_hit() {
     a.expect_site_scan_evict_manifests().returning(|_| ());
     let mut r = result(vec![rule_hit("up.php", SHA)], vec![]);
     r.clamav_available = true;
-    let (s, _pool, sel, id) = fixture(a, r).await;
+    let (s, pool, sel, id) = fixture(a, r).await;
     let root = s.get(sel.clone()).await.expect("get").root_dir;
     let other = hyperion_types::WpMalwareHit {
         path: format!("{root}/other.php"),
@@ -1126,6 +1126,16 @@ async fn quarantine_then_restore_keeps_the_clamav_hit() {
         .expect("restore");
     assert!(back.malware.contains(&hit));
     assert!(!back.is_clean());
+    // A ClamAV pass running now may have been past that place already, so the
+    // pass is told at its end.
+    let noted = hyperion_state::hosting_kv::get(&pool, &id, "clamav_restored")
+        .await
+        .expect("kv")
+        .expect("noted");
+    let noted: serde_json::Value = serde_json::from_str(&noted).expect("json");
+    assert_eq!(noted[0]["path"], hit.path);
+    assert_eq!(noted[0]["signature"], hit.signature);
+    assert!(noted[0]["restored_at"].as_i64().expect("time") > 0);
 
     // And a scan that runs next carries it, as it does any standing ClamAV hit.
     s.site_scan_tick_at(&chrono::Utc, 2_000_000)

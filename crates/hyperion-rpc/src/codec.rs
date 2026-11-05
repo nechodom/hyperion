@@ -672,9 +672,9 @@ pub enum Request {
     /// cluster-wide vulnerability dashboard.
     VulnFindingsList,
     /// Verify a hosting's WordPress core + plugins against the checksums
-    /// WordPress.org publishes, and (where a scanner exists) sweep its
-    /// docroot with ClamAV. The "has anything been tampered with?"
-    /// sibling of `WpVulnScan`.
+    /// WordPress.org publishes, and read the rest of its files. ClamAV is the
+    /// node's weekly pass, not part of this. The "has anything been tampered
+    /// with?" sibling of `WpVulnScan`.
     WpIntegrityScan {
         hosting: HostingSelector,
     },

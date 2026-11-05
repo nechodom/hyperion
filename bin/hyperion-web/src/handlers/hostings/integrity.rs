@@ -68,7 +68,7 @@ pub(super) fn integrity_not_checked(why: String) -> hyperion_types::WpIntegrityS
 }
 
 /// The request that fills the card on page load. A read of the stored
-/// result, never `WpIntegrityScan`: that one runs the scan worker and clamscan.
+/// result, never `WpIntegrityScan`: that one runs the scan worker.
 pub(super) fn integrity_panel_request(sel: HostingSelector) -> Request {
     Request::WpIntegrityStored { hosting: sel }
 }
@@ -271,7 +271,7 @@ pub struct IntegrityScanForm {
 
 /// "Scan now". A POST rather than a repeat of the lazy GET because it
 /// isn't a refresh: it re-hashes every core and plugin file against
-/// WordPress.org and can walk the whole docroot with clamscan. Gated on
+/// WordPress.org and can read the whole docroot. Gated on
 /// `WpManage` for the same reason — reading the verdict is a view,
 /// spending the node's IO is not. Asks the owning node for a scan, which returns
 /// at once, and answers with the card in its "queued" state, which polls until

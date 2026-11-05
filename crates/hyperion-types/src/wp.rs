@@ -764,6 +764,11 @@ pub struct WpIntegrityScanResult {
     /// Absent (false) from nodes older than this field.
     #[serde(default)]
     pub clamav_installed: bool,
+    /// Unix seconds the node's weekly ClamAV pass last covered this site; 0 =
+    /// never. The card says when ClamAV last looked, since it is not part of
+    /// "Scan now".
+    #[serde(default)]
+    pub clamav_at: i64,
     /// Whether core was compared with its release at all (wp-cli did this once,
     /// hence the name). False for a broken install, a site with no WordPress, or
     /// a WordPress.org lookup that failed.

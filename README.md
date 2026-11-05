@@ -194,7 +194,8 @@ install to sites that are running and backed up:
   other file is read for known malware patterns and watched for changes. Results
   say what was and was not covered, and changes it cannot judge wait as "to
   review" until someone trusts or quarantines them. Sites without WordPress are
-  scanned too. The database is not scanned. ClamAV is optional. Findings alert
+  scanned too. The database is not scanned. ClamAV is optional: one bounded
+  weekly pass for the node, only with 2 GiB of memory free. Findings alert
   once, care reports and `hctl` carry the same verdict, and repair of core files
   and reinstall of tampered plugins start from the findings. The new checks run
   as a silent pilot until `[integrity] new_layers_live` is switched on.

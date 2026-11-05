@@ -559,8 +559,8 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Every hosting's last stored vuln scan on this node.
     async fn vuln_findings_list(&self)
         -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError>;
-    /// Verify core + plugin checksums against WordPress.org and sweep the
-    /// docroot with ClamAV where it's installed.
+    /// Verify core + plugin checksums against WordPress.org and read the rest of
+    /// the files. ClamAV is the node's weekly pass, not part of this.
     async fn wp_integrity_scan(
         &self,
         hosting: HostingSelector,

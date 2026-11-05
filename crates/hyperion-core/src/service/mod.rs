@@ -287,17 +287,29 @@ pub trait AdapterPort: Send + Sync {
         Ok(hyperion_types::QuarantineList::default())
     }
 
-    /// Is `clamscan` installed, and does it have signatures yet?
-    async fn clamav_facts(&self) -> (bool, bool) {
-        (false, false)
+    /// Is `clamscan` installed, does it have signatures yet, and how much memory
+    /// is free? Default: nothing here.
+    async fn clamav_facts(&self) -> integrity::ClamFacts {
+        integrity::ClamFacts::default()
     }
 
-    /// One time-limited ClamAV pass over a docroot.
-    async fn clamav_scan(
+    /// What ClamAV should be given from one docroot, at most `cap` files. Walks
+    /// with the pinned-root walker.
+    async fn clamav_file_list(
         &self,
         _root: &str,
-        _niceness: i32,
-    ) -> Result<integrity::MalwareScan, AdapterError> {
+        _cap: usize,
+    ) -> Result<integrity::ClamList, AdapterError> {
+        Err(AdapterError::Other("no scanner here".into()))
+    }
+
+    /// One `clamscan` over every site's list, in its capped unit. The list is
+    /// written to `list_path` and removed after.
+    async fn clamav_sweep(
+        &self,
+        _lists: &[(HostingId, Vec<String>)],
+        _list_path: &std::path::Path,
+    ) -> Result<integrity::ClamSweep, AdapterError> {
         Err(AdapterError::Other("no scanner here".into()))
     }
 
@@ -887,10 +899,6 @@ pub struct SiteScanShared {
     pub(crate) started_at: i64,
     /// One scan worker at a time on this node.
     pub(crate) node: tokio::sync::Mutex<()>,
-    /// One `clamscan` at a time on this node. It reads an entire docroot, so two
-    /// at once turn a shared host's IO into a queue for every site on it. Taken
-    /// with `try_lock`: a pass that finds it busy carries the last verdict.
-    pub(crate) clamav: tokio::sync::Mutex<()>,
     /// Held across reading and rewriting one stored scan record, never across a
     /// scan: a scan and a ClamAV pass each own half of that record, and can both
     /// finish while the other runs.
@@ -904,7 +912,6 @@ impl Default for SiteScanShared {
         Self {
             started_at: now_secs(),
             node: Default::default(),
-            clamav: Default::default(),
             record: Default::default(),
             wake: Default::default(),
         }
@@ -1141,11 +1148,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// node/worker surface in the UI is noise rather than information.
     pub fn is_standalone(&self) -> bool {
         matches!(self.deployment_role(), DeploymentRole::Standalone)
-    }
-
-    /// Niceness for the malware sweep — see [`read_scan_niceness`].
-    pub fn malware_scan_niceness(&self) -> i32 {
-        read_scan_niceness(self.agent_config_path.as_deref())
     }
 
     /// Whether the site scan's new layers are past their silent pilot — see

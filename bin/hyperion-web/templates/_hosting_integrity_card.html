@@ -187,10 +187,13 @@
       {% if scan.coverage.symlinks_skipped > 0 %}· {{ scan.coverage.symlinks_skipped }} symlink(s) not followed{% endif %}
       {% endif %}
       · Malware:
-      {# ClamAV never runs over a site with no WordPress, so don't say it is
-         waiting or missing there. #}
-      {% if scan.coverage.no_upstream && !scan.clamav_available %}files are read for known malware patterns; ClamAV doesn't run on this kind of site
-      {% else if scan.clamav_available %}ClamAV scanned the site's files{% else if scan.clamav_installed %}<span class="tone-warn">not scanned</span> — ClamAV is installed, but no pass over this site's files has finished yet (the reason, if it failed, is below){% else %}<span class="tone-warn">not scanned</span> — ClamAV isn't installed on this node; add it on the <a href="/services">Services page</a> to look inside <code>uploads/</code>{% endif %}
+      {# ClamAV is the node's own weekly pass, optional, over every scanned site
+         (one with no WordPress too). "Scan now" doesn't run it, so the card says
+         when it last did. #}
+      {% if scan.clamav_available %}ClamAV scanned the site's files{% if scan.clamav_at != 0 %} {{ crate::handlers::stats::fmt_ago(scan.clamav_at) }}{% endif %} (a weekly pass, overnight)
+      {% else if scan.coverage.no_upstream %}files are read for known malware patterns; ClamAV is optional{% if scan.clamav_installed %} and hasn't covered this site yet{% else %} and not installed on this node{% endif %}
+      {% else if scan.clamav_installed %}<span class="tone-warn">not scanned</span> — ClamAV is installed, but its weekly pass (overnight, when the node has 2 GiB of memory free) hasn't covered this site yet (the reason, if it was skipped, is below)
+      {% else %}<span class="tone-warn">not scanned</span> — ClamAV isn't installed on this node. It is optional: once added on the <a href="/services">Services page</a> it looks inside <code>uploads/</code> once a week{% endif %}
       {% if scan.wp_cli_ok || scan.coverage.no_upstream %}{% if let Some(e) = scan.error %}· {{ e|tenant_text }}{% endif %}{% endif %}.
       {% endif %}
       The database is not scanned.

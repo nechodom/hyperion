@@ -360,8 +360,8 @@ fn verified_without_clamav_is_not_clean() {
     assert!(!html.contains("Clean —"));
 }
 
-/// ClamAV IS installed but this site has no pass yet — the node's one
-/// scanner slot was busy, or clamscan could not finish. That must not be
+/// ClamAV IS installed but this site has no pass yet — the week's pass was
+/// skipped for memory, or hasn't come round. That must not be
 /// rendered as "isn't installed": the operator who just added ClamAV
 /// would go looking for a problem on the Services page that isn't there.
 #[test]
@@ -373,7 +373,9 @@ fn installed_clamav_without_a_pass_is_not_called_missing() {
         clamav_installed: true,
         plugins_checked: 3,
         plugins_total: 3,
-        error: Some("malware scan skipped: another scan is already running on this node".into()),
+        error: Some(
+            "ClamAV skipped this week's pass: the node has less than 2 GiB of memory free".into(),
+        ),
         scanned_at: 1_700_000_000,
         ..Default::default()
     });
@@ -381,8 +383,36 @@ fn installed_clamav_without_a_pass_is_not_called_missing() {
     assert!(html.contains("malware not scanned"));
     assert!(!html.contains("ClamAV isn't installed"));
     assert!(html.contains("ClamAV is installed"));
-    assert!(html.contains("another scan is already running"));
+    assert!(html.contains("less than 2 GiB of memory free"));
     assert!(!html.contains("Clean —"));
+}
+
+/// ClamAV is the node's weekly pass, not part of "Scan now", so the card says
+/// when it last looked, and a skipped week doesn't take that away.
+#[test]
+fn the_card_says_when_clamav_last_ran() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        clamav_available: true,
+        clamav_installed: true,
+        clamav_at: 1_700_000_000,
+        error: Some(
+            "ClamAV skipped this week's pass: the node has less than 2 GiB of memory free".into(),
+        ),
+        ..native_scan()
+    });
+    assert!(html.contains("ClamAV scanned the site's files"));
+    assert!(html.contains("a weekly pass"));
+    assert!(html.contains("less than 2 GiB of memory free"));
+    assert!(
+        html.contains(r#"data-verdict="clean""#),
+        "ClamAV is not part of clean"
+    );
+    let never = render_integrity(hyperion_types::WpIntegrityScanResult {
+        clamav_available: true,
+        clamav_at: 0,
+        ..native_scan()
+    });
+    assert!(never.contains("a weekly pass"));
 }
 
 /// Both signals ran and both came back empty — the only state allowed
@@ -1550,9 +1580,10 @@ fn non_wordpress_card_never_mentions_wordpress() {
     let clean = render_integrity(non_wordpress_scan());
     assert!(clean.contains(r#"data-verdict="clean""#));
     assert!(clean.contains("80 files watched"));
-    // ClamAV doesn't run on such a site; the card doesn't call it missing.
-    assert!(clean.contains("ClamAV doesn't run on this kind of site"));
-    assert!(!clean.contains("isn't installed"));
+    // ClamAV is optional and covers such a site too; the card doesn't call it a
+    // fault, and the native scan's own reading is said first.
+    assert!(clean.contains("files are read for known malware patterns; ClamAV is optional"));
+    assert!(!clean.contains("tone-warn\">not scanned"));
 }
 
 /// Hostings other than WordPress ones get the card on the overview tab: PHP and

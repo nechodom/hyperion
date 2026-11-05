@@ -384,7 +384,7 @@ fn timeout_for_request(req: &Request) -> u64 {
         // Enabling quotas apt-installs `quota` and runs quotacheck, which
         // the node itself allows 240 s; QuotaSet enables them inline.
         Request::QuotaEnableKernel { .. } | Request::QuotaSet { .. } => 600,
-        // ClamAV over the docroot plus the native scan. `hctl` only: the panel
+        // The native scan, waited for. `hctl` only: the panel
         // sends `WpIntegrityScanRequest`, which returns at once.
         Request::WpIntegrityScan { .. } => 900,
         Request::WpCoreRepair { .. } => 900,
