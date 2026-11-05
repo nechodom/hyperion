@@ -1447,6 +1447,26 @@ pub enum Request {
     },
     /// Read the log of one container or of a whole stack on this node.
     DockerLogs(hyperion_types::docker::DockerLogRequest),
+    /// Master: the URL checks, with 24 hour figures. Empty while the Docker
+    /// module is off for the cluster.
+    UrlMonitorList,
+    /// Master: add a URL check, or change one.
+    UrlMonitorSet(hyperion_types::url_monitor::UrlMonitorInput),
+    /// Master: delete a URL check and its samples.
+    UrlMonitorDelete {
+        id: i64,
+        /// Who asked, for the audit entry.
+        #[serde(default)]
+        actor: String,
+    },
+    /// Master: sample every URL check that is due, decide what changed, and
+    /// return the alerts not yet acknowledged.
+    UrlMonitorTick,
+    /// Master: send the alert a check owes and acknowledge it.
+    UrlMonitorAlert {
+        id: i64,
+        context: hyperion_types::url_monitor::UrlAlertContext,
+    },
     /// Look up the avatar basename for one web_user.
     AvatarFilename {
         user_id: i64,
@@ -2784,6 +2804,15 @@ pub enum Response {
     /// Ack for DockerForgetProject.
     DockerProjectForgotten,
     DockerLogs(hyperion_types::docker::DockerLogChunk),
+    UrlMonitorList(hyperion_types::url_monitor::UrlMonitorList),
+    /// The id of the check that was added or changed.
+    UrlMonitorSet {
+        id: i64,
+    },
+    UrlMonitorDeleted,
+    /// Alerts decided and not yet acknowledged.
+    UrlMonitorTick(Vec<hyperion_types::url_monitor::UrlMonitorEvent>),
+    UrlMonitorAlerted,
     AvatarFilename(Option<String>),
     AvatarSet,
     /// Returns the masked target address (e.g. "k****@example.cz").

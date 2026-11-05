@@ -1285,6 +1285,28 @@ pub trait AgentApi: Send + Sync + 'static {
         req: hyperion_types::docker::DockerLogRequest,
     ) -> Result<hyperion_types::docker::DockerLogChunk, RpcError>;
 
+    /// Master: the URL checks (empty while the Docker module is off).
+    async fn url_monitor_list(
+        &self,
+    ) -> Result<hyperion_types::url_monitor::UrlMonitorList, RpcError>;
+    /// Master: add or change a URL check; returns its id.
+    async fn url_monitor_set(
+        &self,
+        input: hyperion_types::url_monitor::UrlMonitorInput,
+    ) -> Result<i64, RpcError>;
+    /// Master: delete a URL check and its samples.
+    async fn url_monitor_delete(&self, id: i64, actor: String) -> Result<(), RpcError>;
+    /// Master: sample what is due; returns alerts still unacknowledged.
+    async fn url_monitor_tick(
+        &self,
+    ) -> Result<Vec<hyperion_types::url_monitor::UrlMonitorEvent>, RpcError>;
+    /// Master: send a check's pending alert and acknowledge it.
+    async fn url_monitor_alert(
+        &self,
+        id: i64,
+        context: hyperion_types::url_monitor::UrlAlertContext,
+    ) -> Result<(), RpcError>;
+
     /// Read the avatar filename column for one user.
     async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError>;
     /// Set / clear the avatar filename column.

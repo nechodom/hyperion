@@ -118,9 +118,16 @@ pub async fn set_cluster_installed(pool: &SqlitePool) -> Result<(), StateError> 
     Ok(())
 }
 
-/// Master: turn the cluster flag off and forget every node.
+/// Master: turn the cluster flag off and forget every node. The URL checks
+/// are part of the module, so they and their history go with it.
 pub async fn clear_cluster(pool: &SqlitePool) -> Result<(), StateError> {
     let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM url_monitor_samples")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM url_monitors")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM docker_nodes")
         .execute(&mut *tx)
         .await?;

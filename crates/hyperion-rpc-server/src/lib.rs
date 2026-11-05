@@ -1467,6 +1467,28 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::UrlMonitorList => match api.url_monitor_list().await {
+            Ok(l) => Response::UrlMonitorList(l),
+            Err(e) => Response::Error(e),
+        },
+        Request::UrlMonitorSet(input) => match api.url_monitor_set(input).await {
+            Ok(id) => Response::UrlMonitorSet { id },
+            Err(e) => Response::Error(e),
+        },
+        Request::UrlMonitorDelete { id, actor } => match api.url_monitor_delete(id, actor).await {
+            Ok(()) => Response::UrlMonitorDeleted,
+            Err(e) => Response::Error(e),
+        },
+        Request::UrlMonitorTick => match api.url_monitor_tick().await {
+            Ok(events) => Response::UrlMonitorTick(events),
+            Err(e) => Response::Error(e),
+        },
+        Request::UrlMonitorAlert { id, context } => {
+            match api.url_monitor_alert(id, context).await {
+                Ok(()) => Response::UrlMonitorAlerted,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::DockerOverview => match api.docker_overview().await {
             Ok(st) => Response::DockerOverview(st),
             Err(e) => Response::Error(e),
@@ -3616,6 +3638,32 @@ mod tests {
         }
         async fn docker_node_silent(&self, _: String, _: bool) -> Result<bool, RpcError> {
             Ok(false)
+        }
+        async fn url_monitor_list(
+            &self,
+        ) -> Result<hyperion_types::url_monitor::UrlMonitorList, RpcError> {
+            Ok(Default::default())
+        }
+        async fn url_monitor_set(
+            &self,
+            _: hyperion_types::url_monitor::UrlMonitorInput,
+        ) -> Result<i64, RpcError> {
+            Ok(0)
+        }
+        async fn url_monitor_delete(&self, _: i64, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn url_monitor_tick(
+            &self,
+        ) -> Result<Vec<hyperion_types::url_monitor::UrlMonitorEvent>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn url_monitor_alert(
+            &self,
+            _: i64,
+            _: hyperion_types::url_monitor::UrlAlertContext,
+        ) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn docker_overview(
             &self,

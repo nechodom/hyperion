@@ -42,6 +42,7 @@ pub mod profiles;
 pub mod reports;
 pub mod scheduler;
 pub mod system_users;
+pub mod url_monitors;
 pub mod usage_samples;
 pub mod waf;
 pub mod web_sessions;

@@ -391,6 +391,21 @@ pub fn print_pretty(resp: &Response) {
         Response::DockerNodeSilent { changed } => {
             println!("docker node silent state {}", if *changed { "changed" } else { "unchanged" })
         }
+        Response::UrlMonitorList(l) => {
+            if !l.enabled {
+                println!("URL checks are off: the Docker module is not on for the cluster");
+            }
+            for m in &l.monitors {
+                println!(
+                    "{:>4}  {:<9}  {}  ({}% over 24 h)",
+                    m.id, m.alert_state, m.url, m.success_pct_24h
+                );
+            }
+        }
+        Response::UrlMonitorSet { id } => println!("✓ url check {id} saved"),
+        Response::UrlMonitorDeleted => println!("✓ url check deleted"),
+        Response::UrlMonitorTick(events) => println!("{} url alert(s) pending", events.len()),
+        Response::UrlMonitorAlerted => println!("✓ url alert sent"),
         Response::DockerProjectForgotten => println!("✓ docker project forgotten"),
         Response::DockerOverview(st) => {
             println!(

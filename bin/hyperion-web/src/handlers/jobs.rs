@@ -448,13 +448,21 @@ async fn nav_dots_cached(state: &SharedState) -> NavDots {
         .caches
         .nav_dots
         .get_or_load(|| async {
-            let ((monitors, _), (certs, _), (docker_installed, docker_problems)) = tokio::join!(
+            let (
+                (monitors, _),
+                (certs, _),
+                (docker_installed, docker_problems),
+                url_checks_down,
+            ) = tokio::join!(
                 super::monitoring::collect_overview(state),
                 super::certs::collect_overview(state),
                 // Asks no node at all while the module is off.
                 super::docker::nav_summary(state),
+                // The master's own URL checks sit on the same page.
+                super::monitoring::urls_alerting(state),
             );
             let mut dots = NavDots::count(&monitors, &certs);
+            dots.monitors_down += url_checks_down;
             dots.docker_installed = docker_installed;
             dots.docker_problems = docker_problems;
             Ok::<_, ()>(dots)

@@ -6,7 +6,7 @@
   <div>
     <h1>Monitoring</h1>
     <div class="subtitle">
-      Every hosting across the cluster with HTTP availability monitoring enabled.
+      Every hosting across the cluster with HTTP availability monitoring enabled{% if show_urls %}, and the URL checks the master runs from outside{% endif %}.
       Sorted <strong>alerting first</strong>, then by lowest success rate.
     </div>
   </div>
@@ -14,6 +14,19 @@
 </div>
 
 {% include "_node_auth_banner.html" %}
+
+{% if let Some(e) = flash_error %}{% if url_form.is_none() %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}{% endif %}
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
 
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(13rem, 100%), 1fr));gap:1rem;margin-bottom:1.2rem">
   <div class="card" style="padding:1rem 1.2rem">
@@ -29,6 +42,61 @@
     <div style="font-size:1.6rem;font-weight:700;color:var(--text-soft);margin-top:0.2rem">{{ unknown_count }}</div>
   </div>
 </div>
+
+{% if show_urls %}
+<div class="group" id="url-checks">
+  <div class="ghead">
+    URL checks
+    {% if can_manage_urls %}
+    <div class="ghead-tools"><a class="btn small" href="/monitoring?new=1#url-form">Add a URL check</a></div>
+    {% endif %}
+  </div>
+  {% if urls.is_empty() %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">No URL checks yet. Add an address to have the master fetch it on an interval and alert when it stops answering properly.</p>
+  </div>
+  {% endif %}
+  {% for u in urls %}
+  <div class="item svc-row">
+    <div class="svc-main">
+      <div class="svc-title"><strong>{{ u.url }}</strong></div>
+      <div class="svc-facts small">
+        <span>{{ u.interval }}</span>
+        <span>{{ u.expects }}</span>
+        <span>node: {{ u.node }}</span>
+        <span>last probe {{ u.last_probe }}</span>
+        {% if let Some((label, tone)) = u.cert %}<span{% if !tone.is_empty() %} class="{{ tone }}"{% endif %}>{{ label }}</span>{% endif %}
+      </div>
+      {% if let Some(e) = u.last_error %}<div class="small" style="color:var(--danger)">{{ e }}</div>{% endif %}
+    </div>
+    <div class="right numeric hide-on-phone" style="min-width:5rem">
+      <span{% if !u.success_tone.is_empty() %} style="color:{{ u.success_tone }}"{% endif %}>{{ u.success }}</span>
+      <div class="text-soft small">{{ u.avg }}</div>
+    </div>
+    {% if u.state == "alerting" %}<span class="pill err">ALERTING</span>
+    {% else if u.state == "unknown" %}<span class="pill muted">NO SAMPLES</span>
+    {% else %}<span class="pill ok">OK</span>{% endif %}
+    {% if can_manage_urls %}
+    <div class="svc-actions">
+      <a class="btn small ghost" href="{{ u.edit_href }}">Change</a>
+      <form method="post" action="{{ u.delete_action }}"
+            data-confirm-title="Delete this URL check"
+            data-confirm-body="Stops checking {{ u.url }} and deletes its history. Nothing on the server is touched."
+            data-confirm-confirm-label="Delete"
+            data-confirm-variant="danger">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small" type="submit">Delete</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+  <div class="item muted">
+    <p class="text-soft small" style="margin:0">{{ limitation }}</p>
+  </div>
+</div>
+{% include "_url_monitors.html" %}
+{% endif %}
 
 {% if items.is_empty() %}
 <div class="card">

@@ -17,6 +17,11 @@
 //! count, because the alert state itself lives in `docker_nodes`.
 //!
 //! The master is never silent to itself: it is skipped.
+//!
+//! The same loop drives the URL checks: every [`TICK_SECS`] it has the agent
+//! sample what is due ([`crate::url_watch`]). That runs apart from the node
+//! pass, so a hung address cannot delay the question to the nodes, and never
+//! overlaps itself.
 
 use crate::dispatcher::DispatchError;
 use crate::state::SharedState;
@@ -24,8 +29,10 @@ use hyperion_rpc::codec::{Request, Response};
 use hyperion_rpc_client::RemoteClientError;
 use std::collections::{HashMap, HashSet};
 
-/// How often the nodes are asked.
-const INTERVAL_SECS: u64 = 60;
+/// How often the loop wakes: the URL checks' tick.
+const TICK_SECS: u64 = 15;
+/// The nodes are asked on every this-many-th wake, so once a minute.
+const NODE_PASS_EVERY: u64 = 4;
 /// A node must fail every probe for this long before it is called silent.
 const SILENT_AFTER_SECS: i64 = 180;
 /// Per node, so one wedged worker cannot hold the pass. The dispatcher has
@@ -34,18 +41,40 @@ const PROBE_TIMEOUT_SECS: u64 = 25;
 
 pub fn spawn(state: SharedState) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(INTERVAL_SECS));
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(TICK_SECS));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut silence = Silence::default();
+        let url_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wakes: u64 = 0;
         loop {
             tick.tick().await;
-            // Only a master has nodes to ask.
+            let wake = wakes;
+            wakes += 1;
+            // Only a master has nodes to ask and checks to run.
             if state.deployment_mode.read().await.as_str() != "master" {
                 continue;
             }
-            pass(&state, &mut silence, now_secs()).await;
+            // The URL tick is started before the node pass, so a slow node
+            // cannot hold it back. One at a time: if the last is still going,
+            // this wake leaves it be.
+            if !url_busy.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                let state = state.clone();
+                let busy = url_busy.clone();
+                tokio::spawn(async move {
+                    crate::url_watch::pass(&state).await;
+                    busy.store(false, std::sync::atomic::Ordering::Release);
+                });
+            }
+            if node_pass_due(wake) {
+                pass(&state, &mut silence, now_secs()).await;
+            }
         }
     });
+}
+
+/// Is this wake one of those that ask the nodes?
+fn node_pass_due(wake: u64) -> bool {
+    wake % NODE_PASS_EVERY == 0
 }
 
 fn now_secs() -> i64 {
@@ -57,7 +86,7 @@ fn now_secs() -> i64 {
 
 /// What one probe of a node showed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Probe {
+pub(crate) enum Probe {
     /// It replied, whatever it said.
     Answered,
     /// The transport failed.
@@ -67,7 +96,7 @@ enum Probe {
 }
 
 /// Reduce a dispatch result to what it shows about the node.
-fn classify(r: &Result<Response, DispatchError>) -> Probe {
+pub(crate) fn classify(r: &Result<Response, DispatchError>) -> Probe {
     match r {
         // An error reply is still a reply.
         Ok(_) => Probe::Answered,
@@ -229,6 +258,13 @@ mod tests {
             code: Some(code),
             stderr: String::new(),
         })
+    }
+
+    #[test]
+    fn nodes_are_asked_once_a_minute_off_the_url_ticks_fifteen_seconds() {
+        assert_eq!(TICK_SECS * NODE_PASS_EVERY, 60);
+        let due: Vec<u64> = (0..9).filter(|w| node_pass_due(*w)).collect();
+        assert_eq!(due, vec![0, 4, 8]);
     }
 
     #[test]

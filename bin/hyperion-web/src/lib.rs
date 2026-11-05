@@ -30,6 +30,7 @@ pub mod ratelimit;
 pub mod setup;
 pub mod state;
 pub mod ttl_cache;
+pub mod url_watch;
 pub mod wp_library;
 pub mod wp_list_cache;
 
@@ -338,6 +339,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::stats::post_backup_untracked_delete),
         )
         .route("/monitoring", get(handlers::monitoring::get_monitoring))
+        .route(
+            "/monitoring/urls",
+            post(handlers::monitoring::post_url_save),
+        )
+        .route(
+            "/monitoring/urls/:id/delete",
+            post(handlers::monitoring::post_url_delete),
+        )
         .route("/docker", get(handlers::docker::get_docker))
         .route(
             "/docker/install-cluster",

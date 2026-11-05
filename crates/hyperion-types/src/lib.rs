@@ -43,6 +43,7 @@ pub mod report_sections;
 pub mod sitecheck;
 pub mod spf;
 pub mod stats;
+pub mod url_monitor;
 pub mod waf;
 pub mod wp;
 pub mod wpcron;

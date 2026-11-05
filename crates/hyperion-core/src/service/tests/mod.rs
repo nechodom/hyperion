@@ -1223,6 +1223,7 @@ mod staging;
 mod stats;
 mod system;
 mod trash;
+mod url_monitor;
 mod users;
 mod wp;
 mod wp_assets;

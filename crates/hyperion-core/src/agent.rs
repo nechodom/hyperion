@@ -1665,6 +1665,32 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn docker_overview(&self) -> Result<hyperion_types::docker::DockerNodeStatus, RpcError> {
         self.svc.docker_overview().await
     }
+    async fn url_monitor_list(
+        &self,
+    ) -> Result<hyperion_types::url_monitor::UrlMonitorList, RpcError> {
+        self.svc.url_monitor_list().await
+    }
+    async fn url_monitor_set(
+        &self,
+        input: hyperion_types::url_monitor::UrlMonitorInput,
+    ) -> Result<i64, RpcError> {
+        self.svc.url_monitor_set(input).await
+    }
+    async fn url_monitor_delete(&self, id: i64, actor: String) -> Result<(), RpcError> {
+        self.svc.url_monitor_delete(id, &actor).await
+    }
+    async fn url_monitor_tick(
+        &self,
+    ) -> Result<Vec<hyperion_types::url_monitor::UrlMonitorEvent>, RpcError> {
+        self.svc.url_monitor_tick().await
+    }
+    async fn url_monitor_alert(
+        &self,
+        id: i64,
+        context: hyperion_types::url_monitor::UrlAlertContext,
+    ) -> Result<(), RpcError> {
+        self.svc.url_monitor_alert(id, context).await
+    }
     async fn docker_forget_project(&self, project: String) -> Result<(), RpcError> {
         self.svc.docker_forget_project(project).await
     }

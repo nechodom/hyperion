@@ -7128,3 +7128,594 @@ async fn following_polls_only_while_asked_and_is_audited_once() {
         .iter()
         .all(|(who, t, _)| who == "kevin" && t.as_deref() == Some("shop/shop-web-1")));
 }
+
+// ---------------------------------------------------------------------------
+// URL checks on /monitoring.
+// ---------------------------------------------------------------------------
+
+use hyperion_types::url_monitor::UrlMonitorList;
+
+async fn url_checks(sock: &std::path::Path) -> UrlMonitorList {
+    match hyperion_rpc_client::call(sock, DockerReq::UrlMonitorList)
+        .await
+        .expect("list")
+    {
+        DockerResp::UrlMonitorList(l) => l,
+        other => panic!("unexpected list: {other:?}"),
+    }
+}
+
+/// A urlencoded body for the URL check form.
+fn url_form_body(csrf: &str, fields: &[(&str, &str)]) -> String {
+    let mut body = format!("_csrf={}", enc(csrf));
+    for (k, v) in fields {
+        body.push_str(&format!("&{k}={}", enc(v)));
+    }
+    body
+}
+
+async fn url_save(
+    app: &axum::Router,
+    cookie: &str,
+    fields: &[(&str, &str)],
+) -> axum::response::Response {
+    let csrf = acme_ssl_csrf(app, cookie).await;
+    acme_dns_post(
+        app,
+        cookie,
+        "/monitoring/urls",
+        url_form_body(&csrf, fields),
+    )
+    .await
+}
+
+/// A user on a custom role holding exactly `caps`, with or without every
+/// hosting in scope.
+async fn url_role_user(
+    app: &axum::Router,
+    sock: &std::path::Path,
+    name: &str,
+    caps: u64,
+    scope_all: bool,
+) -> String {
+    let role_id = match hyperion_rpc_client::call(
+        sock,
+        DockerReq::RoleCreate {
+            name: format!("url-{name}"),
+            capabilities: caps,
+            scope_all,
+        },
+    )
+    .await
+    .expect("role")
+    {
+        DockerResp::RoleCreate { id } => id,
+        other => panic!("unexpected role create: {other:?}"),
+    };
+    let user_id = match hyperion_rpc_client::call(
+        sock,
+        DockerReq::WebUserCreate {
+            username: name.into(),
+            email: format!("{name}@example.invalid"),
+            password: "docker-pw-12345".into(),
+            role: "operator".into(),
+        },
+    )
+    .await
+    .expect("user")
+    {
+        DockerResp::WebUserCreate { id } => id,
+        other => panic!("unexpected user create: {other:?}"),
+    };
+    hyperion_rpc_client::call(
+        sock,
+        DockerReq::WebUserSetCustomRole {
+            user_id,
+            custom_role_id: role_id,
+        },
+    )
+    .await
+    .expect("assign");
+    acme_dns_login(app, name, "docker-pw-12345").await
+}
+
+#[tokio::test]
+async fn monitoring_lists_both_kinds() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    acme_ssl_hosting(&sock, "hosted-e2e.cz").await;
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    let resp = url_save(
+        &app,
+        &cookie,
+        &[
+            ("url", "https://status.example.org/health"),
+            ("interval_secs", "60"),
+            ("expected_status", "204"),
+            ("alert_after_fails", "3"),
+            ("node", "auto"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/monitoring?flash=saved");
+
+    let (status, page) = acme_dns_get(&app, &cookie, "/monitoring?flash=saved").await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(
+        page.contains("hosted-e2e.cz"),
+        "the per-hosting monitor: {page}"
+    );
+    assert!(page.contains("URL checks"), "{page}");
+    assert!(page.contains("https://status.example.org/health"), "{page}");
+    assert!(page.contains("expects 204"), "{page}");
+    assert!(page.contains("URL check saved."), "{page}");
+    assert!(
+        page.contains("no outside vantage point"),
+        "the master's blind spot is stated: {page}"
+    );
+    // Both kinds are in the counts at the top: two monitors, no sample yet.
+    assert!(page.contains("No samples yet"), "{page}");
+    let unknown = page
+        .split("No samples yet")
+        .nth(1)
+        .and_then(|rest| rest.split("font-weight:700").nth(1))
+        .and_then(|rest| rest.split('>').nth(1))
+        .and_then(|rest| rest.split('<').next())
+        .map(str::trim)
+        .map(str::to_string);
+    assert_eq!(unknown.as_deref(), Some("2"), "{page}");
+}
+
+#[tokio::test]
+async fn node_derived_on_save_and_override_wins() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    acme_ssl_hosting(&sock, "owned-e2e.cz").await;
+    docker_enable_master(&sock, &pool).await;
+    docker_add_worker(&sock, &pool, "node_w", "Worker").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    // The host name is a hosting on the master: that is the owner.
+    let resp = url_save(
+        &app,
+        &cookie,
+        &[("url", "https://owned-e2e.cz/health"), ("node", "auto")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let list = url_checks(&sock).await;
+    let id = list.monitors[0].id;
+    assert_eq!(list.monitors[0].node_id.as_deref(), Some("local"));
+    assert!(!list.monitors[0].node_manual);
+    let id_s = id.to_string();
+
+    // The operator pins it elsewhere, and that wins.
+    let resp = url_save(
+        &app,
+        &cookie,
+        &[
+            ("id", &id_s),
+            ("url", "https://owned-e2e.cz/health"),
+            ("node", "node_w"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let m = &url_checks(&sock).await.monitors[0];
+    assert_eq!(m.node_id.as_deref(), Some("node_w"));
+    assert!(m.node_manual);
+    // The page says where it is pinned, by the node's label.
+    let (_, page) = acme_dns_get(&app, &cookie, "/monitoring").await;
+    assert!(page.contains("node: Worker"), "{page}");
+    // ...and keeps the choice on the form.
+    let (_, edit) = acme_dns_get(&app, &cookie, &format!("/monitoring?edit={id}")).await;
+    assert!(edit.contains("Change the URL check"), "{edit}");
+    assert!(
+        edit.contains("value=\"node_w\" selected"),
+        "the pinned node is the selected one: {edit}"
+    );
+
+    // A node that is not enrolled is refused, and nothing changes.
+    let resp = url_save(
+        &app,
+        &cookie,
+        &[
+            ("id", &id_s),
+            ("url", "https://owned-e2e.cz/health"),
+            ("node", "node_made_up"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_string(resp).await.contains("not enrolled"));
+    assert_eq!(
+        url_checks(&sock).await.monitors[0].node_id.as_deref(),
+        Some("node_w")
+    );
+
+    // Back to automatic: worked out again.
+    let resp = url_save(
+        &app,
+        &cookie,
+        &[
+            ("id", &id_s),
+            ("url", "https://owned-e2e.cz/health"),
+            ("node", "auto"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let m = &url_checks(&sock).await.monitors[0];
+    assert_eq!(m.node_id.as_deref(), Some("local"));
+    assert!(!m.node_manual);
+
+    // A node that cannot be asked cannot disown its domain: moving the
+    // address to a host no hosting here has keeps what was stored.
+    let resp = url_save(
+        &app,
+        &cookie,
+        &[
+            ("id", &id_s),
+            ("url", "https://elsewhere.example.org/"),
+            ("node", "auto"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        url_checks(&sock).await.monitors[0].node_id.as_deref(),
+        Some("local"),
+        "the worker did not answer, so no hosting was ruled out"
+    );
+}
+
+#[tokio::test]
+async fn no_matching_hosting_is_allowed() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    let resp = url_save(
+        &app,
+        &cookie,
+        &[
+            ("url", "https://nobody-hosts-this.example.org/"),
+            ("node", "auto"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "no owner is not an error"
+    );
+    let m = &url_checks(&sock).await.monitors[0];
+    assert_eq!(m.node_id, None);
+    assert!(!m.node_manual);
+    let (_, page) = acme_dns_get(&app, &cookie, "/monitoring").await;
+    assert!(page.contains("node: no hosting"), "{page}");
+
+    // An address that is an IP has no host name to match either.
+    let resp = url_save(
+        &app,
+        &cookie,
+        &[("url", "http://10.0.0.5:8080/"), ("node", "auto")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(url_checks(&sock).await.monitors.len(), 2);
+}
+
+#[tokio::test]
+async fn a_refused_check_comes_back_in_the_form() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    for (fields, wanted) in [
+        (vec![("url", "ftp://example.org/")], "only http"),
+        (
+            vec![("url", "https://user:pw@example.org/")],
+            "user name or password",
+        ),
+        (
+            vec![("url", "https://example.org/"), ("interval_secs", "10")],
+            "at least 30",
+        ),
+        (
+            vec![("url", "https://example.org/"), ("interval_secs", "soon")],
+            "whole number",
+        ),
+        (
+            vec![
+                ("url", "https://example.org/"),
+                ("alert_slack_webhook", "ftp://x"),
+            ],
+            "Slack webhook",
+        ),
+    ] {
+        let resp = url_save(&app, &cookie, &fields).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{fields:?}");
+        let page = body_string(resp).await;
+        assert!(page.contains(wanted), "{fields:?}: {page}");
+        assert!(
+            page.contains("Add a URL check"),
+            "the form is still open: {page}"
+        );
+        let typed = fields[0].1;
+        assert!(
+            page.contains(&format!("value=\"{typed}\"")),
+            "what was typed stays: {page}"
+        );
+    }
+    assert!(url_checks(&sock).await.monitors.is_empty());
+}
+
+#[tokio::test]
+async fn webhooks_are_never_drawn() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    let resp = url_save(
+        &app,
+        &cookie,
+        &[
+            ("url", "https://example.org/"),
+            (
+                "alert_slack_webhook",
+                "https://hooks.example.test/slack-s3cr3t",
+            ),
+            (
+                "alert_webhook_url",
+                "https://hooks.example.test/json-s3cr3t",
+            ),
+            ("alert_email", "ops@example.cz"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let id = url_checks(&sock).await.monitors[0].id;
+
+    for uri in ["/monitoring".to_string(), format!("/monitoring?edit={id}")] {
+        let (_, page) = acme_dns_get(&app, &cookie, &uri).await;
+        assert!(
+            !page.contains("s3cr3t") && !page.contains("hooks.example.test"),
+            "{uri}: {page}"
+        );
+    }
+    let (_, edit) = acme_dns_get(&app, &cookie, &format!("/monitoring?edit={id}")).await;
+    assert!(
+        edit.contains("ops@example.cz"),
+        "the addresses are shown: {edit}"
+    );
+    assert!(edit.contains("clear_slack_webhook"), "{edit}");
+
+    // Saved again with the webhook fields empty, both are kept.
+    let resp = url_save(
+        &app,
+        &cookie,
+        &[
+            ("id", &id.to_string()),
+            ("url", "https://example.org/changed"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let m = &url_checks(&sock).await.monitors[0];
+    assert!(m.alert_slack_set && m.alert_webhook_set);
+    assert_eq!(m.url, "https://example.org/changed");
+    assert_eq!(m.alert_email, "", "an emptied field is an emptied list");
+
+    // Removing is a box, not a blank.
+    let resp = url_save(
+        &app,
+        &cookie,
+        &[
+            ("id", &id.to_string()),
+            ("url", "https://example.org/changed"),
+            ("clear_slack_webhook", "on"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let m = &url_checks(&sock).await.monitors[0];
+    assert!(!m.alert_slack_set && m.alert_webhook_set);
+}
+
+#[tokio::test]
+async fn url_checks_need_manage_and_scope_all() {
+    use hyperion_state::capabilities::Capability;
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let boss = acme_dns_login(&app, "kevin", "good-pw").await;
+    url_save(&app, &boss, &[("url", "https://example.org/")]).await;
+    let id = url_checks(&sock).await.monitors[0].id;
+
+    let view = Capability::MonitoringView.bit();
+    let manage = view | Capability::MonitoringManage.bit();
+
+    // Read only: the list, without the means to change it.
+    let reader = url_role_user(&app, &sock, "url-reader", view, true).await;
+    let (status, page) = acme_dns_get(&app, &reader, "/monitoring").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("https://example.org/"), "{page}");
+    assert!(
+        !page.contains("Add a URL check") && !page.contains("/delete"),
+        "{page}"
+    );
+    let (_, asked) = acme_dns_get(&app, &reader, "/monitoring?new=1").await;
+    assert!(
+        !asked.contains("id=\"url-form\""),
+        "no form for a reader: {asked}"
+    );
+    let csrf = acme_ssl_csrf(&app, &reader).await;
+    let resp = acme_dns_post(
+        &app,
+        &reader,
+        "/monitoring/urls",
+        url_form_body(&csrf, &[("url", "https://other.example.org/")]),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let resp = acme_dns_post(
+        &app,
+        &reader,
+        &format!("/monitoring/urls/{id}/delete"),
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Not every hosting in scope: not even the list.
+    let narrow = url_role_user(&app, &sock, "url-narrow", manage, false).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/monitoring")
+                .header(header::COOKIE, &narrow)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let csrf = acme_ssl_csrf(&app, &narrow).await;
+    let resp = acme_dns_post(
+        &app,
+        &narrow,
+        "/monitoring/urls",
+        url_form_body(&csrf, &[("url", "https://other.example.org/")]),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // May manage, but is not an administrator: no webhooks, none stored.
+    let manager = url_role_user(&app, &sock, "url-manager", manage, true).await;
+    let (_, form) = acme_dns_get(&app, &manager, "/monitoring?new=1").await;
+    assert!(form.contains("id=\"url-form\""), "{form}");
+    assert!(!form.contains("alert_slack_webhook"), "{form}");
+    let resp = url_save(
+        &app,
+        &manager,
+        &[
+            ("url", "https://managed.example.org/"),
+            ("alert_slack_webhook", "https://hooks.example.test/sneaky"),
+            ("alert_email", "mine@example.cz"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let list = url_checks(&sock).await;
+    let m = list
+        .monitors
+        .iter()
+        .find(|m| m.url == "https://managed.example.org/")
+        .expect("saved");
+    assert!(!m.alert_slack_set, "webhooks are administrators' input");
+    assert_eq!(m.alert_email, "mine@example.cz");
+
+    // And deleting is for managers.
+    let csrf = acme_ssl_csrf(&app, &manager).await;
+    let resp = acme_dns_post(
+        &app,
+        &manager,
+        &format!("/monitoring/urls/{}/delete", m.id),
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(url_checks(&sock).await.monitors.len(), 1);
+}
+
+#[tokio::test]
+async fn module_off_shows_no_url_checks() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    let (status, page) = acme_dns_get(&app, &cookie, "/monitoring?new=1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !page.contains("id=\"url-checks\"") && !page.contains("id=\"url-form\""),
+        "{page}"
+    );
+    assert!(!page.contains("no outside vantage point"), "{page}");
+
+    let resp = url_save(&app, &cookie, &[("url", "https://example.org/")]).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_string(resp).await.contains("Docker module"));
+
+    // Turned on, they appear; turned off again, they and their history go.
+    docker_enable_master(&sock, &pool).await;
+    url_save(&app, &cookie, &[("url", "https://example.org/")]).await;
+    let (_, page) = acme_dns_get(&app, &cookie, "/monitoring").await;
+    assert!(page.contains("id=\"url-checks\""), "{page}");
+    hyperion_rpc_client::call(&sock, DockerReq::DockerClusterRemove)
+        .await
+        .expect("remove");
+    let (_, page) = acme_dns_get(&app, &cookie, "/monitoring").await;
+    assert!(!page.contains("id=\"url-checks\""), "{page}");
+    assert!(url_checks(&sock).await.monitors.is_empty());
+}
+
+#[tokio::test]
+async fn deleting_a_url_check_removes_it() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    url_save(&app, &cookie, &[("url", "https://example.org/")]).await;
+    let id = url_checks(&sock).await.monitors[0].id;
+
+    let (_, page) = acme_dns_get(&app, &cookie, "/monitoring").await;
+    assert!(
+        page.contains(&format!("action=\"/monitoring/urls/{id}/delete\"")),
+        "{page}"
+    );
+    // The confirmation rides on the form, not on the button.
+    assert!(
+        page.contains("data-confirm-title=\"Delete this URL check\""),
+        "{page}"
+    );
+
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        &format!("/monitoring/urls/{id}/delete"),
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/monitoring?flash=deleted");
+    assert!(url_checks(&sock).await.monitors.is_empty());
+    // Without a token nothing is deleted.
+    url_save(&app, &cookie, &[("url", "https://example.org/")]).await;
+    let id = url_checks(&sock).await.monitors[0].id;
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        &format!("/monitoring/urls/{id}/delete"),
+        String::new(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(url_checks(&sock).await.monitors.len(), 1);
+}

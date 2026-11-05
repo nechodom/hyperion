@@ -973,6 +973,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if self.is_worker_node() {
             return;
         }
+        self.outbound_global_slack(subject, body, kind, "notify.docker.slack")
+            .await;
+        self.outbound_global_email(subject, body).await;
+    }
+
+    /// The master's default Slack webhook, if it has one. `audit` names the
+    /// record of the attempt, which says that and where it went, not what it
+    /// said.
+    pub(crate) async fn outbound_global_slack(
+        &self,
+        subject: &str,
+        body: &str,
+        kind: &str,
+        audit: &str,
+    ) {
         if let Some(url) = self.slack_default_webhook.as_deref() {
             let tmpls = read_notifications_section(self.agent_config_path.as_deref());
             let time = fmt_notif_time(now_secs());
@@ -985,19 +1000,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let payload = serde_json::json!({ "text": message }).to_string();
             let outcome = http_post_json(url, &payload).await;
             if let Err(e) = &outcome {
-                tracing::warn!(kind, error = %e, "docker alert: Slack post failed");
+                tracing::warn!(kind, error = %e, "outbound alert: Slack post failed");
             }
-            // The record says that and where it went, not what it said.
             self.append_audit(
-                "notify.docker.slack",
+                audit,
                 None,
                 &serde_json::json!({ "kind": kind }).to_string(),
                 if outcome.is_ok() { "ok" } else { "failed" },
             )
             .await;
         }
-        // No relay or no address is a no-op inside; a refusal is logged there
-        // (subject and error, never the body).
+    }
+
+    /// Every administrator address on record. No relay or no address is a
+    /// no-op inside; a refusal is logged there (subject and error, never the
+    /// body).
+    pub(crate) async fn outbound_global_email(&self, subject: &str, body: &str) {
         self.notify_email("", subject, body, None, "docker").await;
     }
 }
