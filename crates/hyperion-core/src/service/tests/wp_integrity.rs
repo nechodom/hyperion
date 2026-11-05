@@ -586,6 +586,55 @@ fn clamav_is_due_weekly_in_the_night_window() {
     assert!(clamav_sweep_due(at(20, 3, 0), at(9, 3, 0), &chrono::Utc));
 }
 
+/// The start site moves one step a week and the steps join up across ISO years.
+#[test]
+fn the_rotation_steps_by_week_across_years() {
+    use super::super::scan_queue::clamav_rotation;
+    use chrono::TimeZone;
+    let at = |y, m, d| {
+        chrono::Utc
+            .with_ymd_and_hms(y, m, d, 3, 0, 0)
+            .single()
+            .expect("date")
+            .timestamp()
+    };
+    // 2026 has 53 ISO weeks; 2026-12-28 is its Monday, 2027-01-04 is week 1 of 2027.
+    let w53 = clamav_rotation(at(2026, 12, 28));
+    assert_eq!(clamav_rotation(at(2027, 1, 4)), w53 + 1);
+    assert_eq!(clamav_rotation(at(2026, 12, 21)) + 1, w53);
+    // Over a year, every start of a 7-site node comes up.
+    let starts: std::collections::HashSet<usize> = (0..52)
+        .map(|w| clamav_rotation(at(2026, 1, 5) + w * 7 * 86_400) % 7)
+        .collect();
+    assert_eq!(starts.len(), 7);
+}
+
+/// A note said by the list and by the pass is on the card once.
+#[test]
+fn a_pass_with_more_than_a_thousand_hits_says_so_once() {
+    use super::super::scan_queue::{apply_clamav, ClamUpdate};
+    let many: Vec<_> = (0..1001)
+        .map(|i| hyperion_types::WpMalwareHit {
+            path: format!("/home/x/htdocs/{i}.php"),
+            signature: "Php.Trojan.Agent-1".into(),
+        })
+        .collect();
+    let mut r = site_scan::scanned(1, 1);
+    apply_clamav(
+        &mut r,
+        ClamUpdate::Pass {
+            hits: many,
+            end: integrity::SweepEnd::Complete,
+            started: 5,
+            note: Some(
+                "ClamAV found more than 1000 detections here; only the first 1000 are kept".into(),
+            ),
+        },
+    );
+    let said = r.result.error.expect("said");
+    assert_eq!(said.matches("more than 1000").count(), 1, "{said}");
+}
+
 /// What a pass leaves in a record, and only that: a full pass is the answer, a
 /// partial one only adds, and a reason moves nothing else.
 #[test]

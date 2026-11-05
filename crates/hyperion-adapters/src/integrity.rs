@@ -538,6 +538,13 @@ pub struct ErrFacts {
     pub unread: bool,
     /// A line that is none of the above.
     pub unknown: bool,
+    /// Pathless `LibClamAV Warning|Error: cli_*` lines: one parser giving up on
+    /// one odd file (a truncated `.swf`, a bad `.xz`). Counted, and they do not
+    /// void a pass: any tenant can plant such a file, and it names no path to
+    /// hold against a site.
+    pub noise: u64,
+    /// Detections were kept, dropped (unlisted path) or capped: what exit 1 says.
+    pub hits: bool,
 }
 
 /// What the process's end means. Pure, because this is where a killed pass could
@@ -586,7 +593,10 @@ pub fn classify_sweep(
 
 fn end_of_exit(exit: SweepExit, err: ErrFacts) -> SweepEnd {
     match exit {
-        SweepExit::Code(0 | 1) if !err.unknown => SweepEnd::Complete,
+        SweepExit::Code(0) if !err.unknown => SweepEnd::Complete,
+        // Exit 1 is "infections found", so something must have been: with none
+        // kept, dropped or capped, the pass said something this does not account for.
+        SweepExit::Code(1) if !err.unknown && err.hits => SweepEnd::Complete,
         SweepExit::Code(2) if !err.unknown && (err.vanished || err.unread) => SweepEnd::Complete,
         SweepExit::Code(0..=2) => SweepEnd::Partial,
         SweepExit::Code(_) => SweepEnd::Failed,
@@ -615,12 +625,48 @@ enum ErrLine {
     /// The `WARNING: <path>: Can't access file` that follows a strerror line for
     /// the same path.
     Echo,
+    /// A parser's complaint about one file, with no path (see [`ErrFacts::noise`]).
+    Noise,
     Unknown,
+}
+
+/// `LibClamAV Warning: cli_scanswf: GETWORD: Can't read file or file truncated`,
+/// `LibClamAV Error: cli_scanxz: decompress error: 1`: a `cli_*` function of the
+/// scanning engine, no path. The ones that load the database or the bytecode,
+/// `cl_*` calls, the unrecognised and the rest stay unknown, and so fail closed.
+fn is_parser_noise(line: &str) -> bool {
+    const NOT_PARSERS: &[&str] = &[
+        "cli_bytecode",
+        "cli_load",
+        "cli_cvd",
+        "cli_dconf",
+        "cli_pcre",
+        "cli_yara",
+        "cli_ref",
+    ];
+    let Some(rest) = line
+        .strip_prefix("LibClamAV Warning: cli_")
+        .or_else(|| line.strip_prefix("LibClamAV Error: cli_"))
+    else {
+        return false;
+    };
+    // `cli_scanswf: …`: a function name, then a colon.
+    let name_end = rest.find(':').unwrap_or(0);
+    name_end > 0
+        && rest[..name_end]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !NOT_PARSERS
+            .iter()
+            .any(|p| format!("cli_{rest}").starts_with(p))
 }
 
 fn classify_err_line(line: &str, listed: &HashSet<u128>, prev: &mut Option<String>) -> ErrLine {
     if is_no_tmp_error(line) {
         return ErrLine::NoTmp;
+    }
+    if is_parser_noise(line) {
+        return ErrLine::Noise;
     }
     let (body, warning) = match line.strip_prefix("WARNING: ") {
         Some(b) => (b, true),
@@ -866,6 +912,7 @@ async fn run_launch(
             let mut keep: Vec<u8> = Vec::new();
             let mut facts = ErrFacts::default();
             let mut unread: HashSet<usize> = HashSet::new();
+            let mut vanished = 0u64;
             let mut prev: Option<String> = None;
             let mut lines = BufReader::new(stderr).split(b'\n');
             while let Ok(Some(line)) = lines.next_segment().await {
@@ -874,7 +921,11 @@ async fn run_launch(
                 if !is_systemd_line(&text) {
                     match classify_err_line(&text, &listed, &mut prev) {
                         ErrLine::NoTmp => facts.no_tmp = true,
-                        ErrLine::Vanished => facts.vanished = true,
+                        ErrLine::Vanished => {
+                            facts.vanished = true;
+                            vanished += 1;
+                        }
+                        ErrLine::Noise => facts.noise += 1,
                         ErrLine::Echo => {}
                         ErrLine::Unread(path) => match index.find(&path) {
                             Some(i) => {
@@ -892,7 +943,12 @@ async fn run_launch(
                     keep.drain(..keep.len() - STDERR_TAIL_BYTES);
                 }
             }
-            (String::from_utf8_lossy(&keep).into_owned(), facts, unread)
+            (
+                String::from_utf8_lossy(&keep).into_owned(),
+                facts,
+                unread,
+                vanished,
+            )
         })
     };
     let mut hits: Vec<WpMalwareHit> = Vec::new();
@@ -948,21 +1004,30 @@ async fn run_launch(
             SweepExit::TimedOut
         }
     };
-    let (systemd_tail, facts, unread) = tokio::time::timeout(Duration::from_secs(5), tail)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_else(|| {
-            // Could not be read: nothing can be said about it.
-            (
-                String::new(),
-                ErrFacts {
-                    unknown: true,
-                    ..Default::default()
-                },
-                HashSet::new(),
-            )
-        });
+    let (systemd_tail, mut facts, unread, vanished) =
+        tokio::time::timeout(Duration::from_secs(5), tail)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_else(|| {
+                // Could not be read: nothing can be said about it.
+                (
+                    String::new(),
+                    ErrFacts {
+                        unknown: true,
+                        ..Default::default()
+                    },
+                    HashSet::new(),
+                    0,
+                )
+            });
+    facts.hits = !hits.is_empty() || dropped > 0 || !capped.is_empty();
+    if facts.noise > 0 {
+        tracing::info!(
+            lines = facts.noise,
+            "clamav: parser complaints about single files"
+        );
+    }
     if dropped > 0 {
         tracing::warn!(dropped, "clamav: detections on paths that were not listed");
     }
@@ -975,7 +1040,7 @@ async fn run_launch(
         end: classify_sweep(exit, launch.via_systemd, &systemd_tail, facts),
         hits,
         unread: ids(&unread),
-        vanished: u64::from(facts.vanished),
+        vanished,
         dropped_hits: dropped,
         hits_capped: ids(&capped),
     })
@@ -1463,9 +1528,20 @@ exit {exit}"#,
             vanished: true,
             ..none
         };
+        let hit = ErrFacts { hits: true, ..none };
         assert_eq!(c(SweepExit::Code(0), false, none), SweepEnd::Complete);
-        assert_eq!(c(SweepExit::Code(1), false, none), SweepEnd::Complete);
-        assert_eq!(c(SweepExit::Code(1), false, gone), SweepEnd::Complete);
+        assert_eq!(c(SweepExit::Code(1), false, hit), SweepEnd::Complete);
+        assert_eq!(
+            c(SweepExit::Code(1), false, ErrFacts { hits: true, ..gone }),
+            SweepEnd::Complete
+        );
+        // Exit 1 with no detection kept, dropped or capped is unexplained: it
+        // must not clear hits.
+        assert_eq!(c(SweepExit::Code(1), false, none), SweepEnd::Partial);
+        assert_eq!(c(SweepExit::Code(1), false, gone), SweepEnd::Partial);
+        // Parser noise on single files does not void a pass.
+        let noisy = ErrFacts { noise: 2, ..none };
+        assert_eq!(c(SweepExit::Code(0), false, noisy), SweepEnd::Complete);
         assert_eq!(c(SweepExit::Code(2), false, gone), SweepEnd::Complete);
         assert_eq!(c(SweepExit::Code(2), false, none), SweepEnd::Partial);
         let odd = ErrFacts {
@@ -1488,7 +1564,8 @@ exit {exit}"#,
     #[test]
     fn systemd_says_why_a_unit_ended() {
         let none = ErrFacts::default();
-        let run = |code, err: &str| classify_sweep(SweepExit::Code(code), true, err, none);
+        let hit = ErrFacts { hits: true, ..none };
+        let run = |code, err: &str| classify_sweep(SweepExit::Code(code), true, err, hit);
         let said = |result: &str| {
             format!("Running as unit: hyperion-clamscan.service\nFinished with result: {result}\nService runtime: 3h\n")
         };
@@ -1497,6 +1574,9 @@ exit {exit}"#,
         assert_eq!(run(1, &said("signal")), SweepEnd::Partial);
         assert_eq!(run(1, &said("exit-code")), SweepEnd::Complete);
         assert_eq!(run(0, &said("success")), SweepEnd::Complete);
+        // Exit 1 with nothing found is not "infections found".
+        let nothing = classify_sweep(SweepExit::Code(1), true, &said("exit-code"), none);
+        assert_eq!(nothing, SweepEnd::Partial);
         // The last word counts, and a line that only starts like it doesn't.
         let tricked = format!("Finished with result: success\n{}", said("oom-kill"));
         assert_eq!(run(1, &tricked), SweepEnd::OutOfMemory);
@@ -1507,6 +1587,52 @@ exit {exit}"#,
         let refused = "Failed to start transient service unit: Unit hyperion-clamscan.service was already loaded or has a fragment file.\n";
         assert_eq!(run(1, refused), SweepEnd::Failed);
         assert_eq!(run(0, ""), SweepEnd::Failed);
+    }
+
+    /// Real lines (clamscan 1.4.6 and 1.4.3, exit 0, no path) from a truncated
+    /// `.swf` and a bad `.xz` a tenant uploaded: one site's file must not void
+    /// the pass for the node. Engine and database complaints stay fail-closed.
+    #[test]
+    fn a_parsers_complaint_about_one_file_is_noise_and_others_are_not() {
+        let listed = HashSet::new();
+        let mut prev = None;
+        let mut c = |l: &str| classify_err_line(l, &listed, &mut prev);
+        for line in [
+            "LibClamAV Warning: cli_scanswf: GETWORD: Can't read file or file truncated",
+            "LibClamAV Error: cli_scanxz: decompress error: 1",
+        ] {
+            assert_eq!(c(line), ErrLine::Noise, "{line}");
+        }
+        for line in [
+            "LibClamAV Error: cl_load(): No such file or directory: /var/lib/clamav/main.cvd",
+            "LibClamAV Warning: cli_bytecode: something",
+            "LibClamAV Error: Problem parsing database at line 12",
+            "LibClamAV Warning: cli_scanx",
+            "LibClamAV Error: cli_scan : weird",
+            "LibClamAV Error: cli_loadhdb: Malformed database",
+            "LibClamAV Warning: cli_: x",
+            "ERROR: Can't open file",
+        ] {
+            assert_eq!(c(line), ErrLine::Unknown, "{line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_truncated_swf_elsewhere_does_not_void_the_pass() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let err = "LibClamAV Warning: cli_scanswf: GETWORD: Can't read file or file truncated\nLibClamAV Error: cli_scanxz: decompress error: 1\n";
+        let sweep = run_fake(dir.path(), &[(A.0, A.1, A_FILES)], "", err, 0).await;
+        assert_eq!(sweep.end, SweepEnd::Complete);
+        assert!(sweep.unread.is_empty());
+    }
+
+    /// A detection hidden by exit 1 alone: nothing was kept or dropped, so the
+    /// pass can't clear anything.
+    #[tokio::test]
+    async fn exit_1_with_no_detection_is_not_a_complete_pass() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sweep = run_fake(dir.path(), &[(A.0, A.1, A_FILES)], "", "", 1).await;
+        assert_eq!(sweep.end, SweepEnd::Partial);
     }
 
     /// Lines as clamscan 1.4.6 printed them, against a list.

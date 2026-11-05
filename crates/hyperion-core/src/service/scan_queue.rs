@@ -343,7 +343,10 @@ pub(super) fn apply_clamav(rec: &mut StoredIntegrityScan, update: ClamUpdate) {
             let found = !hits.is_empty();
             if hits.len() > MAX_MALWARE_HITS {
                 hits.truncate(MAX_MALWARE_HITS);
-                note = join_notes(note.into_iter().collect(), Some(CLAMAV_TOO_MANY.into()));
+                // The reader may have said it already.
+                if !note.as_deref().is_some_and(|n| n.contains(CLAMAV_TOO_MANY)) {
+                    note = join_notes(note.into_iter().collect(), Some(CLAMAV_TOO_MANY.into()));
+                }
             }
             if !end.is_partial() {
                 rec.result.malware = hits;
@@ -462,14 +465,22 @@ fn clamav_listing_notes(l: &integrity::SiteListing) -> Vec<String> {
     n
 }
 
-/// Which site the list starts with this week: the ISO week number.
-fn clamav_rotation(now: i64) -> usize {
+/// Which site the list starts with this week, taken modulo the number of sites:
+/// one step per ISO week, and the years join up (53 weeks to a year at most), so
+/// a large node's tail gets its turn at the front.
+pub(super) fn clamav_rotation(now: i64) -> usize {
     use chrono::Datelike;
-    chrono::DateTime::from_timestamp(now, 0).map_or(0, |t| t.iso_week().week() as usize)
+    chrono::DateTime::from_timestamp(now, 0).map_or(0, |t| {
+        let w = t.iso_week();
+        usize::try_from(i64::from(w.year()) * 53 + i64::from(w.week())).unwrap_or(0)
+    })
 }
 
 fn join_notes(mut notes: Vec<String>, last: Option<String>) -> Option<String> {
     notes.extend(last);
+    // The same thing said by two parts of a pass is said once.
+    let mut seen = HashSet::new();
+    notes.retain(|n| seen.insert(n.clone()));
     (!notes.is_empty()).then(|| notes.join("; "))
 }
 
