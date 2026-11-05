@@ -158,7 +158,11 @@ async fn reuses_anti_flapping() {
                 Probe::Soft => result(false, None, Some("curl: (28)"), false),
                 Probe::Hard => result(false, Some(500), Some("HTTP 500"), true),
             };
-            if let Some(t) = s.url_apply_sample(id, &r, at).await.expect("apply") {
+            if let Some(t) = s
+                .url_apply_sample(id, "https://example.test/", &r, at)
+                .await
+                .expect("apply")
+            {
                 got.push((i, t));
             }
         }
@@ -188,7 +192,7 @@ async fn a_recovery_before_the_alert_went_out_cancels_it() {
         } else {
             result(false, None, Some("curl: (28)"), false)
         };
-        s.url_apply_sample(id, &r, 1_000 + 60 * i as i64)
+        s.url_apply_sample(id, "https://example.test/", &r, 1_000 + 60 * i as i64)
             .await
             .expect("apply");
     }
@@ -458,9 +462,14 @@ async fn removing_the_module_deletes_the_checks_and_their_history() {
         .url_monitor_set(input("https://example.test/"))
         .await
         .expect("set");
-    s.url_apply_sample(id, &result(true, Some(200), None, false), 1_000)
-        .await
-        .expect("sample");
+    s.url_apply_sample(
+        id,
+        "https://example.test/",
+        &result(true, Some(200), None, false),
+        1_000,
+    )
+    .await
+    .expect("sample");
     s.docker_cluster_remove().await.expect("remove");
     assert_eq!(
         hyperion_state::url_monitors::count(&pool)
@@ -721,7 +730,7 @@ async fn list_shows_figures_and_state() {
         } else {
             result(false, Some(503), Some("HTTP 503"), true)
         };
-        s.url_apply_sample(id, &r, now - 1_000 + 10 * i as i64)
+        s.url_apply_sample(id, "https://example.test/", &r, now - 1_000 + 10 * i as i64)
             .await
             .expect("apply");
     }
@@ -1150,20 +1159,53 @@ async fn changes_are_audited_by_name() {
     assert_eq!(who, "agent");
 }
 
+/// Make `id` fail until the alert is announced, the way a real outage goes:
+/// three hard failures, then the web layer's `UrlMonitorAlert`.
+async fn open_alert(s: &HostingService<MockAdapterPort>, pool: &SqlitePool, id: i64, url: &str) {
+    let now = now_secs();
+    for i in 0..3 {
+        s.url_apply_sample(
+            id,
+            url,
+            &result(false, Some(500), Some("HTTP 500"), true),
+            now - 300 + i * 60,
+        )
+        .await
+        .expect("sample");
+    }
+    s.url_monitor_alert(id, UrlAlertContext::default())
+        .await
+        .expect("announce");
+    let row = hyperion_state::url_monitors::get(pool, id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.alert_state, "alerting");
+    assert_eq!(row.pending_alert, None, "announced and acknowledged");
+}
+
+/// Everything that went out beyond the bell, in one number.
+async fn sent_out(s: &HostingService<MockAdapterPort>) -> i64 {
+    audits(s, "notify.docker.slack").await
+        + audits(s, "notify.url.slack").await
+        + mails_of(s, "docker").await.len() as i64
+        + url_mails(s).await.len() as i64
+}
+
 /// What was learnt about an address is not true of another one.
 #[tokio::test]
 async fn changing_the_address_drops_what_was_learnt_about_the_old_one() {
-    let (s, pool) = url_master().await;
+    let (s, pool) = url_master_sending().await;
     let id = s
         .url_monitor_set(input("https://old.example.test/"))
         .await
         .expect("set");
     let day = 86_400;
     let now = now_secs();
-    // The old address has a certificate 20 days out that was warned about at
-    // 14, a bad run behind it, a parked alert and old samples.
+    // The old address has a certificate 2 days out that was warned about at
+    // 3, and an outage that was announced.
     sqlx::query(
-        "UPDATE url_monitors SET cert_expires_at = ?, cert_alert_day = 14, cert_checked_at = ? \
+        "UPDATE url_monitors SET cert_expires_at = ?, cert_alert_day = 3, cert_checked_at = ? \
          WHERE id = ?",
     )
     .bind(now + 2 * day)
@@ -1172,23 +1214,14 @@ async fn changing_the_address_drops_what_was_learnt_about_the_old_one() {
     .execute(&pool)
     .await
     .expect("seed cert");
-    for i in 0..3 {
-        s.url_apply_sample(
-            id,
-            &result(false, Some(500), Some("HTTP 500"), true),
-            now - 300 + i * 60,
-        )
-        .await
-        .expect("sample");
-    }
-    let row = hyperion_state::url_monitors::get(&pool, id)
-        .await
-        .expect("get")
-        .expect("row");
-    assert_eq!(row.alert_state, "alerting");
-    assert_eq!(row.pending_alert.as_deref(), Some("down"));
+    open_alert(&s, &pool, id, "https://old.example.test/").await;
+    let bells_before = url_bells(&pool).await;
+    assert_eq!(bells_before.len(), 1, "the open alert: {bells_before:?}");
+    assert_eq!(bells_before[0].1, "error");
+    let out_before = sent_out(&s).await;
+    assert!(out_before > 0, "the announcement went out");
 
-    // Editing other fields keeps all of it.
+    // Editing other fields keeps all of it, and says nothing.
     let mut same = input("https://old.example.test/");
     same.id = Some(id);
     same.interval_secs = 120;
@@ -1199,14 +1232,18 @@ async fn changing_the_address_drops_what_was_learnt_about_the_old_one() {
         .expect("row");
     assert_eq!(kept.interval_secs, 120);
     assert_eq!(kept.cert_expires_at, Some(now + 2 * day));
-    assert_eq!(kept.cert_alert_day, Some(14));
+    assert_eq!(kept.cert_alert_day, Some(3));
     assert_eq!(kept.alert_state, "alerting");
-    assert_eq!(kept.pending_alert.as_deref(), Some("down"));
     assert_eq!(
         hyperion_state::url_monitors::sample_count(&pool, id)
             .await
             .expect("count"),
         3
+    );
+    assert_eq!(
+        url_bells(&pool).await,
+        bells_before,
+        "the card is untouched"
     );
 
     // A new address starts clean.
@@ -1234,14 +1271,155 @@ async fn changing_the_address_drops_what_was_learnt_about_the_old_one() {
     assert_eq!((v.samples_24h, v.success_pct_24h), (0, 0));
     assert_eq!(v.alert_state, "unknown");
     assert_eq!(v.last_error, None);
-    assert!(s.url_monitor_tick().await.is_ok());
-    // No false warning for the new address from the old one's expiry.
+
+    // No false certificate warning for the new address...
     s.url_cert_alerts(now).await.expect("pass");
+    // ...and the card of the old outage is REPLACED, not left saying down.
+    let bells = url_bells(&pool).await;
+    assert_eq!(bells.len(), 1, "one card, replaced: {bells:?}");
+    assert_eq!(bells[0].0, format!("url.monitor:{id}"));
+    assert_eq!(bells[0].1, "info");
+    assert_eq!(bells[0].2, "URL check changed");
     assert!(
-        url_bells(&pool).await.is_empty(),
-        "{:?}",
-        url_bells(&pool).await
+        bells[0].3.contains("https://old.example.test/"),
+        "{bells:?}"
     );
+    assert!(bells[0].3.contains("no longer applies"), "{bells:?}");
+    assert_eq!(
+        sent_out(&s).await,
+        out_before,
+        "bell only: nothing went out"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_check_with_an_open_alert_replaces_its_card() {
+    let (s, pool) = url_master_sending().await;
+    let id = s
+        .url_monitor_set(input("https://gone.example.test/"))
+        .await
+        .expect("set");
+    open_alert(&s, &pool, id, "https://gone.example.test/").await;
+    let out_before = sent_out(&s).await;
+    s.url_monitor_delete(id, "kevin").await.expect("delete");
+    let bells = url_bells(&pool).await;
+    assert_eq!(bells.len(), 1, "one card, replaced: {bells:?}");
+    assert_eq!(bells[0].0, format!("url.monitor:{id}"));
+    assert_eq!(bells[0].1, "info");
+    assert_eq!(bells[0].2, "URL check removed");
+    assert!(
+        bells[0].3.contains("https://gone.example.test/"),
+        "{bells:?}"
+    );
+    assert_eq!(
+        sent_out(&s).await,
+        out_before,
+        "bell only: nothing went out"
+    );
+}
+
+/// A healthy check has no open card, so there is nothing to replace.
+#[tokio::test]
+async fn changing_or_deleting_a_healthy_check_says_nothing() {
+    let (s, pool) = url_master_sending().await;
+    let id = s
+        .url_monitor_set(input("https://fine.example.test/"))
+        .await
+        .expect("set");
+    s.url_apply_sample(
+        id,
+        "https://fine.example.test/",
+        &result(true, Some(200), None, false),
+        now_secs(),
+    )
+    .await
+    .expect("sample");
+    let mut moved = input("https://elsewhere.example.test/");
+    moved.id = Some(id);
+    s.url_monitor_set(moved).await.expect("moved");
+    s.url_monitor_delete(id, "kevin").await.expect("delete");
+    assert!(url_bells(&pool).await.is_empty());
+    assert_eq!(sent_out(&s).await, 0);
+}
+
+/// A probe that began before the address was changed finishes after it. Its
+/// answer is about the old address: no sample, no decision, no certificate.
+#[tokio::test]
+async fn a_probe_of_the_old_address_does_not_land_on_the_new_one() {
+    let (s, pool) = url_master().await;
+    let id = s
+        .url_monitor_set(input("https://old.example.test/"))
+        .await
+        .expect("set");
+    let mut moved = input("https://new.example.test/");
+    moved.id = Some(id);
+    s.url_monitor_set(moved).await.expect("moved");
+
+    // Three failures and a certificate read, all of the OLD address.
+    let now = now_secs();
+    for i in 0..3 {
+        s.url_apply_probe(
+            id,
+            "https://old.example.test/",
+            &result(false, Some(500), Some("HTTP 500"), true),
+            Some(Some(now + 86_400)),
+            now - 300 + i * 60,
+        )
+        .await
+        .expect("late probe");
+    }
+    let row = hyperion_state::url_monitors::get(&pool, id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(
+        hyperion_state::url_monitors::sample_count(&pool, id)
+            .await
+            .expect("count"),
+        0,
+        "no sample"
+    );
+    assert_eq!(row.alert_state, "ok", "no transition");
+    assert_eq!(row.pending_alert, None);
+    assert_eq!(row.last_alert_at, None);
+    assert_eq!(row.last_sampled_at, 0, "still due");
+    assert_eq!(row.cert_expires_at, None, "no certificate");
+    assert_eq!(row.cert_checked_at, 0);
+    assert!(url_bells(&pool).await.is_empty());
+
+    // The same answers about the address it has NOW count.
+    s.url_apply_probe(
+        id,
+        "https://new.example.test/",
+        &result(true, Some(200), None, false),
+        Some(Some(now + 86_400 * 40)),
+        now,
+    )
+    .await
+    .expect("current probe");
+    let row = hyperion_state::url_monitors::get(&pool, id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(
+        hyperion_state::url_monitors::sample_count(&pool, id)
+            .await
+            .expect("count"),
+        1
+    );
+    assert_eq!(row.cert_expires_at, Some(now + 86_400 * 40));
+
+    // A check deleted mid-probe is no error either.
+    s.url_monitor_delete(id, "kevin").await.expect("delete");
+    s.url_apply_probe(
+        id,
+        "https://new.example.test/",
+        &result(true, Some(200), None, false),
+        Some(Some(now)),
+        now,
+    )
+    .await
+    .expect("probe of a deleted check");
 }
 
 /// An expiry left on a check that is not https is not a fact about it.

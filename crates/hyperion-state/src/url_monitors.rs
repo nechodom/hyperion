@@ -217,6 +217,47 @@ pub struct Sample {
     pub error_message: Option<String>,
 }
 
+/// Record a probe of `url` and stamp the check as sampled, but only while
+/// the check still points at `url`. A probe started against an address the
+/// operator has since replaced says nothing about the new one: it is dropped
+/// and this returns false. Check and write are one statement pair in one
+/// transaction, so the address cannot change between them.
+pub async fn insert_sample_for_url(
+    pool: &SqlitePool,
+    id: i64,
+    url: &str,
+    s: &Sample,
+) -> Result<bool, StateError> {
+    let mut tx = pool.begin().await?;
+    let stamped =
+        sqlx::query("UPDATE url_monitors SET last_sampled_at = ? WHERE id = ? AND url = ?")
+            .bind(s.sampled_at)
+            .bind(id)
+            .bind(url)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+    if !stamped {
+        return Ok(false);
+    }
+    sqlx::query(
+        "INSERT INTO url_monitor_samples \
+         (monitor_id, sampled_at, success, http_status, response_ms, error_message) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id)
+    .bind(s.sampled_at)
+    .bind(s.success)
+    .bind(s.http_status)
+    .bind(s.response_ms)
+    .bind(s.error_message.as_deref())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub async fn insert_sample(pool: &SqlitePool, id: i64, s: &Sample) -> Result<(), StateError> {
     sqlx::query(
         "INSERT INTO url_monitor_samples \
@@ -274,15 +315,32 @@ pub async fn record_transition(
     error: Option<&str>,
     now: i64,
 ) -> Result<(), StateError> {
+    record_transition_for(pool, id, None, down, error, now).await
+}
+
+/// [`record_transition`] that applies only while the check still points at
+/// `url` (when given): a decision made about an address that was replaced
+/// meanwhile is dropped.
+pub async fn record_transition_for(
+    pool: &SqlitePool,
+    id: i64,
+    url: Option<&str>,
+    down: bool,
+    error: Option<&str>,
+    now: i64,
+) -> Result<(), StateError> {
     let mut tx = pool.begin().await?;
-    let pending: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT pending_alert FROM url_monitors WHERE id = ?")
+    let pending: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT pending_alert, url FROM url_monitors WHERE id = ?")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await?;
-    let Some((pending,)) = pending else {
+    let Some((pending, current)) = pending else {
         return Ok(());
     };
+    if url.is_some_and(|u| u != current) {
+        return Ok(());
+    }
     let (state, new_pending, new_error) = if down {
         ("alerting", Some("down"), error)
     } else if pending.as_deref() == Some("down") {
@@ -340,24 +398,28 @@ pub async fn set_node(pool: &SqlitePool, id: i64, node: Option<&str>) -> Result<
     Ok(())
 }
 
-/// A certificate read: when it was read, and the expiry if one could be read.
-/// An unreadable answer keeps the expiry already on record.
+/// A certificate read of `url`: when it was read, and the expiry if one could
+/// be read. An unreadable answer keeps the expiry already on record. Applies
+/// only while the check still points at `url`; returns whether it did.
 pub async fn set_cert_read(
     pool: &SqlitePool,
     id: i64,
+    url: &str,
     checked_at: i64,
     expires_at: Option<i64>,
-) -> Result<(), StateError> {
-    sqlx::query(
+) -> Result<bool, StateError> {
+    Ok(sqlx::query(
         "UPDATE url_monitors SET cert_checked_at = ?, cert_expires_at = COALESCE(?, cert_expires_at) \
-         WHERE id = ?",
+         WHERE id = ? AND url = ?",
     )
     .bind(checked_at)
     .bind(expires_at)
     .bind(id)
+    .bind(url)
     .execute(pool)
-    .await?;
-    Ok(())
+    .await?
+    .rows_affected()
+        > 0)
 }
 
 /// The cert threshold last warned about (`None` clears it: a renewed

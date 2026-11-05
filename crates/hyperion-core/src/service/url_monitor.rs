@@ -332,7 +332,13 @@ async fn read_cert_expiry(url: &str) -> Option<i64> {
 
 /// One probe and, for an https address whose certificate is due, the read of
 /// it beside it.
-async fn sample_one(row: store::Row, now: i64) -> (i64, HttpProbeResult, Option<Option<i64>>) {
+///
+/// The address probed travels with the result: the check may be pointed
+/// somewhere else before the result is applied, and then it is not news.
+async fn sample_one(
+    row: store::Row,
+    now: i64,
+) -> (i64, String, HttpProbeResult, Option<Option<i64>>) {
     let want_cert = row.url.starts_with("https://") && cert_check_due(row.cert_checked_at, now);
     let probe = async { url_check_outcome(probe_http(&row.url).await, row.expected_status) };
     let cert = async {
@@ -343,7 +349,7 @@ async fn sample_one(row: store::Row, now: i64) -> (i64, HttpProbeResult, Option<
         }
     };
     let (result, cert) = tokio::join!(probe, cert);
-    (row.id, result, cert)
+    (row.id, row.url, result, cert)
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +472,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             node_manual: input.node_manual,
         };
         let created = input.id.is_none();
+        let before = match input.id {
+            Some(id) => store::get(&self.pool, id)
+                .await
+                .map_err(|e| db_err("url_monitor_set", e))?,
+            None => None,
+        };
         let id = match input.id {
             Some(id) => {
                 if !store::update(&self.pool, id, &fields)
@@ -492,6 +504,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .map_err(|e| db_err("url_monitor_set", e))?
             }
         };
+        if let Some(old) = before.filter(|old| old.url != url) {
+            self.url_close_open_card(&old, true).await;
+        }
         // Where it points and how it is checked; never a webhook, and never
         // the query part of the address, which may be a token.
         self.append_audit_as(
@@ -517,10 +532,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     pub async fn url_monitor_delete(&self, id: i64, actor: &str) -> Result<(), RpcError> {
         self.url_master_only()?;
+        let before = store::get(&self.pool, id)
+            .await
+            .map_err(|e| db_err("url_monitor_delete", e))?;
         let gone = store::delete(&self.pool, id)
             .await
             .map_err(|e| db_err("url_monitor_delete", e))?;
         if gone {
+            if let Some(old) = before {
+                self.url_close_open_card(&old, false).await;
+            }
             self.append_audit_as(
                 0,
                 audit_actor(actor),
@@ -532,6 +553,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await;
         }
         Ok(())
+    }
+
+    /// A check whose failure was announced is pointed elsewhere or deleted.
+    /// Its bell card `url.monitor:<id>` would say "down" for good, because
+    /// the reset leaves no way for a recovery to follow. One card of the same
+    /// kind replaces it, saying the check no longer applies. Bell only: no
+    /// outage was resolved, so nothing is sent out. A failure that was
+    /// decided but never announced has no card to replace.
+    async fn url_close_open_card(&self, old: &store::Row, changed: bool) {
+        if old.alert_state != "alerting" || old.pending_alert.as_deref() == Some("down") {
+            return;
+        }
+        let cat = self.operator_catalog();
+        let id = if changed {
+            "ops.url_check_changed"
+        } else {
+            "ops.url_check_removed"
+        };
+        let args = [("url", old.url.as_str())];
+        self.notify_admins(
+            "info",
+            &cat.render(&format!("{id}.title"), &args),
+            &cat.render(&format!("{id}.body"), &args),
+            ALERT_HREF,
+            &format!("url.monitor:{}", old.id),
+        )
+        .await;
     }
 
     /// Sample every check that is due, decide, and return the alerts still
@@ -567,17 +615,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
         let deadline = tokio::time::Instant::now() + TICK_BUDGET;
         while let Ok(Some(done)) = tokio::time::timeout_at(deadline, set.join_next()).await {
-            let Ok((id, result, cert)) = done else {
+            let Ok((id, url, result, cert)) = done else {
                 continue;
             };
-            let at = now_secs();
-            if let Err(e) = self.url_apply_sample(id, &result, at).await {
-                tracing::warn!(id, error = %e, "url check: could not record a sample");
-            }
-            if let Some(expires) = cert {
-                if let Err(e) = store::set_cert_read(&self.pool, id, at, expires).await {
-                    tracing::warn!(id, error = %e, "url check: could not record a certificate");
-                }
+            if let Err(e) = self
+                .url_apply_probe(id, &url, &result, cert, now_secs())
+                .await
+            {
+                tracing::warn!(id, error = %e, "url check: could not record a probe");
             }
         }
         // Anything still running past the budget is abandoned; its curl ends
@@ -603,12 +648,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .collect())
     }
 
-    /// Record one probe of check `id` and decide what it changes. Uses the
+    /// Apply what one round of probing of `url` found for check `id`: the
+    /// sample and its decision, and the certificate read when there was one.
+    /// Both are dropped without a trace if the check has been deleted or
+    /// pointed at another address since the probe began.
+    pub(super) async fn url_apply_probe(
+        &self,
+        id: i64,
+        url: &str,
+        result: &HttpProbeResult,
+        cert: Option<Option<i64>>,
+        at: i64,
+    ) -> Result<(), RpcError> {
+        self.url_apply_sample(id, url, result, at).await?;
+        if let Some(expires) = cert {
+            store::set_cert_read(&self.pool, id, url, at, expires)
+                .await
+                .map_err(|e| db_err("url_apply_probe", e))?;
+        }
+        Ok(())
+    }
+
+    /// Record one probe of `url` for check `id` and decide what it changes. Uses the
     /// per-hosting monitor's window and `monitor_transition`, so the two
     /// agree on what a flapping site is. The decision is parked, not sent.
     pub(super) async fn url_apply_sample(
         &self,
         id: i64,
+        url: &str,
         result: &HttpProbeResult,
         now: i64,
     ) -> Result<Option<MonitorTransition>, RpcError> {
@@ -619,10 +686,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // Deleted while it was being probed.
             return Ok(None);
         };
+        if row.url != url {
+            return Ok(None);
+        }
         let err = |e| db_err("url_apply_sample", e);
-        store::insert_sample(
+        let recorded = store::insert_sample_for_url(
             &self.pool,
             id,
+            url,
             &store::Sample {
                 sampled_at: now,
                 success: result.success,
@@ -633,7 +704,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await
         .map_err(err)?;
-        store::set_sampled(&self.pool, id, now).await.map_err(err)?;
+        if !recorded {
+            return Ok(None);
+        }
         let window = (row.alert_after_fails * 2).max(4);
         let recent = store::recent(&self.pool, id, window).await.map_err(err)?;
         let transition = monitor_transition(
@@ -644,13 +717,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             result.hard_failure,
         );
         match transition {
-            Some(MonitorTransition::Down) => {
-                store::record_transition(&self.pool, id, true, Some(&failure_text(result)), now)
-                    .await
-                    .map_err(err)?
-            }
+            Some(MonitorTransition::Down) => store::record_transition_for(
+                &self.pool,
+                id,
+                Some(url),
+                true,
+                Some(&failure_text(result)),
+                now,
+            )
+            .await
+            .map_err(err)?,
             Some(MonitorTransition::Up) => {
-                store::record_transition(&self.pool, id, false, None, now)
+                store::record_transition_for(&self.pool, id, Some(url), false, None, now)
                     .await
                     .map_err(err)?
             }
