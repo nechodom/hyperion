@@ -6634,6 +6634,190 @@ async fn a_new_run_discards_what_the_previous_one_staged() {
     );
 }
 
+/// A transfer the panel has handed to a job, for any import kind.
+async fn committed_transfer(sock: &std::path::Path, kind: &str) -> String {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    use hyperion_types::{ImportTokenOp, ImportTokenResult};
+    let id = match hyperion_rpc_client::call(
+        sock,
+        RpcReq::ImportToken(ImportTokenOp::Mint {
+            target_node: "local".into(),
+            source_kind: kind.into(),
+            created_by: "kevin".into(),
+            ttl_secs: 3600,
+        }),
+    )
+    .await
+    .expect("mint rpc")
+    {
+        RpcResp::ImportToken(ImportTokenResult::Minted { id, .. }) => id,
+        other => panic!("unexpected mint reply: {other:?}"),
+    };
+    let job = match hyperion_rpc_client::call(
+        sock,
+        RpcReq::JobStart {
+            kind: "panel_import".into(),
+            target: None,
+            payload_json: "{}".into(),
+            actor_label: "kevin".into(),
+            actor_uid: 0,
+        },
+    )
+    .await
+    .expect("job rpc")
+    {
+        RpcResp::JobStarted { job_id } => job_id,
+        other => panic!("unexpected job reply: {other:?}"),
+    };
+    hyperion_rpc_client::call(
+        sock,
+        RpcReq::ImportToken(ImportTokenOp::Update {
+            id,
+            status: Some("importing".into()),
+            job_id: Some(job.clone()),
+            received_bytes: None,
+        }),
+    )
+    .await
+    .expect("update rpc");
+    job
+}
+
+async fn finish_job(sock: &std::path::Path, job: &str, ok: bool) {
+    hyperion_rpc_client::call(
+        sock,
+        hyperion_rpc::codec::Request::JobFinish {
+            id: job.to_string(),
+            ok,
+            error: (!ok).then(|| "the node refused".to_string()),
+        },
+    )
+    .await
+    .expect("finish rpc");
+}
+
+/// The table row that links to `job`.
+async fn transfer_row(app: &axum::Router, cookie: &str, job: &str) -> String {
+    let (status, html) = acme_dns_get(app, cookie, "/import/wizard/transfers").await;
+    assert_eq!(status, StatusCode::OK);
+    html.split("<tr>")
+        .find(|row| row.contains(&format!("/jobs/{job}")))
+        .unwrap_or_else(|| panic!("no row for job {job} in: {html}"))
+        .to_string()
+}
+
+/// Nothing writes the outcome of an import back onto its transfer, so the row has
+/// to follow the job. That has to hold for every source, not only the plugin.
+#[tokio::test]
+async fn a_transfer_row_follows_its_import_job_for_every_source() {
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "pw").await;
+
+    for kind in ["cloudpanel", "hestiacp", "wordpress"] {
+        let job = committed_transfer(&sock, kind).await;
+        let row = transfer_row(&app, &cookie, &job).await;
+        assert!(row.contains("importing"), "{kind} while running: {row}");
+
+        finish_job(&sock, &job, false).await;
+        let row = transfer_row(&app, &cookie, &job).await;
+        assert!(row.contains("pill err"), "{kind} after failing: {row}");
+        assert!(!row.contains("importing"), "{kind} after failing: {row}");
+
+        let job = committed_transfer(&sock, kind).await;
+        finish_job(&sock, &job, true).await;
+        let row = transfer_row(&app, &cookie, &job).await;
+        assert!(row.contains("pill ok"), "{kind} after finishing: {row}");
+        assert!(!row.contains("importing"), "{kind} after finishing: {row}");
+    }
+}
+
+/// A plugin transfer whose job fails: the table says so, and the plugin is told
+/// the same on every route that used to go on answering `importing`.
+#[tokio::test]
+async fn a_failed_plugin_import_shows_as_failed_everywhere() {
+    let (_dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let (token, _id) = mint_wordpress_token(&sock).await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "pw").await;
+
+    let r = app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    // No end marker: a dump that stopped early, which the job refuses to assemble.
+    let db = gz_member(b"CREATE TABLE t(i int);\n");
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(&token, "db", 0, &sha256_hex(&db), db.clone()))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let files = gz_member(&[0u8; 1024]);
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(
+            &token,
+            "files",
+            0,
+            &sha256_hex(&files),
+            files.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let commit = || {
+        upload_req(
+            "/import/upload/wp/commit",
+            &token,
+            Method::POST,
+            format!(
+                r#"{{"db_bytes":{},"files_bytes":{},"files_members":1,"warnings":[]}}"#,
+                db.len(),
+                files.len()
+            )
+            .into_bytes(),
+        )
+    };
+    let r = app.clone().oneshot(commit()).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let job = field(&body_text(r).await, "job").expect("job id");
+    assert_eq!(acme_ssl_wait_job(&sock, &job).await, "failed");
+
+    let row = transfer_row(&app, &cookie, &job).await;
+    assert!(row.contains("pill err"), "got: {row}");
+    assert!(row.contains("new code"), "got: {row}");
+    assert!(!row.contains("importing"), "got: {row}");
+
+    let r = app
+        .clone()
+        .oneshot(upload_req(
+            "/import/upload/status",
+            &token,
+            Method::GET,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        field(&body_text(r).await, "state").as_deref(),
+        Some("failed")
+    );
+
+    let r = app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+    let body = body_text(r).await;
+    assert_eq!(field(&body, "state").as_deref(), Some("failed"));
+    assert_eq!(field(&body, "job"), Some(job.clone()));
+
+    // Still one job: a failed import is not a second chance to import.
+    let r = app.clone().oneshot(commit()).await.unwrap();
+    let body = body_text(r).await;
+    assert_eq!(field(&body, "state").as_deref(), Some("failed"));
+    assert_eq!(field(&body, "job"), Some(job));
+}
+
 #[tokio::test]
 async fn the_plugin_zip_needs_a_session() {
     let admin = admin_user::create("kevin", "pw").expect("admin");

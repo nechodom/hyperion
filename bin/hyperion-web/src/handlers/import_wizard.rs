@@ -246,57 +246,89 @@ pub(super) async fn update(
     .await;
 }
 
+/// A transfer's status as of now. `importing` on the token only says a job took
+/// it; how that job ended is on the job row, and is read from there rather than
+/// copied back. A copy would stay `importing` when a restart kills the task that
+/// should have written it (the reaper fails the job all the same), and could be
+/// overwritten by the commit handler still storing the job id of a job that has
+/// already failed.
+///
+/// A job that cannot be read keeps the row at `importing`: nothing is known yet.
+pub(super) async fn current_status(state: &SharedState, info: &ImportTokenInfo) -> String {
+    if info.status != "importing" {
+        return info.status.clone();
+    }
+    let Some(job) = info.job_id.as_deref() else {
+        return info.status.clone();
+    };
+    match super::jobs::fetch_job(state, job).await {
+        Ok(Some(j)) if j.is_terminal() => {
+            if j.state == "done" {
+                "done".into()
+            } else {
+                "failed".into()
+            }
+        }
+        _ => info.status.clone(),
+    }
+}
+
 async fn list_transfers(state: &SharedState) -> Vec<TransferRow> {
     match token_rpc(state, ImportTokenOp::List).await {
-        Ok(ImportTokenResult::Listed(v)) => v
-            .into_iter()
-            .map(|i| {
-                let site_count = serde_json::from_str::<Vec<serde_json::Value>>(&i.manifest_json)
-                    .map(|a| a.len())
-                    .unwrap_or(0);
-                let has_manifest = !i.manifest_json.trim().is_empty();
-                let has_selection = !i.selection_json.trim().is_empty();
-                // Stage drives the wizard row: the source is in one of these
-                // phases while status is still "pending" (pre-ingest).
-                // What the source reports while it packs — the phase that used
-                // to be dead air, and is usually the longest part of a run.
-                let packing_note = summarise_source_progress(&i.source_progress_json);
-                let stage = if i.job_id.is_some() || i.status != "pending" {
-                    "active"
-                } else if i.source_kind == PLUGIN_KIND {
-                    "awaiting_plugin"
-                } else if has_selection && !packing_note.is_empty() && i.received_bytes == 0 {
-                    "packing"
-                } else if has_selection {
-                    "selected"
-                } else if has_manifest {
-                    "awaiting_selection"
-                } else {
-                    "awaiting_report"
-                }
-                .to_string();
-                let site = if i.source_kind == PLUGIN_KIND {
-                    plugin_site(&i.selection_json)
-                } else {
-                    String::new()
-                };
-                TransferRow {
-                    id: i.id,
-                    site,
-                    source_kind: i.source_kind,
-                    status: i.status,
-                    received: human_bytes(i.received_bytes),
-                    received_bytes: i.received_bytes,
-                    job_id: i.job_id,
-                    created_by: i.created_by,
-                    stage,
-                    site_count,
-                    expected_bytes: i.expected_bytes,
-                    rate_bytes_per_sec: i.rate_bytes_per_sec,
-                    packing_note,
-                }
-            })
-            .collect(),
+        Ok(ImportTokenResult::Listed(mut v)) => {
+            for i in &mut v {
+                i.status = current_status(state, i).await;
+            }
+            v.into_iter()
+                .map(|i| {
+                    let site_count =
+                        serde_json::from_str::<Vec<serde_json::Value>>(&i.manifest_json)
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                    let has_manifest = !i.manifest_json.trim().is_empty();
+                    let has_selection = !i.selection_json.trim().is_empty();
+                    // Stage drives the wizard row: the source is in one of these
+                    // phases while status is still "pending" (pre-ingest).
+                    // What the source reports while it packs — the phase that used
+                    // to be dead air, and is usually the longest part of a run.
+                    let packing_note = summarise_source_progress(&i.source_progress_json);
+                    let stage = if i.job_id.is_some() || i.status != "pending" {
+                        "active"
+                    } else if i.source_kind == PLUGIN_KIND {
+                        "awaiting_plugin"
+                    } else if has_selection && !packing_note.is_empty() && i.received_bytes == 0 {
+                        "packing"
+                    } else if has_selection {
+                        "selected"
+                    } else if has_manifest {
+                        "awaiting_selection"
+                    } else {
+                        "awaiting_report"
+                    }
+                    .to_string();
+                    let site = if i.source_kind == PLUGIN_KIND {
+                        plugin_site(&i.selection_json)
+                    } else {
+                        String::new()
+                    };
+                    TransferRow {
+                        id: i.id,
+                        site,
+                        source_kind: i.source_kind,
+                        status: i.status,
+                        received: human_bytes(i.received_bytes),
+                        received_bytes: i.received_bytes,
+                        job_id: i.job_id,
+                        created_by: i.created_by,
+                        stage,
+                        site_count,
+                        expected_bytes: i.expected_bytes,
+                        rate_bytes_per_sec: i.rate_bytes_per_sec,
+                        packing_note,
+                    }
+                })
+                .collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -1135,7 +1167,8 @@ pub async fn post_upload_commit(
             return Ok(text(
                 StatusCode::OK,
                 format!(
-                    "state importing\njob {job}\nreceived {}\n",
+                    "state {}\njob {job}\nreceived {}\n",
+                    current_status(&state, &info).await,
                     info.received_bytes
                 ),
             ));
@@ -1272,7 +1305,7 @@ pub async fn get_upload_status(
         StatusCode::OK,
         format!(
             "state {}\noffset {}\nexpected {}\njob {}\n",
-            info.status,
+            current_status(&state, &info).await,
             part_len(info.id).await,
             info.expected_bytes,
             info.job_id.as_deref().unwrap_or("-"),
@@ -1772,8 +1805,9 @@ fn esc(s: &str) -> String {
 /// which the state layer already decided by returning 0 — so 0 renders as
 /// nothing at all, never as "0 B/s", which would read as a stall.
 fn progress_cell(r: &TransferRow) -> String {
-    if r.expected_bytes <= 0 {
-        // Total unknown: say how much has landed and stop there.
+    if r.expected_bytes <= 0 || matches!(r.status.as_str(), "done" | "failed") {
+        // Total unknown, or nothing is moving any more: say how much has landed
+        // and stop there.
         return esc(&r.received);
     }
     let pct = (r.received_bytes.min(r.expected_bytes) * 100) / r.expected_bytes;
@@ -1874,16 +1908,29 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
                 "selected".to_string(),
                 "<span class=\"text-soft\">waiting for the source to export…</span>".to_string(),
             ),
+            // A new code is the only way on: the job deleted the bundle and the
+            // uploaded streams on its way out, and a committed code never takes
+            // another upload.
             _ if r.status == "failed" => (
                 "<span class=\"pill err\">failed</span>".to_string(),
-                if r.source_kind == PLUGIN_KIND {
-                    "<span class=\"text-soft\">this transfer did not finish — generate a new \
-                     code and start the plugin again</span>"
-                        .to_string()
-                } else {
-                    "<span class=\"text-soft\">this transfer did not finish — start a new \
-                     one from the command above</span>"
-                        .to_string()
+                format!(
+                    "{}<span class=\"text-soft\">this transfer did not finish — {}</span>",
+                    match &r.job_id {
+                        Some(j) => format!("<a href=\"/jobs/{}\">what happened →</a> ", esc(j)),
+                        None => String::new(),
+                    },
+                    if r.source_kind == PLUGIN_KIND {
+                        "generate a new code and start the plugin again"
+                    } else {
+                        "start a new one from the command above"
+                    },
+                ),
+            ),
+            _ if r.status == "done" => (
+                "<span class=\"pill ok\">finished</span>".to_string(),
+                match &r.job_id {
+                    Some(j) => format!("<a href=\"/jobs/{}\">result →</a>", esc(j)),
+                    None => String::new(),
                 },
             ),
             _ => (
@@ -1940,6 +1987,32 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A rate and a time left describe a transfer still moving. Next to "failed"
+    /// or "finished" they would read as if it were.
+    #[test]
+    fn a_settled_transfer_shows_no_rate() {
+        let row = |status: &str| TransferRow {
+            id: 1,
+            source_kind: "cloudpanel".into(),
+            site: String::new(),
+            status: status.into(),
+            received: "1.0 GiB".into(),
+            received_bytes: 1 << 30,
+            job_id: Some("job".into()),
+            created_by: "kevin".into(),
+            stage: "active".into(),
+            site_count: 0,
+            expected_bytes: 1 << 30,
+            rate_bytes_per_sec: 1 << 20,
+            packing_note: String::new(),
+        };
+        assert!(progress_cell(&row("importing")).contains("left"));
+        assert_eq!(progress_cell(&row("failed")), "1.0 GiB");
+        assert_eq!(progress_cell(&row("done")), "1.0 GiB");
+    }
+
     /// The diagnosis must be pinned to what the template ACTUALLY renders, not
     /// to a string someone remembered.
     ///
