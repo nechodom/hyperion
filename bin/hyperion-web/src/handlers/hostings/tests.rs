@@ -939,6 +939,9 @@ fn reinstall_needs_wordpress_org_as_the_reference() {
         ..native_scan()
     });
     assert!(!unlabelled.contains("/hostings/integrity/reinstall-plugin"));
+    assert!(unlabelled.contains("the list of files was cut short"));
+    assert!(unlabelled.contains("can't tell which source this plugin was compared with"));
+    assert!(!unlabelled.contains("not wordpress.org"));
 
     let vendor = render_integrity(hyperion_types::WpIntegrityScanResult {
         plugins_failed: vec![failed("acf-pro")],
@@ -948,6 +951,7 @@ fn reinstall_needs_wordpress_org_as_the_reference() {
     assert!(!vendor.contains("/hostings/integrity/reinstall-plugin"));
     assert!(vendor.contains("don't match the vendor&#x27;s package"));
     assert!(vendor.contains("would install a different plugin"));
+    assert!(!vendor.contains("the list of files was cut short"));
 
     // A record from before the label could only have meant wordpress.org.
     let old = render_integrity(hyperion_types::WpIntegrityScanResult {
@@ -988,6 +992,24 @@ fn theme_failures_are_listed() {
     assert!(html.contains("1 file(s) need attention"));
     // File actions come later: no button on a theme yet.
     assert!(!html.contains("reinstall-theme"));
+}
+
+/// A rule-carrying comparison standing alone is one file in the headline.
+#[test]
+fn headline_counts_a_lone_rule_carrying_comparison() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        findings: vec![hyperion_types::SiteFileFinding {
+            rel: "wp-content/plugins/p/a.php".into(),
+            kind: hyperion_types::FindingKind::UpstreamModified,
+            rule_id: Some("php.eval".into()),
+            component: Some("p".into()),
+            ..Default::default()
+        }],
+        ..native_scan()
+    });
+    assert!(html.contains(r#"data-verdict="findings""#));
+    assert!(html.contains("1 file(s) need attention"));
+    assert!(!html.contains("0 file(s)"));
 }
 
 /// A site with no WordPress has no release to compare with, which is not a

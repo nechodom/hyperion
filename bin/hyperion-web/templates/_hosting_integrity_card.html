@@ -42,7 +42,7 @@
       {# Six states, never fewer: "files verified but no malware scanner" and
          "part of the site wasn't looked at" are answers of their own and must
          not borrow the green one. #}
-      {% if v == "findings" %}<strong class="tone-err">{{ scan.shown_finding_count() }} file(s) need attention</strong>
+      {% if v == "findings" %}<strong class="tone-err">{{ scan.headline_count() }} file(s) need attention</strong>
       {% else if v == "review" %}<strong class="tone-warn">{{ scan.review.len() }} change(s) to review</strong> — not confirmed as a problem
       {% else if v == "running" %}No verdict until the scan finishes
       {% else if v == "never" && scan.error.is_none() %}Not scanned yet — nothing was verified, so this is not a clean result
@@ -231,7 +231,11 @@
       </form>
     </div>
     {% else %}
+    {% if scan.source_label_of(pl.slug).is_some() %}
     <p class="chk-note">No fix is offered here: this plugin was compared with {{ scan.reference_of(pl.slug) }}, not wordpress.org, so replacing it with wordpress.org's copy would install a different plugin.</p>
+    {% else %}
+    <p class="chk-note">No one-click fix is offered here: the list of files was cut short, so this panel can't tell which source this plugin was compared with.</p>
+    {% endif %}
     {% endif %}
     {% endfor %}
 

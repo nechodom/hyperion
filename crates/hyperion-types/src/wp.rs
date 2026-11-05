@@ -587,7 +587,7 @@ impl WpIntegrityScanResult {
     }
 
     /// The label the scan put on a plugin or theme's findings.
-    fn source_label_of(&self, slug: &str) -> Option<&str> {
+    pub fn source_label_of(&self, slug: &str) -> Option<&str> {
         self.findings
             .iter()
             .chain(&self.review)
@@ -630,6 +630,13 @@ impl WpIntegrityScanResult {
         self.findings
             .iter()
             .filter(|f| !f.is_comparison() || f.rule_id.is_some())
+    }
+
+    /// The number in the headline: `shown_finding_count`, but never below what
+    /// the findings list shows, so a lone rule-carrying comparison reads 1, not 0.
+    pub fn headline_count(&self) -> usize {
+        self.shown_finding_count()
+            .max(self.listed_findings().count())
     }
 
     /// Everything the card puts under "needs attention". A failed comparison
@@ -999,6 +1006,16 @@ mod tests {
         // is that same file, not a third.
         assert_eq!(r.shown_finding_count(), 2);
         assert_eq!(r.verdict(), ScanVerdict::Findings);
+
+        // Only a comparison that carries a rule stands: still one, never 0.
+        let mut lone = native();
+        lone.findings = vec![SiteFileFinding {
+            rule_id: Some("php.eval".into()),
+            ..finding(FindingKind::UpstreamModified)
+        }];
+        assert_eq!(lone.shown_finding_count(), 0);
+        assert_eq!(lone.verdict(), ScanVerdict::Findings);
+        assert_eq!(lone.headline_count(), 1);
     }
 
     #[test]
