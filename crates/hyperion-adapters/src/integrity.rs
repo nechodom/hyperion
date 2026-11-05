@@ -1073,8 +1073,10 @@ fn parse_hit_line(line: &str) -> Option<WpMalwareHit> {
     })
 }
 
-/// Parse `clamscan --infected --no-summary` output.
-pub fn parse_clamscan_output(text: &str) -> Vec<WpMalwareHit> {
+/// Parse `clamscan --infected --no-summary` output. The sweep reads its output
+/// line by line; this is how the tests read a whole one.
+#[cfg(test)]
+fn parse_clamscan_output(text: &str) -> Vec<WpMalwareHit> {
     text.lines().filter_map(parse_hit_line).collect()
 }
 

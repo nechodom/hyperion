@@ -2384,8 +2384,8 @@ mod site_scan {
         let dir = tempfile::tempdir().expect("tmp");
         let cfg = dir.path().join("agent.toml");
         assert!(!read_new_layers_live(Some(&cfg)), "no file");
-        std::fs::write(&cfg, "[integrity]\nscan_niceness = 5\n").expect("write");
-        assert!(!read_new_layers_live(Some(&cfg)), "not mentioned");
+        std::fs::write(&cfg, "[integrity]\nvendor_refs_live = true\n").expect("write");
+        assert!(!read_new_layers_live(Some(&cfg)), "the section without the key");
         std::fs::write(&cfg, "[integrity]\nnew_layers_live = \"yes\"\n").expect("write");
         assert!(!read_new_layers_live(Some(&cfg)), "not a boolean");
         std::fs::write(&cfg, "[integrity]\nnew_layers_live = true\n").expect("write");
