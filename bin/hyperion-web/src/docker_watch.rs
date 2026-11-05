@@ -50,8 +50,11 @@ pub fn spawn(state: SharedState) {
             tick.tick().await;
             let wake = wakes;
             wakes += 1;
-            // Only a master has nodes to ask and checks to run.
-            if state.deployment_mode.read().await.as_str() != "master" {
+            // Only a panel box has anything to do. A box with no workers
+            // records itself as "standalone", and its URL checks run all the
+            // same; only the question to the nodes needs a master.
+            let mode = state.deployment_mode.read().await.clone();
+            if !url_pass_runs(&mode) {
                 continue;
             }
             // The URL tick is started before the node pass, so a slow node
@@ -67,7 +70,7 @@ pub fn spawn(state: SharedState) {
                     crate::url_watch::pass(&state).await;
                 });
             }
-            if node_pass_due(wake) {
+            if node_pass_runs(&mode) && node_pass_due(wake) {
                 pass(&state, &mut silence, now_secs()).await;
             }
         }
@@ -81,6 +84,17 @@ impl Drop for BusyGuard {
     fn drop(&mut self) {
         self.0.store(false, std::sync::atomic::Ordering::Release);
     }
+}
+
+/// Do the URL checks run on a box in this deployment mode? On the panel box,
+/// whether it has workers (`master`) or not (`standalone`); never on a worker.
+fn url_pass_runs(mode: &str) -> bool {
+    matches!(mode, "master" | "standalone")
+}
+
+/// Is there a cluster to ask? Only a master has registered nodes.
+fn node_pass_runs(mode: &str) -> bool {
+    mode == "master"
 }
 
 /// Is this wake one of those that ask the nodes?
@@ -282,6 +296,17 @@ mod tests {
         });
         assert!(task.await.is_err());
         assert!(!flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_box_without_workers_still_runs_its_url_checks() {
+        assert!(url_pass_runs("master"));
+        assert!(url_pass_runs("standalone"), "one server, no workers");
+        assert!(!url_pass_runs("worker"));
+        assert!(!url_pass_runs(""));
+        // The question to the nodes keeps the master gate.
+        assert!(node_pass_runs("master"));
+        assert!(!node_pass_runs("standalone"));
     }
 
     #[test]

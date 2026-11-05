@@ -546,6 +546,23 @@ async fn a_worker_runs_no_url_checks() {
         .is_err());
 }
 
+/// A box with no workers records `[cluster] mode = "standalone"`; it is not
+/// a worker, so its URL checks work like a master's.
+#[tokio::test]
+async fn a_standalone_box_runs_url_checks() {
+    let dir = tempfile::tempdir().expect("dir");
+    let cfg = dir.path().join("agent.toml");
+    std::fs::write(&cfg, b"[cluster]\nmode = \"standalone\"\n").expect("write");
+    let (s, _pool) = url_master().await;
+    let s = s.with_agent_config_path(cfg);
+    assert!(s.is_standalone());
+    s.url_monitor_set(input("https://example.test/"))
+        .await
+        .expect("saved");
+    assert_eq!(s.url_monitor_list().await.expect("list").monitors.len(), 1);
+    s.url_monitor_tick().await.expect("tick");
+}
+
 // ---------------------------------------------------------------------------
 // Saving
 // ---------------------------------------------------------------------------
