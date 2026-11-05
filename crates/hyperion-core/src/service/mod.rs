@@ -52,6 +52,7 @@ mod files;
 mod firewall;
 mod fs_health;
 pub use cpu_usage::{CpuClass, CpuTracker, ProcSample, ProcSnapshot, TICK_SECS as CPU_TICK_SECS};
+pub use docker::{loopback_port, proxy_offer, ProxyOffer};
 pub use fs_health::check_usr_writable;
 mod fs_util;
 mod ftp;

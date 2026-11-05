@@ -2087,3 +2087,247 @@ async fn a_worker_cannot_flag_nodes_silent() {
         .expect_err("master only");
     assert!(matches!(err, RpcError::Validation { .. }), "{err}");
 }
+
+// ---------------------------------------------------------------------------
+// Reverse proxy from a discovered stack
+// ---------------------------------------------------------------------------
+
+use crate::service::docker::{link_hostings, loopback_port, proxy_offer, ProxyOffer};
+use hyperion_types::docker::{DockerContainer, DockerPort, DockerProject};
+
+fn port(ip: &str, host: u16, proto: &str) -> DockerPort {
+    DockerPort {
+        host_ip: ip.into(),
+        host_port: host,
+        container_port: 80,
+        proto: proto.into(),
+    }
+}
+
+fn stack_with(name: &str, ports: Vec<DockerPort>) -> DockerProject {
+    DockerProject {
+        name: name.into(),
+        containers: vec![DockerContainer {
+            name: format!("{name}-web-1"),
+            project: name.into(),
+            service: "web".into(),
+            state: "running".into(),
+            ports,
+            ..Default::default()
+        }],
+        verdict: "ok".into(),
+        ..Default::default()
+    }
+}
+
+fn proxies(rows: &[(&str, &str)]) -> Vec<(String, String)> {
+    rows.iter()
+        .map(|(d, u)| (d.to_string(), u.to_string()))
+        .collect()
+}
+
+#[test]
+fn loopback_port_only_for_this_machine() {
+    assert_eq!(loopback_port("http://127.0.0.1:3000"), Some(3000));
+    assert_eq!(loopback_port("http://localhost:3000/"), Some(3000));
+    assert_eq!(loopback_port("http://LocalHost:3000/app"), Some(3000));
+    assert_eq!(loopback_port("https://[::1]:8443"), Some(8443));
+    assert_eq!(loopback_port("http://10.0.0.1:3000"), None);
+    assert_eq!(loopback_port("http://127.0.0.1"), None, "no port to match");
+    assert_eq!(loopback_port("http://example.com:3000"), None);
+    assert_eq!(
+        loopback_port("http://127.0.0.1.evil.example:3000"),
+        None,
+        "a name that starts like an address is a name"
+    );
+    assert_eq!(loopback_port("ftp://127.0.0.1:21"), None);
+    assert_eq!(loopback_port("not a url"), None);
+    assert_eq!(loopback_port(""), None);
+}
+
+#[test]
+fn link_found_for_hand_made_proxy() {
+    let mut ps = vec![
+        stack_with("shop", vec![port("127.0.0.1", 3000, "tcp")]),
+        stack_with("blog", vec![port("0.0.0.0", 8080, "tcp")]),
+    ];
+    link_hostings(
+        &mut ps,
+        &proxies(&[
+            ("shop.example.cz", "http://127.0.0.1:3000/"),
+            ("www.blog.cz", "http://localhost:8080"),
+        ]),
+    );
+    assert_eq!(ps[0].hostings, vec!["shop.example.cz".to_string()]);
+    assert_eq!(ps[1].hostings, vec!["www.blog.cz".to_string()]);
+}
+
+#[test]
+fn link_ignores_other_hosts() {
+    let mut ps = vec![stack_with("shop", vec![port("0.0.0.0", 3000, "tcp")])];
+    link_hostings(
+        &mut ps,
+        &proxies(&[
+            ("a.cz", "http://10.0.0.5:3000"),
+            ("b.cz", "http://127.0.0.1:3001"),
+            ("c.cz", "http://127.0.0.1"),
+        ]),
+    );
+    assert!(ps[0].hostings.is_empty(), "{:?}", ps[0].hostings);
+}
+
+#[test]
+fn link_needs_a_tcp_port_that_loopback_reaches() {
+    let mut ps = vec![
+        stack_with("udp", vec![port("0.0.0.0", 3000, "udp")]),
+        stack_with("lan", vec![port("10.0.0.2", 3001, "tcp")]),
+        stack_with("v6", vec![port("::", 3002, "tcp")]),
+        stack_with("bare", vec![port("", 3003, "tcp")]),
+        stack_with("unpub", vec![port("", 0, "tcp")]),
+    ];
+    link_hostings(
+        &mut ps,
+        &proxies(&[
+            ("a.cz", "http://127.0.0.1:3000"),
+            ("b.cz", "http://127.0.0.1:3001"),
+            ("c.cz", "http://127.0.0.1:3002"),
+            ("d.cz", "http://127.0.0.1:3003"),
+            ("e.cz", "http://127.0.0.1:80"),
+        ]),
+    );
+    let linked: Vec<(&str, usize)> = ps
+        .iter()
+        .map(|p| (p.name.as_str(), p.hostings.len()))
+        .collect();
+    assert_eq!(
+        linked,
+        [("udp", 0), ("lan", 0), ("v6", 1), ("bare", 1), ("unpub", 0)]
+    );
+}
+
+#[test]
+fn link_lists_each_hosting_once_and_starts_clean() {
+    let mut p = stack_with(
+        "shop",
+        vec![port("0.0.0.0", 3000, "tcp"), port("::", 3000, "tcp")],
+    );
+    p.hostings = vec!["stale.cz".into()];
+    let mut ps = vec![p];
+    link_hostings(
+        &mut ps,
+        &proxies(&[
+            ("b.cz", "http://127.0.0.1:3000"),
+            ("a.cz", "http://localhost:3000"),
+            ("b.cz", "http://127.0.0.1:3000"),
+        ]),
+    );
+    assert_eq!(ps[0].hostings, vec!["a.cz".to_string(), "b.cz".to_string()]);
+}
+
+#[test]
+fn proxy_offer_by_bind() {
+    let offer = |ip: &str, host: u16, proto: &str| proxy_offer(&port(ip, host, proto));
+    assert_eq!(
+        offer("127.0.0.1", 18080, "tcp"),
+        ProxyOffer::Offer {
+            url: "http://127.0.0.1:18080".into(),
+            public_bind: false
+        }
+    );
+    assert_eq!(
+        offer("::1", 18080, "tcp"),
+        ProxyOffer::Offer {
+            url: "http://127.0.0.1:18080".into(),
+            public_bind: false
+        }
+    );
+    for ip in ["0.0.0.0", "::", ""] {
+        assert_eq!(
+            offer(ip, 18080, "tcp"),
+            ProxyOffer::Offer {
+                url: "http://127.0.0.1:18080".into(),
+                public_bind: true
+            },
+            "{ip:?}"
+        );
+    }
+    assert_eq!(offer("0.0.0.0", 80, "tcp"), ProxyOffer::Conflict);
+    assert_eq!(offer("127.0.0.1", 443, "tcp"), ProxyOffer::Conflict);
+    assert_eq!(offer("0.0.0.0", 53, "udp"), ProxyOffer::NotTcp);
+    assert_eq!(offer("0.0.0.0", 0, "tcp"), ProxyOffer::NotTcp);
+    assert_eq!(
+        offer("10.0.0.2", 18080, "tcp"),
+        ProxyOffer::OtherAddress,
+        "127.0.0.1 would not reach a port bound to one other address"
+    );
+}
+
+/// A reverse-proxy hosting on `upstream`, as the wizard or a hand edit leaves it.
+async fn make_proxy(s: &HostingService<MockAdapterPort>, domain: &str, upstream: &str) {
+    let mut r = req(domain);
+    r.php_version = None;
+    r.database = None;
+    r.kind = "reverse_proxy".into();
+    r.proxy_upstream_url = Some(upstream.into());
+    s.create(r).await.expect("create proxy");
+}
+
+#[tokio::test]
+async fn list_reverse_proxies_skips_trash_and_other_kinds() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), happy_mocks_many());
+    make_proxy(&s, "live.cz", "http://127.0.0.1:18080").await;
+    make_proxy(&s, "gone.cz", "http://127.0.0.1:18081").await;
+    s.create(req("plain.cz")).await.expect("php site");
+    let gone = s
+        .get(HostingSelector::Domain(Domain::parse("gone.cz").unwrap()))
+        .await
+        .expect("get");
+    hyperion_state::hostings::mark_trashed(&pool, &gone.id, 5)
+        .await
+        .expect("trash");
+
+    let rows = hyperion_state::hostings::list_reverse_proxies(&pool)
+        .await
+        .expect("list");
+    assert_eq!(
+        rows,
+        vec![("live.cz".to_string(), "http://127.0.0.1:18080".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn overview_links_the_hosting_that_proxies_to_a_published_port() {
+    let mut a = happy_mocks_many();
+    a.expect_docker_read().returning(|cmd, _| match cmd {
+        DockerCmd::PsAll => Ok(FIXTURE_PS.to_vec()),
+        DockerCmd::Inspect(_) => Ok(FIXTURE_INSPECT.to_vec()),
+        DockerCmd::Stats => Ok(FIXTURE_STATS.to_vec()),
+        DockerCmd::SystemDf => Ok(FIXTURE_DF.to_vec()),
+        other => panic!("unexpected {other:?}"),
+    });
+    let (s, _dir) = worker_with(a).await;
+    make_proxy(&s, "app.cz", "http://127.0.0.1:18080").await;
+    make_proxy(&s, "elsewhere.cz", "http://10.0.0.9:18080").await;
+
+    s.docker_tick().await.expect("tick");
+    let st = s.docker_overview().await.expect("overview");
+    let fixture = st.projects.iter().find(|p| p.name == "fixture").expect("p");
+    assert_eq!(fixture.hostings, vec!["app.cz".to_string()]);
+    assert!(
+        st.projects
+            .iter()
+            .filter(|p| p.name != "fixture")
+            .all(|p| p.hostings.is_empty()),
+        "only the stack that publishes the port is linked"
+    );
+
+    // A hosting made after the tick shows up on the next read, not the next tick.
+    make_proxy(&s, "second.cz", "http://localhost:18080/").await;
+    let st = s.docker_overview().await.expect("overview");
+    let fixture = st.projects.iter().find(|p| p.name == "fixture").expect("p");
+    assert_eq!(
+        fixture.hostings,
+        vec!["app.cz".to_string(), "second.cz".to_string()]
+    );
+}

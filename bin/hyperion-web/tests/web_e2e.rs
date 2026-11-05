@@ -7719,3 +7719,497 @@ async fn deleting_a_url_check_removes_it() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert_eq!(url_checks(&sock).await.monitors.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Docker: reverse proxy from a discovered stack.
+// ---------------------------------------------------------------------------
+
+/// A user on a custom role with exactly `caps`, every hosting in scope.
+async fn docker_caps_user(
+    app: &axum::Router,
+    sock: &std::path::Path,
+    name: &str,
+    caps: &[hyperion_state::capabilities::Capability],
+) -> String {
+    let role_id = match hyperion_rpc_client::call(
+        sock,
+        DockerReq::RoleCreate {
+            name: format!("caps-{name}"),
+            capabilities: caps.iter().fold(0, |a, c| a | c.bit()),
+            scope_all: true,
+        },
+    )
+    .await
+    .expect("role")
+    {
+        DockerResp::RoleCreate { id } => id,
+        other => panic!("unexpected role create: {other:?}"),
+    };
+    let user_id = match hyperion_rpc_client::call(
+        sock,
+        DockerReq::WebUserCreate {
+            username: name.into(),
+            email: format!("{name}@example.invalid"),
+            password: "docker-pw-12345".into(),
+            role: "operator".into(),
+        },
+    )
+    .await
+    .expect("user")
+    {
+        DockerResp::WebUserCreate { id } => id,
+        other => panic!("unexpected user create: {other:?}"),
+    };
+    hyperion_rpc_client::call(
+        sock,
+        DockerReq::WebUserSetCustomRole {
+            user_id,
+            custom_role_id: role_id,
+        },
+    )
+    .await
+    .expect("assign");
+    acme_dns_login(app, name, "docker-pw-12345").await
+}
+
+/// A reverse-proxy hosting on `upstream`; returns its id.
+async fn docker_proxy_hosting(sock: &std::path::Path, domain: &str, upstream: &str) -> String {
+    match hyperion_rpc_client::call(
+        sock,
+        DockerReq::HostingCreate(hyperion_rpc::wire::HostingCreateReq {
+            domain: hyperion_validate::Domain::parse(domain).expect("domain"),
+            aliases: vec![],
+            php_version: None,
+            database: None,
+            system_user: None,
+            kind: "reverse_proxy".into(),
+            proxy_upstream_url: Some(upstream.into()),
+        }),
+    )
+    .await
+    .expect("seed proxy")
+    {
+        DockerResp::HostingCreate(c) => c.id.as_str().to_string(),
+        other => panic!("unexpected create: {other:?}"),
+    }
+}
+
+fn port_of(ip: &str, host: u16, container: u16, proto: &str) -> hyperion_types::docker::DockerPort {
+    hyperion_types::docker::DockerPort {
+        host_ip: ip.into(),
+        host_port: host,
+        container_port: container,
+        proto: proto.into(),
+    }
+}
+
+/// Stacks for the proxy tests: one per kind of published port.
+fn proxy_snapshot() -> DockerNodeStatus {
+    let stack = |name: &str, ports: Vec<hyperion_types::docker::DockerPort>| {
+        let mut c = docker_container(name, "web", "running");
+        c.ports = ports;
+        DockerProject {
+            name: name.into(),
+            containers: vec![c],
+            verdict: "ok".into(),
+            ..Default::default()
+        }
+    };
+    DockerNodeStatus {
+        read_at: 1_700_000_100,
+        daemon_ok: true,
+        projects: vec![
+            stack("loop", vec![port_of("127.0.0.1", 18080, 80, "tcp")]),
+            stack(
+                "wide",
+                vec![
+                    port_of("0.0.0.0", 18081, 80, "tcp"),
+                    port_of("::", 18081, 80, "tcp"),
+                ],
+            ),
+            stack("nginx-clash", vec![port_of("0.0.0.0", 80, 80, "tcp")]),
+            stack("dns", vec![port_of("0.0.0.0", 5353, 53, "udp")]),
+            stack("closed", vec![]),
+        ],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn stack_offers_a_reverse_proxy_per_published_port() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(proxy_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    let (st, page) = acme_dns_get(&app, &cookie, "/docker/local/loop").await;
+    assert_eq!(st, StatusCode::OK);
+    let want = format!(
+        "/hostings/new?site_type=reverse_proxy&amp;proxy_upstream_url={}&amp;target_node=local",
+        enc("http://127.0.0.1:18080")
+    );
+    assert!(page.contains(&want), "{page}");
+    assert!(
+        !page.contains("bypass"),
+        "a loopback bind carries no warning"
+    );
+
+    // 0.0.0.0 and :: of one port are one offer, and it is flagged.
+    let (_, page) = acme_dns_get(&app, &cookie, "/docker/local/wide").await;
+    assert_eq!(page.matches("Add reverse proxy").count(), 1, "{page}");
+    assert!(page.contains("127.0.0.1:18081:80"), "{page}");
+    assert!(page.contains("bypass"), "{page}");
+
+    // nginx owns 80 and 443.
+    let (_, page) = acme_dns_get(&app, &cookie, "/docker/local/nginx-clash").await;
+    assert!(!page.contains("proxy_upstream_url="), "{page}");
+    assert!(page.contains("nginx"), "{page}");
+
+    // A UDP port is nothing to proxy to.
+    let (_, page) = acme_dns_get(&app, &cookie, "/docker/local/dns").await;
+    assert!(!page.contains("proxy_upstream_url="), "{page}");
+}
+
+#[tokio::test]
+async fn no_published_port_explains_itself() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(proxy_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    let (st, page) = acme_dns_get(&app, &cookie, "/docker/local/closed").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(page.contains("No published port"), "{page}");
+    assert!(
+        page.contains("127.0.0.1:"),
+        "suggests how to publish: {page}"
+    );
+    assert!(
+        page.contains("container address"),
+        "says why not the container address: {page}"
+    );
+    assert!(!page.contains("Add reverse proxy"), "{page}");
+}
+
+#[tokio::test]
+async fn add_reverse_proxy_is_for_those_who_may_create_hostings() {
+    use hyperion_state::capabilities::Capability;
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(proxy_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+
+    let reader = docker_caps_user(&app, &sock, "dk-reader", &[Capability::DockerView]).await;
+    let (st, page) = acme_dns_get(&app, &reader, "/docker/local/loop").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(!page.contains("Add reverse proxy"), "{page}");
+    assert!(page.contains("18080"), "the port is still shown: {page}");
+
+    let maker = docker_caps_user(
+        &app,
+        &sock,
+        "dk-maker",
+        &[Capability::DockerView, Capability::HostingCreate],
+    )
+    .await;
+    let (_, page) = acme_dns_get(&app, &maker, "/docker/local/loop").await;
+    assert!(page.contains("Add reverse proxy"), "{page}");
+}
+
+#[tokio::test]
+async fn stack_and_list_show_the_hosting_that_proxies_to_it() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(proxy_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    docker_proxy_hosting(&sock, "app.example.cz", "http://127.0.0.1:18080").await;
+    docker_proxy_hosting(&sock, "other.example.cz", "http://10.0.0.5:18080").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    for uri in ["/docker/local/loop", "/docker"] {
+        let (_, page) = acme_dns_get(&app, &cookie, uri).await;
+        assert!(
+            page.contains("href=\"/hostings/app.example.cz\""),
+            "{uri}: {page}"
+        );
+        assert!(!page.contains("other.example.cz"), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn hosting_chip_names_the_stack_and_nothing_else() {
+    use hyperion_state::capabilities::Capability;
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(proxy_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let proxy_id = docker_proxy_hosting(&sock, "app.example.cz", "http://127.0.0.1:18080").await;
+    docker_proxy_hosting(&sock, "lonely.example.cz", "http://127.0.0.1:9").await;
+    let php_id = acme_ssl_hosting(&sock, "plain.example.cz").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    let (st, chip) = acme_dns_get(
+        &app,
+        &cookie,
+        "/docker/hosting-chip?selector=app.example.cz",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{chip}");
+    assert!(chip.contains("loop"), "{chip}");
+    assert!(chip.contains("href=\"/docker/local/loop\""), "{chip}");
+    for other in ["wide", "nginx-clash", "closed", "dns"] {
+        assert!(!chip.contains(other), "never lists other stacks: {chip}");
+    }
+    assert!(!chip.contains("logs"), "no log access from here: {chip}");
+    // The id works as a selector too.
+    let (_, by_id) = acme_dns_get(
+        &app,
+        &cookie,
+        &format!("/docker/hosting-chip?selector={proxy_id}"),
+    )
+    .await;
+    assert!(by_id.contains("href=\"/docker/local/loop\""), "{by_id}");
+
+    // No stack behind it, not a proxy, not a hosting: nothing, not an error.
+    for sel in [
+        "lonely.example.cz",
+        "plain.example.cz",
+        &php_id,
+        "nope.example.cz",
+        "x",
+    ] {
+        let (st, body) = acme_dns_get(
+            &app,
+            &cookie,
+            &format!("/docker/hosting-chip?selector={sel}"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{sel}");
+        assert!(body.trim().is_empty(), "{sel}: {body}");
+    }
+
+    // The hosting page carries the lazy slot for a proxy and only for one.
+    let slot = "hx-get=\"/docker/hosting-chip?selector=";
+    let (_, detail) = acme_dns_get(&app, &cookie, &format!("/hostings/{proxy_id}")).await;
+    assert!(detail.contains(slot), "{detail}");
+    let (_, detail) = acme_dns_get(&app, &cookie, &format!("/hostings/{php_id}")).await;
+    assert!(!detail.contains(slot));
+
+    // A reader without DockerView, or without every hosting in scope, gets
+    // neither the slot nor the chip.
+    let blind = docker_caps_user(&app, &sock, "dk-blind", &[Capability::HostingView]).await;
+    let (_, detail) = acme_dns_get(&app, &blind, &format!("/hostings/{proxy_id}")).await;
+    assert!(!detail.contains(slot));
+    let (st, body) =
+        acme_dns_get(&app, &blind, "/docker/hosting-chip?selector=app.example.cz").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(body.trim().is_empty(), "{body}");
+    let narrow = docker_custom_user(&app, &sock, "dk-narrow-chip", false).await;
+    let (_, body) = acme_dns_get(
+        &app,
+        &narrow,
+        "/docker/hosting-chip?selector=app.example.cz",
+    )
+    .await;
+    assert!(body.trim().is_empty(), "{body}");
+}
+
+#[tokio::test]
+async fn hosting_chip_is_empty_while_the_module_is_off() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _pool) = start_agent_full(None, Some(proxy_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_proxy_hosting(&sock, "app.example.cz", "http://127.0.0.1:18080").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (st, body) = acme_dns_get(
+        &app,
+        &cookie,
+        "/docker/hosting-chip?selector=app.example.cz",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(body.trim().is_empty(), "{body}");
+}
+
+/// The wizard's page for the given query, with one worker enrolled so the
+/// node picker is drawn.
+async fn wizard_page(query: &str) -> String {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    docker_add_worker(&sock, &pool, "w1", "Worker one").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (st, page) = acme_dns_get(&app, &cookie, &format!("/hostings/new{query}")).await;
+    assert_eq!(st, StatusCode::OK, "{page}");
+    page
+}
+
+/// The opening tag of the first element whose tag starts with `prefix`.
+fn tag_at<'a>(page: &'a str, prefix: &str) -> &'a str {
+    let at = page.find(prefix).unwrap_or_else(|| panic!("no {prefix}"));
+    let end = page[at..].find('>').expect("tag end");
+    &page[at..at + end]
+}
+
+#[tokio::test]
+async fn prefill_fills_the_wizard() {
+    let q = format!(
+        "?site_type=reverse_proxy&proxy_upstream_url={}&target_node=w1&domain=evil.cz",
+        enc("http://127.0.0.1:18080")
+    );
+    let page = wizard_page(&q).await;
+    assert!(tag_at(
+        &page,
+        "<label class=\"type-card selected\" data-site-type=\"reverse_proxy\""
+    )
+    .contains("selected"));
+    assert!(tag_at(
+        &page,
+        "<input type=\"radio\" name=\"site_type\" value=\"reverse_proxy\""
+    )
+    .contains("checked"));
+    assert!(
+        tag_at(&page, "<input id=\"proxy_upstream_url\"").contains("http://127.0.0.1:18080"),
+        "{page}"
+    );
+    assert!(
+        tag_at(&page, "<option value=\"w1\"").contains("selected"),
+        "the container's node is the chosen server"
+    );
+    assert!(
+        !page.contains("evil.cz"),
+        "the domain is the admin's to type"
+    );
+
+    // The master is a target too.
+    let q = format!(
+        "?site_type=reverse_proxy&proxy_upstream_url={}&target_node=local",
+        enc("http://localhost:3000/")
+    );
+    let page = wizard_page(&q).await;
+    let master = page.find("<option value=\"local\"").expect("master option");
+    assert!(page[master..]
+        .split("</option>")
+        .next()
+        .unwrap()
+        .contains("selected"));
+    assert!(page.contains("http://localhost:3000/"));
+}
+
+#[tokio::test]
+async fn prefill_ignores_bad_values() {
+    for q in [
+        format!("?proxy_upstream_url={}", enc("javascript:alert(1)")),
+        format!(
+            "?proxy_upstream_url={}",
+            enc("\"><script>alert(1)</script>")
+        ),
+        format!("?proxy_upstream_url={}", enc("http://10.9.8.7:3000")),
+        format!(
+            "?proxy_upstream_url={}",
+            enc("http://user:pw@127.0.0.1:3000")
+        ),
+        format!("?proxy_upstream_url={}", enc("http://127.0.0.1:3000;}")),
+        format!("?proxy_upstream_url={}", enc("http://127.0.0.1")),
+        "?site_type=php".to_string(),
+        format!("?site_type={}", enc("\"><script>alert(1)</script>")),
+        "?site_type=nonsense".to_string(),
+        "?target_node=nope".to_string(),
+        format!("?target_node={}", enc("\"><script>alert(1)</script>")),
+    ] {
+        let page = wizard_page(&q).await;
+        assert!(!page.contains("<script>alert"), "{q}: reflected");
+        assert!(!page.contains("javascript:alert"), "{q}: reflected");
+        assert!(!page.contains("10.9.8.7"), "{q}: {page}");
+        assert!(!page.contains("user:pw"), "{q}");
+        assert!(
+            tag_at(&page, "<input id=\"proxy_upstream_url\"").contains("value=\"\""),
+            "{q}"
+        );
+        assert!(
+            tag_at(
+                &page,
+                "<input type=\"radio\" name=\"site_type\" value=\"reverse_proxy\""
+            )
+            .find("checked")
+            .is_none(),
+            "{q}"
+        );
+        assert!(
+            tag_at(
+                &page,
+                "<input type=\"radio\" name=\"site_type\" value=\"wordpress\""
+            )
+            .contains("checked"),
+            "{q}: falls back to the default card"
+        );
+        let w1 = page.find("<option value=\"w1\"").expect("worker option");
+        assert!(
+            !page[w1..]
+                .split("</option>")
+                .next()
+                .unwrap()
+                .contains("selected"),
+            "{q}: an unknown node selects nothing"
+        );
+    }
+}
+
+#[tokio::test]
+async fn prefill_leaves_the_test_form_alone() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (st, page) = acme_dns_get(
+        &app,
+        &cookie,
+        &format!(
+            "/hostings/new?test=1&site_type=reverse_proxy&proxy_upstream_url={}",
+            enc("http://127.0.0.1:18080")
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        !page.contains("18080"),
+        "?test=1 is still the plain test form"
+    );
+}
+
+#[tokio::test]
+async fn submit_still_validates() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    for (bad, why) in [
+        ("javascript:alert(1)", "http"),
+        ("http://user:pw@127.0.0.1:3000", "username or password"),
+        ("http://127.0.0.1:3000;}", "upstream"),
+    ] {
+        let resp = acme_dns_post(
+            &app,
+            &cookie,
+            "/hostings",
+            format!(
+                "_csrf={}&domain=prefilled-bad.example.cz&site_type=reverse_proxy&proxy_upstream_url={}&target_node=local",
+                enc(&csrf),
+                enc(bad)
+            ),
+        )
+        .await;
+        let page = body_string(resp).await;
+        assert!(page.contains(why), "{bad}: {page}");
+        assert!(
+            !page.contains("<script>alert"),
+            "{bad}: the error page does not reflect markup"
+        );
+    }
+    // And nothing was created by any of them.
+    let (_, list) = acme_dns_get(&app, &cookie, "/hostings").await;
+    assert!(!list.contains("prefilled-bad.example.cz"));
+}

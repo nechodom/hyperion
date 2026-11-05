@@ -1,0 +1,6 @@
+<div class="small" id="docker-chip" style="margin-top:0.45rem">
+  <span class="text-soft">Docker stack</span>
+  <a href="{{ href }}"><strong>{{ name }}</strong></a>
+  <span class="pill {{ tone }}">{{ state_label }}</span>
+  {% if !summary.is_empty() %}<span class="text-soft">{{ summary }}</span>{% endif %}
+</div>

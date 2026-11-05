@@ -100,6 +100,7 @@
         {% if !s.services.is_empty() %}<div class="svc-facts small"><span>{{ s.services }}</span></div>{% endif %}
         {% if !s.summary.is_empty() %}<div class="small" style="color:var(--danger)">{{ s.summary }}</div>{% endif %}
         {% if !s.gone.is_empty() %}<div class="text-soft small">{{ s.gone }}</div>{% endif %}
+        {% if !s.hostings.is_empty() %}<div class="text-soft small">Proxied by {% for h in s.hostings %}{% if !loop.first %}, {% endif %}<a href="{{ h.href }}">{{ h.domain }}</a>{% endfor %}</div>{% endif %}
       </div>
       <span class="pill {{ s.tone }}">{{ s.state_label }}</span>
       <div class="svc-actions">

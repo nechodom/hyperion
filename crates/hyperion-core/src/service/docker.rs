@@ -16,7 +16,7 @@ use hyperion_adapters::docker::{
 use hyperion_state::docker::{ProjectRow, WatchRow, DAEMON_ROW};
 use hyperion_types::docker::{
     DockerContainer, DockerDisk, DockerModuleState, DockerNodeEntry, DockerNodeList,
-    DockerNodeStatus, DockerProject,
+    DockerNodeStatus, DockerPort, DockerProject,
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -288,7 +288,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Ok((containers, stats_at)) => {
                 self.docker_daemon_ok(now).await?;
                 let disk = self.docker_refresh_disk(now).await;
-                let projects = self.docker_apply(containers, now, true).await?;
+                let mut projects = self.docker_apply(containers, now, true).await?;
+                self.docker_link_hostings(&mut projects).await;
                 *self.docker_snapshot.write().await = Some(DockerNodeStatus {
                     read_at: now,
                     stats_at,
@@ -311,19 +312,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "The Docker module is not turned on for this node.".into(),
             });
         }
-        if let Some(s) = self.docker_snapshot.read().await.clone() {
+        let cached = self.docker_snapshot.read().await.clone();
+        if let Some(mut s) = cached {
+            // Hostings come and go between ticks; the link is derived again
+            // on every read so it is never older than the hosting list.
+            self.docker_link_hostings(&mut s.projects).await;
             return Ok(s);
         }
         let now = now_secs();
         let status = match self.docker_observe(true, None, now).await {
-            Ok((containers, stats_at)) => DockerNodeStatus {
-                read_at: now,
-                stats_at,
-                daemon_ok: true,
-                daemon_error: None,
-                projects: self.docker_apply(containers, now, false).await?,
-                disk: self.docker_cached_disk().await,
-            },
+            Ok((containers, stats_at)) => {
+                let mut projects = self.docker_apply(containers, now, false).await?;
+                self.docker_link_hostings(&mut projects).await;
+                DockerNodeStatus {
+                    read_at: now,
+                    stats_at,
+                    daemon_ok: true,
+                    daemon_error: None,
+                    projects,
+                    disk: self.docker_cached_disk().await,
+                }
+            }
             Err(e) => {
                 return Ok(DockerNodeStatus {
                     daemon_ok: false,
@@ -335,6 +344,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
         *self.docker_snapshot.write().await = Some(status.clone());
         Ok(status)
+    }
+
+    /// Fill each project's `hostings` from this node's reverse-proxy
+    /// hostings. A database error leaves the projects unlinked: a missing
+    /// link is a missing convenience, never a reason to fail the read.
+    async fn docker_link_hostings(&self, projects: &mut [DockerProject]) {
+        match hyperion_state::hostings::list_reverse_proxies(&self.pool).await {
+            Ok(proxies) => link_hostings(projects, &proxies),
+            Err(e) => tracing::debug!(error = %e, "docker: hostings not linked"),
+        }
     }
 
     /// Forget a project: its row, its restart history and any open alert.
@@ -782,6 +801,110 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     async fn docker_cached_disk(&self) -> Option<DockerDisk> {
         let module = hyperion_state::docker::get_module(&self.pool).await.ok()?;
         serde_json::from_str(&module.disk_json).ok()
+    }
+}
+
+/// The port of a loopback upstream (`127.0.0.1`, `localhost` or `[::1]`),
+/// and nothing else. An address on another host, or one without an explicit
+/// port, says nothing about a container on this node.
+pub fn loopback_port(url: &str) -> Option<u16> {
+    let u = url::Url::parse(url.trim()).ok()?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return None;
+    }
+    match u.host()? {
+        url::Host::Ipv4(ip) if ip == std::net::Ipv4Addr::LOCALHOST => u.port(),
+        url::Host::Ipv6(ip) if ip == std::net::Ipv6Addr::LOCALHOST => u.port(),
+        url::Host::Domain(d) if d.eq_ignore_ascii_case("localhost") => u.port(),
+        _ => None,
+    }
+}
+
+/// How a published port is bound on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bind {
+    /// Every address (`0.0.0.0`, `::`, or no address recorded).
+    Wide,
+    /// This machine only.
+    Loopback,
+    /// One other address, which `127.0.0.1` does not reach.
+    Other,
+}
+
+fn bind_of(host_ip: &str) -> Bind {
+    match host_ip.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => Bind::Wide,
+        "127.0.0.1" | "::1" | "[::1]" | "localhost" => Bind::Loopback,
+        _ => Bind::Other,
+    }
+}
+
+/// Is this a TCP port published on the host that `http://127.0.0.1:<port>`
+/// reaches?
+fn reachable_by_loopback(p: &DockerPort) -> bool {
+    p.host_port != 0
+        && p.proto.eq_ignore_ascii_case("tcp")
+        && matches!(bind_of(&p.host_ip), Bind::Wide | Bind::Loopback)
+}
+
+/// Fill `hostings` of every project with the domains of the reverse-proxy
+/// hostings whose upstream is a loopback port that one of its containers
+/// publishes. Derived, never stored, so it cannot go stale and it finds
+/// proxies made by hand as well as through the wizard. `proxies` is
+/// `(domain, upstream)`.
+pub(super) fn link_hostings(projects: &mut [DockerProject], proxies: &[(String, String)]) {
+    let wanted: Vec<(&str, u16)> = proxies
+        .iter()
+        .filter_map(|(domain, upstream)| Some((domain.as_str(), loopback_port(upstream)?)))
+        .collect();
+    for p in projects {
+        let mut linked: Vec<String> = wanted
+            .iter()
+            .filter(|(_, port)| {
+                p.containers
+                    .iter()
+                    .flat_map(|c| &c.ports)
+                    .any(|cp| reachable_by_loopback(cp) && cp.host_port == *port)
+            })
+            .map(|(domain, _)| domain.to_string())
+            .collect();
+        linked.sort();
+        linked.dedup();
+        p.hostings = linked;
+    }
+}
+
+/// What the stack page offers for one published port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyOffer {
+    /// A reverse proxy can forward to `url`. `public_bind`: the port is open
+    /// on every address, not only on this machine.
+    Offer { url: String, public_bind: bool },
+    /// Host port 80 or 443, which nginx owns.
+    Conflict,
+    /// Not a published TCP port: UDP, or a port Docker did not publish.
+    NotTcp,
+    /// Published on one address that is not this machine's loopback, so
+    /// `127.0.0.1` would not reach it.
+    OtherAddress,
+}
+
+/// Decide the offer for one port. The upstream is always
+/// `http://127.0.0.1:<host port>`: a container's own address changes every
+/// time it is recreated.
+pub fn proxy_offer(p: &DockerPort) -> ProxyOffer {
+    if p.host_port == 0 || !p.proto.eq_ignore_ascii_case("tcp") {
+        return ProxyOffer::NotTcp;
+    }
+    if matches!(p.host_port, 80 | 443) {
+        return ProxyOffer::Conflict;
+    }
+    match bind_of(&p.host_ip) {
+        Bind::Other => ProxyOffer::OtherAddress,
+        bind => ProxyOffer::Offer {
+            url: format!("http://127.0.0.1:{}", p.host_port),
+            public_bind: bind == Bind::Wide,
+        },
     }
 }
 

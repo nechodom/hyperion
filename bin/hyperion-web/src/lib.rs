@@ -365,6 +365,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::docker::post_node_remove),
         )
         .route(
+            "/docker/hosting-chip",
+            get(handlers::docker::get_hosting_chip),
+        )
+        .route(
             "/docker/:node/:project",
             get(handlers::docker::get_docker_stack),
         )

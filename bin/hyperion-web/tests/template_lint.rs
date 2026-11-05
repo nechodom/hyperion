@@ -321,6 +321,9 @@ fn every_page_is_reachable_from_the_nav() {
         "/settings/https/acme-dns/check",
         // Per-card fragment the test-site form lazy-loads into each server.
         "/hostings/new/server-facts",
+        // Lazy fragment on a reverse-proxy hosting's page: which Docker stack
+        // it forwards to. Empty unless one does.
+        "/docker/hosting-chip",
         "/services/install-status",
         "/settings/panel-cert-status",
         "/settings/email-preview",

@@ -78,6 +78,50 @@
 </div>
 {% endif %}
 
+{% if let Some(px) = proxy %}
+<div class="group">
+  <div class="ghead">Reverse proxy</div>
+  {% for h in px.hostings %}
+  <div class="item svc-row">
+    <div class="svc-main">
+      <div class="svc-title"><a class="svc-link" href="{{ h.href }}"><strong>{{ h.domain }}</strong></a></div>
+      <div class="text-soft small">A reverse-proxy hosting forwards to a port this stack publishes.</div>
+    </div>
+  </div>
+  {% endfor %}
+  {% for o in px.offers %}
+  <div class="item svc-row">
+    <div class="svc-main">
+      <div class="svc-title"><code>{{ o.url }}</code> <span class="text-soft small">{{ o.what }}</span></div>
+      {% if o.public_bind %}
+      <div class="small" style="color:var(--warn)">Published on every address. Docker sends this traffic around the host's firewall input rules, which is where Hyperion's bans live, so the app can be reached directly and bypass nginx, the WAF and bans. Checked on a real node: a rule dropping this port in an input chain did not stop a request from outside. Publish it as <code>{{ o.compose_hint }}</code> in the compose file to keep it behind the proxy.</div>
+      {% endif %}
+    </div>
+    {% if px.can_create %}
+    <div class="svc-actions">
+      <a class="btn small primary" href="{{ o.href }}">Add reverse proxy</a>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% for c in px.conflicts %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">Port {{ c.host }} is not offered: nginx on this node already serves ports 80 and 443. Publish this service on another host port, bound to the loopback address, for example <code>127.0.0.1:8080:{{ c.container }}</code>, and proxy to that.</p>
+  </div>
+  {% endfor %}
+  {% for e in px.elsewhere %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">{{ e }} is published on one address only, and a proxy on 127.0.0.1 would not reach it. Publish it on <code>127.0.0.1</code> as well to proxy to it.</p>
+  </div>
+  {% endfor %}
+  {% if px.offers.is_empty() && px.conflicts.is_empty() && px.elsewhere.is_empty() %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">No published port that a proxy can use. Publish one on the loopback address in the compose file, for example <code>ports: ["127.0.0.1:8080:80"]</code>, and it is offered here. Hyperion never proxies to a container address, because that changes every time the container is recreated.</p>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if let Some(logs) = logs %}
 {% include "_docker_logs.html" %}
 {% endif %}

@@ -274,6 +274,24 @@ struct StackView {
     /// "No containers since 3h ago" for a gone stack.
     gone: String,
     forget_action: Option<String>,
+    /// Hostings that reverse-proxy to a port this stack publishes.
+    hostings: Vec<HostingLink>,
+}
+
+/// A hosting named on a Docker page, linking to its detail page.
+struct HostingLink {
+    domain: String,
+    href: String,
+}
+
+fn hosting_links(p: &DockerProject) -> Vec<HostingLink> {
+    p.hostings
+        .iter()
+        .map(|d| HostingLink {
+            domain: d.clone(),
+            href: format!("/hostings/{}", enc(d)),
+        })
+        .collect()
 }
 
 struct LogView {
@@ -392,6 +410,7 @@ fn stack_view(node_id: &str, p: &DockerProject) -> StackView {
         gone,
         forget_action: (p.verdict == "gone" && !p.name.is_empty())
             .then(|| format!("/docker/{}/{}/forget", enc(node_id), enc(&p.name))),
+        hostings: hosting_links(p),
     }
 }
 
@@ -705,6 +724,98 @@ struct StackTpl<'a> {
     daemon_error: Option<String>,
     /// The log viewer, for readers who hold `DockerLogs`.
     logs: Option<LogsPanel>,
+    /// Reverse proxies: the hostings already pointing here and what could be
+    /// added. `None` for a stack with no containers.
+    proxy: Option<ProxyView>,
+}
+
+/// One port a reverse proxy could forward to.
+struct ProxyOfferView {
+    /// `http://127.0.0.1:18080`, what the hosting would forward to.
+    url: String,
+    /// "web, container port 80".
+    what: String,
+    /// Open on every address; the warning explains the consequence.
+    public_bind: bool,
+    /// The compose line that keeps it behind the proxy.
+    compose_hint: String,
+    /// The wizard, prefilled.
+    href: String,
+}
+
+struct ConflictView {
+    host: u16,
+    container: u16,
+}
+
+struct ProxyView {
+    hostings: Vec<HostingLink>,
+    offers: Vec<ProxyOfferView>,
+    /// Host ports 80 and 443, which nginx owns.
+    conflicts: Vec<ConflictView>,
+    /// Ports bound to one address `127.0.0.1` does not reach.
+    elsewhere: Vec<String>,
+    /// The reader may open the wizard.
+    can_create: bool,
+}
+
+/// What a stack's published ports allow. Offers are one per host port: the
+/// same port on `0.0.0.0` and `::` is one app, and public if any bind is.
+fn proxy_view(node_id: &str, p: &DockerProject, can_create: bool) -> Option<ProxyView> {
+    use hyperion_core::service::{proxy_offer, ProxyOffer};
+    if p.containers.is_empty() {
+        return None;
+    }
+    let mut offers: std::collections::BTreeMap<u16, ProxyOfferView> = Default::default();
+    let mut conflicts: Vec<ConflictView> = Vec::new();
+    let mut elsewhere: Vec<String> = Vec::new();
+    for c in &p.containers {
+        for port in &c.ports {
+            match proxy_offer(port) {
+                ProxyOffer::Offer { url, public_bind } => {
+                    let what = if c.service.is_empty() {
+                        format!("{}, container port {}", c.name, port.container_port)
+                    } else {
+                        format!("{}, container port {}", c.service, port.container_port)
+                    };
+                    let e = offers.entry(port.host_port).or_insert_with(|| ProxyOfferView {
+                        href: format!(
+                            "/hostings/new?site_type=reverse_proxy&proxy_upstream_url={}&target_node={}",
+                            enc(&url),
+                            enc(node_id)
+                        ),
+                        compose_hint: format!(
+                            "127.0.0.1:{}:{}",
+                            port.host_port, port.container_port
+                        ),
+                        url,
+                        what,
+                        public_bind: false,
+                    });
+                    e.public_bind |= public_bind;
+                }
+                ProxyOffer::Conflict => conflicts.push(ConflictView {
+                    host: port.host_port,
+                    container: port.container_port,
+                }),
+                ProxyOffer::OtherAddress => {
+                    elsewhere.push(format!("{}:{}", port.host_ip, port.host_port))
+                }
+                ProxyOffer::NotTcp => {}
+            }
+        }
+    }
+    conflicts.sort_by_key(|c| (c.host, c.container));
+    conflicts.dedup_by_key(|c| (c.host, c.container));
+    elsewhere.sort();
+    elsewhere.dedup();
+    Some(ProxyView {
+        hostings: hosting_links(p),
+        offers: offers.into_values().collect(),
+        conflicts,
+        elsewhere,
+        can_create,
+    })
 }
 
 fn container_tone(c: &DockerContainer) -> &'static str {
@@ -836,6 +947,7 @@ pub async fn get_docker_stack(
     let sv = stack_view(&canonical, p);
     let mut containers: Vec<ContainerView> = p.containers.iter().map(container_view).collect();
     containers.sort_by(|a, b| (a.tone == "ok", &a.name).cmp(&(b.tone == "ok", &b.name)));
+    let proxy = proxy_view(&canonical, p, ctx.can(Capability::HostingCreate));
     let tpl = StackTpl {
         username: &ctx.username,
         user_initial: crate::handlers::user_initial(&ctx.username),
@@ -875,8 +987,95 @@ pub async fn get_docker_stack(
                 p.containers.iter().map(|c| c.name.clone()).collect(),
             )
         }),
+        proxy,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// GET /docker/hosting-chip?selector=
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+pub struct ChipQuery {
+    #[serde(default)]
+    pub selector: String,
+}
+
+#[derive(Template)]
+#[template(path = "_docker_chip.html")]
+struct ChipTpl {
+    name: String,
+    href: String,
+    tone: &'static str,
+    state_label: &'static str,
+    summary: String,
+}
+
+/// The stack behind one reverse-proxy hosting, as a line for the hosting's
+/// page. Lazy, and silent: whatever goes wrong or does not match, the answer
+/// is an empty body, never an error in the middle of someone else's page. It
+/// names the one matching stack and carries no container or log detail.
+pub async fn get_hosting_chip(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Query(q): Query<ChipQuery>,
+) -> Response {
+    let nothing = || Html(String::new()).into_response();
+    if !allowed(&ctx) || q.selector.is_empty() || q.selector.chars().count() > NAME_MAX_CHARS {
+        return nothing();
+    }
+    match hosting_chip(&state, &q.selector).await {
+        Some(tpl) => tpl
+            .render()
+            .map(|h| Html(h).into_response())
+            .unwrap_or_else(|_| nothing()),
+        None => nothing(),
+    }
+}
+
+async fn hosting_chip(state: &SharedState, selector: &str) -> Option<ChipTpl> {
+    let sel = crate::handlers::hostings::parse_selector_public(selector).ok()?;
+    let list = registry(state).await.ok()?;
+    if !list.cluster_installed {
+        return None;
+    }
+    let (detail, node) = crate::handlers::hostings::find_hosting_anywhere(state, sel)
+        .await
+        .ok()?;
+    if detail.kind != "reverse_proxy" {
+        return None;
+    }
+    let canonical =
+        registered_target(state, &list, node.as_deref().unwrap_or(LOCAL_NODE_SENTINEL)).await?;
+    let st = match crate::dispatcher::dispatch_to_node(
+        state,
+        dispatch_target(&canonical),
+        Request::DockerOverview,
+    )
+    .await
+    {
+        Ok(RpcResponse::DockerOverview(st)) => st,
+        _ => return None,
+    };
+    let p = st.projects.iter().find(|p| {
+        p.hostings
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(&detail.domain))
+    })?;
+    let sv = stack_view(&canonical, p);
+    let (tone, state_label) = if st.daemon_ok {
+        (sv.tone, sv.state_label)
+    } else {
+        ("warn", "Docker not answering")
+    };
+    Some(ChipTpl {
+        name: sv.name,
+        href: sv.href,
+        tone,
+        state_label,
+        summary: sv.summary,
+    })
 }
 
 // ---------------------------------------------------------------------------
