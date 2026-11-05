@@ -21,7 +21,7 @@
 {% macro finding_row(f) %}
 <li><span class="chk-dot {% if f.severity == "high" %}err{% else %}warn{% endif %}"></span><code>{{ f.rel|tenant_text }}</code><span class="chk-detail">
   {% if f.rel == "." %}most of WordPress core no longer matches the release
-  {% else if let Some(noun) = f.component_wide() %}this {{ noun }} no longer matches {% if let Some(l) = f.source_label %}{{ l|tenant_text }}{% else %}wordpress.org{% endif %}
+  {% else if let Some(noun) = f.component_wide() %}this {{ noun }} no longer matches {% if let Some(l) = f.source_label %}{% if l == "vendor package" %}the vendor's package{% else %}{{ l|tenant_text }}{% endif %}{% else %}wordpress.org{% endif %}
   {% else %}{{ f.kind.label() }}{% endif %}
   {% if let Some(r) = f.rule_id %} · rule <code>{{ r|tenant_text }}</code>{% if f.line > 0 %}, line {{ f.line }}{% endif %}{% endif %}
   {% if !f.domains.is_empty() %} · mentions {% for d in f.domains %}{% if loop.index0 < 5 %}<code>{{ d|tenant_text }}</code> {% endif %}{% endfor %}{% endif %}
@@ -90,7 +90,7 @@
     {% endif %}
     {% if v == "never" %}
     <p class="chk-note">
-      {% if let Some(e) = scan.error %}Nothing was checked. Why: {{ e }}
+      {% if let Some(e) = scan.error %}Nothing was checked. Why: {{ e|tenant_text }}
       {% else %}No scan of this site has finished yet.{% if !scan.scan_queued %} Opening this page doesn't start one — use Scan now.{% endif %}{% endif %}
     </p>
     {% endif %}
@@ -100,7 +100,7 @@
        A site with no WordPress has nothing to look up. #}
     {% if scan.scanned_at != 0 && !scan.coverage.no_upstream && !scan.wp_cli_ok %}
     <p class="chk-note">
-      wordpress.org could not be reached or the WordPress version could not be read, so core, plugin and theme files were not compared with their official copies. This says nothing about the site itself; the next scan tries again.{% if let Some(e) = scan.error %} Why: {{ e }}{% endif %}
+      wordpress.org could not be reached or the WordPress version could not be read, so core, plugin and theme files were not compared with their official copies. This says nothing about the site itself; the next scan tries again.{% if let Some(e) = scan.error %} Why: {{ e|tenant_text }}{% endif %}
     </p>
     {% endif %}
 
@@ -145,7 +145,7 @@
          waiting or missing there. #}
       {% if scan.coverage.no_upstream && !scan.clamav_available %}files are read for known malware patterns; ClamAV doesn't run on this kind of site
       {% else if scan.clamav_available %}ClamAV scanned the site's files{% else if scan.clamav_installed %}<span class="tone-warn">not scanned</span> — ClamAV is installed, but no pass over this site's files has finished yet (the reason, if it failed, is below){% else %}<span class="tone-warn">not scanned</span> — ClamAV isn't installed on this node; add it on the <a href="/services">Services page</a> to look inside <code>uploads/</code>{% endif %}
-      {% if scan.wp_cli_ok || scan.coverage.no_upstream %}{% if let Some(e) = scan.error %}· {{ e }}{% endif %}{% endif %}.
+      {% if scan.wp_cli_ok || scan.coverage.no_upstream %}{% if let Some(e) = scan.error %}· {{ e|tenant_text }}{% endif %}{% endif %}.
       {% endif %}
       The database is not scanned.
     </p>
@@ -215,20 +215,24 @@
       {% endif %}{% endfor %}
     </ul>
     {% if pl.issues.len() > 25 %}
-    <p class="chk-note">Showing 25 of {{ pl.issues.len() }} files. Re-installing this plugin from wordpress.org overwrites every one of them.</p>
+    <p class="chk-note">Showing 25 of {{ pl.issues.len() }} files.{% if scan.reinstallable_from_wordpress_org(pl.slug) %} Re-installing this plugin from wordpress.org overwrites every one of them.{% endif %}</p>
     {% endif %}
+    {% if scan.reinstallable_from_wordpress_org(pl.slug) %}
     <div class="chk-fixes">
       <form hx-post="/hostings/integrity/reinstall-plugin" hx-target="#integrity-card" hx-swap="outerHTML"
             hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
-            data-confirm-title="Reinstall {{ pl.slug }}"
-            data-confirm-body="Downloads the version of {{ pl.slug }} this site already runs from wordpress.org and replaces the plugin's whole folder with it — changed files are overwritten and files that were added are removed. Its settings are in the database and stay, and an active plugin stays active. Anything someone saved inside the plugin's own folder is lost. The site is scanned again right after."
+            data-confirm-title="Reinstall {{ pl.slug|tenant_text }}"
+            data-confirm-body="Downloads the version of {{ pl.slug|tenant_text }} this site already runs from wordpress.org and replaces the plugin's whole folder with it — changed files are overwritten and files that were added are removed. Its settings are in the database and stay, and an active plugin stays active. Anything someone saved inside the plugin's own folder is lost. The site is scanned again right after."
             data-confirm-confirm-label="Reinstall plugin">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ selector }}">
         <input type="hidden" name="slug" value="{{ pl.slug }}">
-        <button class="btn primary small" type="submit">Reinstall {{ pl.slug }}</button>
+        <button class="btn primary small" type="submit">Reinstall {{ pl.slug|tenant_text }}</button>
       </form>
     </div>
+    {% else %}
+    <p class="chk-note">No fix is offered here: this plugin was compared with {{ scan.reference_of(pl.slug) }}, not wordpress.org, so replacing it with wordpress.org's copy would install a different plugin.</p>
+    {% endif %}
     {% endfor %}
 
     {# ── Themes that failed comparison. No fix button yet: those come with the

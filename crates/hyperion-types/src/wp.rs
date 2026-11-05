@@ -586,15 +586,36 @@ impl WpIntegrityScanResult {
         self.core_issue_count() + self.plugin_issue_count() + self.malware.len()
     }
 
-    /// What a plugin or theme was compared with: its finding's label, else
-    /// wordpress.org, the only reference a record without one can have meant.
-    pub fn reference_of(&self, slug: &str) -> &str {
+    /// The label the scan put on a plugin or theme's findings.
+    fn source_label_of(&self, slug: &str) -> Option<&str> {
         self.findings
             .iter()
             .chain(&self.review)
             .filter(|f| f.component.as_deref() == Some(slug))
             .find_map(|f| f.source_label.as_deref())
-            .unwrap_or("wordpress.org")
+    }
+
+    /// What a plugin or theme was compared with, as a phrase: its finding's
+    /// label, else wordpress.org, the only reference a record without one can
+    /// have meant.
+    pub fn reference_of(&self, slug: &str) -> &str {
+        match self.source_label_of(slug) {
+            Some("vendor package") => "the vendor's package",
+            Some(l) => l,
+            None => "wordpress.org",
+        }
+    }
+
+    /// May the card offer to replace this plugin with wordpress.org's copy?
+    /// Only when that is what it was compared with. A private plugin that shares
+    /// a slug with a wordpress.org one would be swapped for a different plugin.
+    /// A native record whose findings carry no label (cut by the item cap) is not
+    /// assumed to be wordpress.org; only a record from before the label is.
+    pub fn reinstallable_from_wordpress_org(&self, slug: &str) -> bool {
+        match self.source_label_of(slug) {
+            Some(l) => l == "wordpress.org",
+            None => !self.native_scan_ran,
+        }
     }
 
     /// Theme files flagged, across all failed themes.
@@ -611,9 +632,16 @@ impl WpIntegrityScanResult {
             .filter(|f| !f.is_comparison() || f.rule_id.is_some())
     }
 
-    /// Everything the card puts under "needs attention".
+    /// Everything the card puts under "needs attention". A failed comparison
+    /// that also hit a rule is listed twice but is one file, already counted with
+    /// its core, plugin or theme.
     pub fn shown_finding_count(&self) -> usize {
-        self.total_findings() + self.theme_issue_count() + self.listed_findings().count()
+        self.total_findings()
+            + self.theme_issue_count()
+            + self
+                .listed_findings()
+                .filter(|f| !f.is_comparison())
+                .count()
     }
 
     /// What the card says. Standing findings and changes to review come first and
@@ -622,7 +650,7 @@ impl WpIntegrityScanResult {
     /// scan keeps its old meanings. `report_only` doesn't matter here: the panel
     /// shows the pilot's results, it is the alerts and reports that wait.
     pub fn verdict(&self) -> ScanVerdict {
-        if self.shown_finding_count() > 0 {
+        if self.shown_finding_count() > 0 || self.listed_findings().next().is_some() {
             return ScanVerdict::Findings;
         }
         if !self.review.is_empty() {
@@ -967,7 +995,10 @@ mod tests {
         assert_eq!(finding(FindingKind::RuleHit).component_wide(), None);
         // Counted on top of the core, plugin, theme and ClamAV lists.
         r.core_modified = vec!["a".into()];
-        assert_eq!(r.shown_finding_count(), 3);
+        // The rule hit, plus the core file; the comparison that carries a rule id
+        // is that same file, not a third.
+        assert_eq!(r.shown_finding_count(), 2);
+        assert_eq!(r.verdict(), ScanVerdict::Findings);
     }
 
     #[test]

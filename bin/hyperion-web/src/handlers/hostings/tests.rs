@@ -900,7 +900,74 @@ fn component_finding_names_its_own_reference() {
         }],
         ..native_scan()
     });
-    assert!(html.contains("this plugin no longer matches vendor package"));
+    assert!(html.contains("this plugin no longer matches the vendor&#x27;s package"));
+    // A private plugin sharing a slug with a wordpress.org one must not be offered
+    // a replacement from wordpress.org.
+    assert!(!html.contains("/hostings/integrity/reinstall-plugin"));
+    assert!(!html.contains("Reinstall elementor-pro"));
+    assert!(!html.contains("from wordpress.org and replaces"));
+}
+
+/// The reinstall button needs a positive "wordpress.org" label on a native
+/// record: a missing one (findings cut by the cap) is not read as wordpress.org.
+/// Slug text shown in the dialog is made printable.
+#[test]
+fn reinstall_needs_wordpress_org_as_the_reference() {
+    let failed = |slug: &str| hyperion_types::WpIntegrityPluginResult {
+        slug: slug.into(),
+        issues: vec![hyperion_types::WpIntegrityFileIssue {
+            path: "a.php".into(),
+            message: "Checksum does not match".into(),
+        }],
+    };
+    let labelled = |slug: &str, label: &str| hyperion_types::SiteFileFinding {
+        component: Some(slug.into()),
+        source_label: Some(label.into()),
+        kind: hyperion_types::FindingKind::UpstreamModified,
+        ..Default::default()
+    };
+    let org = render_integrity(hyperion_types::WpIntegrityScanResult {
+        plugins_failed: vec![failed("akismet\u{1b}")],
+        findings: vec![labelled("akismet\u{1b}", "wordpress.org")],
+        ..native_scan()
+    });
+    assert!(org.contains("/hostings/integrity/reinstall-plugin"));
+    assert!(org.contains("Reinstall akismet\u{fffd}"));
+
+    let unlabelled = render_integrity(hyperion_types::WpIntegrityScanResult {
+        plugins_failed: vec![failed("akismet")],
+        ..native_scan()
+    });
+    assert!(!unlabelled.contains("/hostings/integrity/reinstall-plugin"));
+
+    let vendor = render_integrity(hyperion_types::WpIntegrityScanResult {
+        plugins_failed: vec![failed("acf-pro")],
+        findings: vec![labelled("acf-pro", "vendor package")],
+        ..native_scan()
+    });
+    assert!(!vendor.contains("/hostings/integrity/reinstall-plugin"));
+    assert!(vendor.contains("don't match the vendor&#x27;s package"));
+    assert!(vendor.contains("would install a different plugin"));
+
+    // A record from before the label could only have meant wordpress.org.
+    let old = render_integrity(hyperion_types::WpIntegrityScanResult {
+        wp_cli_ok: true,
+        scanned_at: 1,
+        plugins_failed: vec![failed("akismet")],
+        ..Default::default()
+    });
+    assert!(old.contains("/hostings/integrity/reinstall-plugin"));
+}
+
+/// The scan's error text reaches the page printable and escaped.
+#[test]
+fn scan_error_is_escaped_and_printable() {
+    let html = render_integrity(integrity_not_checked(
+        "<script>x</script>\u{1b}\nboom".into(),
+    ));
+    assert!(!html.contains("<script>"));
+    assert!(!html.contains('\u{1b}'));
+    assert!(html.contains("&lt;script&gt;"));
 }
 
 #[test]
