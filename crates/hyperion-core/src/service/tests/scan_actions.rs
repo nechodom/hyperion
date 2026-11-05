@@ -1969,6 +1969,37 @@ async fn a_failed_restore_upload_records_no_list() {
     assert!(r.inputs.lock().expect("lock")[0].accepted.is_none());
 }
 
+/// A deploy whose HEAD didn't move wrote nothing: nothing to hash, nothing to
+/// scan. One that wrote no code has nothing to hash either, and an empty list
+/// mustn't take the place of one still waiting for its scan.
+#[tokio::test]
+async fn an_empty_list_hashes_nothing() {
+    let r = Rig::new(really_hash, clean_scan).await;
+    r.done(WriterKind::GitDeploy, WriterPaths::List(Vec::new()))
+        .await;
+    assert!(r.hashes.lock().expect("lock").is_empty());
+    assert!(r.s.scan_request_flag(r.id()).await.is_none());
+
+    r.write("a.php", "<?php // a\n");
+    r.done(
+        WriterKind::GitDeploy,
+        WriterPaths::List(vec!["a.php".into()]),
+    )
+    .await;
+    r.hashes.lock().expect("lock").clear();
+    r.done(
+        WriterKind::GitDeploy,
+        WriterPaths::List(vec!["notes.txt".into()]),
+    )
+    .await;
+    assert!(r.hashes.lock().expect("lock").is_empty());
+    assert!(r.s.scan_request_flag(r.id()).await.is_some());
+    let accept::Loaded::Found(got, _) = accept::load_accepted(&r.list_path(), 1) else {
+        panic!("the waiting list is gone")
+    };
+    assert!(got.files.contains_key("a.php"));
+}
+
 /// A list too big to send is no list; and anything that is not code never goes.
 #[tokio::test]
 async fn a_list_over_the_cap_records_nothing() {

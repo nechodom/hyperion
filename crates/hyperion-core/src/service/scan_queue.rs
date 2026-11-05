@@ -675,7 +675,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// tree may say `All`. `None`, a list with no code in it that fits, a failed
     /// hash or a site that isn't scanned record no list: the scan then reviews the
     /// changes like any others. The scan is queued either way, except for a site
-    /// that isn't scanned, which is left alone.
+    /// that isn't scanned, which is left alone, and an empty list (a deploy whose
+    /// HEAD didn't move): nothing was written.
     pub(super) async fn scan_writer_done(
         &self,
         detail: &HostingDetail,
@@ -686,9 +687,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if !kind_has_files(&detail.kind) || !self.integrity_scan_enabled(id).await {
             return None;
         }
-        // Code types only, and a list too big to send is no list.
+        if matches!(&paths, Some(WriterPaths::List(names)) if names.is_empty()) {
+            return None;
+        }
+        // Code types only, and a list too big to send is no list. Nor is one with
+        // no code left: an empty list would replace one still waiting for its scan.
         let paths = match paths {
-            Some(WriterPaths::List(names)) => accept::code_names(names).map(WriterPaths::List),
+            Some(WriterPaths::List(names)) => accept::code_names(names)
+                .filter(|n| !n.is_empty())
+                .map(WriterPaths::List),
             other => other,
         };
         let Some(paths) = paths else {
