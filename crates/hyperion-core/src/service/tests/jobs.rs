@@ -78,7 +78,7 @@ async fn create_after_rolled_back_failure_can_recreate_same_domain() {
             hyperion_types::ServiceInstallStatus::default(),
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        site_scan_gate: Arc::new(tokio::sync::Mutex::new(())),
+        site_scan: Default::default(),
     };
     s2.create(req("retry.cz"))
         .await
@@ -128,7 +128,7 @@ async fn list_returns_active_after_create() {
             hyperion_types::ServiceInstallStatus::default(),
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        site_scan_gate: Arc::new(tokio::sync::Mutex::new(())),
+        site_scan: Default::default(),
     };
     s2.create(HostingCreateReq {
         domain: Domain::parse("b.cz").expect("parse"),
@@ -186,7 +186,7 @@ async fn duplicate_domain_is_already_exists() {
             hyperion_types::ServiceInstallStatus::default(),
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        site_scan_gate: Arc::new(tokio::sync::Mutex::new(())),
+        site_scan: Default::default(),
     };
     let r = s2.create(req("dup.cz")).await;
     match r {

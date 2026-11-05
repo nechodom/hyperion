@@ -439,6 +439,21 @@ impl AdapterPort for RealAdapter {
         }
     }
 
+    async fn clamav_facts(&self) -> (bool, bool) {
+        (
+            hyperion_adapters::integrity::clamav_available(),
+            hyperion_adapters::integrity::clamav_db_present(),
+        )
+    }
+
+    async fn clamav_scan(
+        &self,
+        root: &str,
+        niceness: i32,
+    ) -> Result<hyperion_adapters::integrity::MalwareScan, AdapterError> {
+        hyperion_adapters::integrity::scan_malware_niced(root, niceness).await
+    }
+
     async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError> {
         let spec = hyperion_adapters::users::UserSpec::new_with_default_shell(
             SystemUserName::parse(name)?,

@@ -22,10 +22,10 @@ pub(super) struct IntegrityCardTpl {
     pub(super) queued_since: i64,
 }
 
-/// How long a card keeps polling for a scan it queued. A scan that never
-/// stores a record (it could not run at all) would otherwise poll for as
-/// long as the tab stays open.
-const QUEUED_POLL_LIMIT_SECS: i64 = 15 * 60;
+/// How long one page keeps polling for a scan it saw queued. The node says when
+/// it's done; this is for a request nothing will ever answer, which would
+/// otherwise poll for as long as the tab stays open.
+const QUEUED_POLL_LIMIT_SECS: i64 = 2 * 3600;
 
 /// A result meaning "nothing was checked", carrying why.
 ///
@@ -74,6 +74,34 @@ pub(super) async fn integrity_stored_on_node(
     }
 }
 
+/// Ask the owning node for a scan. It answers at once, with the stored result
+/// marked queued.
+pub(super) fn integrity_scan_request(sel: HostingSelector) -> Request {
+    Request::WpIntegrityScanRequest { hosting: sel }
+}
+
+async fn request_integrity_scan(
+    state: &SharedState,
+    owner_node: Option<&str>,
+    sel: HostingSelector,
+) -> Result<hyperion_types::WpIntegrityScanResult, String> {
+    match crate::dispatcher::dispatch_to_node(state, owner_node, integrity_scan_request(sel)).await
+    {
+        Ok(RpcResponse::WpIntegrityScan(scan)) => Ok(scan),
+        Ok(RpcResponse::Error(e)) => Err(integrity_error_text(&e.to_string())),
+        Ok(_) => Err("unexpected response from the node".into()),
+        Err(e) => Err(integrity_error_text(&e.to_string())),
+    }
+}
+
+/// Should this card go on polling, and since when has this page been waiting?
+/// `queued_at` is 0 on a page that has only just seen the request, say after a
+/// reload.
+pub(super) fn poll_state(queued: bool, queued_at: i64, now: i64) -> (bool, i64) {
+    let since = if queued_at > 0 { queued_at } else { now };
+    (queued && now - since < QUEUED_POLL_LIMIT_SECS, since)
+}
+
 #[derive(Deserialize)]
 pub struct IntegrityPanelQuery {
     /// Set by a card that is waiting for a scan it queued.
@@ -102,76 +130,21 @@ pub async fn get_integrity_panel(
     }
     let csrf_token = crate::handlers::session_csrf_token(&state, &ctx);
     let mut scan = integrity_stored_on_node(&state, owner_node.as_deref(), sel).await;
-    // Still waiting: a scan was asked for and no result newer than the
-    // request has landed yet. An unreadable result (`error` on a record
-    // that never scanned) keeps waiting too, within the poll limit.
-    scan.scan_queued = q.queued_at > 0
-        && scan.scanned_at < q.queued_at
-        && now_secs_web() - q.queued_at < QUEUED_POLL_LIMIT_SECS;
+    // The node says whether the request still stands: it drops it when the scan
+    // is stored, or when there's no longer a site to scan.
+    let (queued, queued_since) = poll_state(scan.scan_queued, q.queued_at, now_secs_web());
+    scan.scan_queued = queued;
     Ok(Html(
         IntegrityCardTpl {
             scan,
             selector,
             csrf_token,
             notice: None,
-            queued_since: q.queued_at,
+            queued_since,
         }
         .render()?,
     )
     .into_response())
-}
-
-/// Queue a scan of one hosting as a background job. The scan re-reads every
-/// core and plugin file and can walk the whole docroot, so it never runs
-/// inside a request; the card polls for the stored result instead.
-async fn queue_integrity_scan(
-    state: &SharedState,
-    ctx: &AuthCtx,
-    selector: &str,
-    sel: HostingSelector,
-    owner: Option<String>,
-) -> Result<(), AppError> {
-    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
-    let job_state = state.clone();
-    crate::handlers::jobs::spawn_job(
-        state.clone(),
-        "integrity_scan",
-        Some(selector),
-        "{}",
-        &ctx.username,
-        actor_uid,
-        move |reporter| async move {
-            reporter.step("Scanning the site's files…", 20, "").await;
-            let outcome = crate::dispatcher::dispatch_to_node(
-                &job_state,
-                owner.as_deref(),
-                Request::WpIntegrityScan { hosting: sel },
-            )
-            .await;
-            match outcome {
-                Ok(RpcResponse::WpIntegrityScan(r)) => {
-                    // An error with nothing verified is a scan that did not
-                    // run: a failed job, never a clean-looking finished one.
-                    if let (Some(e), false) = (&r.error, r.wp_cli_ok || r.clamav_available) {
-                        reporter.finish(false, Some(e.clone())).await;
-                    } else {
-                        let summary = format!("{} finding(s).", r.total_findings());
-                        reporter.step("Done", 100, &summary).await;
-                        reporter.finish(true, None).await;
-                    }
-                }
-                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
-                Ok(_) => {
-                    reporter
-                        .finish(false, Some("unexpected response from the node".into()))
-                        .await
-                }
-                Err(e) => reporter.finish(false, Some(e.to_string())).await,
-            }
-        },
-    )
-    .await?;
-    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -183,8 +156,9 @@ pub struct IntegrityScanForm {
 /// isn't a refresh: it re-hashes every core and plugin file against
 /// WordPress.org and can walk the whole docroot with clamscan. Gated on
 /// `WpManage` for the same reason — reading the verdict is a view,
-/// spending the node's IO is not. Starts a background job and answers with
-/// the card in its "queued" state, which polls until the result is stored.
+/// spending the node's IO is not. Asks the owning node for a scan, which returns
+/// at once, and answers with the card in its "queued" state, which polls until
+/// the result is stored.
 pub async fn post_integrity_scan(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -217,16 +191,9 @@ pub async fn post_integrity_scan(
             .into_response())
         }
     };
-    queue_integrity_scan(
-        &state,
-        &ctx,
-        &form.selector,
-        sel.clone(),
-        owner_node.clone(),
-    )
-    .await?;
-    let mut scan = integrity_stored_on_node(&state, owner_node.as_deref(), sel).await;
-    scan.scan_queued = true;
+    let scan = request_integrity_scan(&state, owner_node.as_deref(), sel)
+        .await
+        .unwrap_or_else(integrity_not_checked);
     Ok(Html(
         IntegrityCardTpl {
             scan,
@@ -240,7 +207,7 @@ pub async fn post_integrity_scan(
     .into_response())
 }
 
-/// Run a fix on the owning node, then queue a re-scan and render the card
+/// Run a fix on the owning node, then ask for a re-scan and render the card
 /// with the fix's outcome on top. The re-scan is the proof: "repaired" is
 /// only worth saying next to a scan that no longer lists the file — until
 /// that lands, the card says it is waiting and shows the previous result.
@@ -284,15 +251,14 @@ async fn integrity_fix(
                 };
             // The fix already happened: failing to queue the re-scan must
             // not hide its outcome behind an error page.
-            let queued =
-                queue_integrity_scan(&state, &ctx, &selector, sel.clone(), owner_node.clone())
-                    .await;
-            let mut scan = integrity_stored_on_node(&state, owner, sel).await;
-            scan.scan_queued = queued.is_ok();
             let mut notice = notice;
-            if let Err(e) = queued {
-                notice.1 = format!("{}\n\nThe re-scan could not be queued: {e}", notice.1);
-            }
+            let scan = match request_integrity_scan(&state, owner, sel.clone()).await {
+                Ok(scan) => scan,
+                Err(e) => {
+                    notice.1 = format!("{}\n\nThe re-scan could not be queued: {e}", notice.1);
+                    integrity_stored_on_node(&state, owner, sel).await
+                }
+            };
             (Some(notice), scan, queued_since)
         }
         Err(e) => (None, integrity_not_checked(e.to_string()), 0),

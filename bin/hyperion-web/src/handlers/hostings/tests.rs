@@ -565,15 +565,70 @@ fn never_scanned_says_not_scanned_and_only_a_queued_card_polls() {
     assert!(!queued.contains("Clean —"));
 }
 
-/// "Scan now" and the re-scan after a fix go through a background job, not
-/// an inline dispatch that holds the request open for minutes.
+/// "Scan now" and the re-scan after a fix only ask the node, which answers at
+/// once. A scan can wait an hour behind another site's: nothing here holds a
+/// request or a job open for it.
 #[test]
-fn scan_now_is_a_job_not_an_inline_dispatch() {
+fn scan_now_only_asks_the_node() {
+    let sel = HostingSelector::Domain(Domain::parse("example.com").expect("domain"));
+    assert!(matches!(
+        integrity_scan_request(sel),
+        Request::WpIntegrityScanRequest { .. }
+    ));
     let src = include_str!("integrity.rs");
-    assert!(src.contains(r#""integrity_scan""#));
-    assert!(!src.contains("integrity_scan_on_node"));
-    // The only place the long-running request is built is inside the job.
-    assert_eq!(src.matches("Request::WpIntegrityScan {").count(), 1);
+    assert!(!src.contains("spawn_job"));
+    assert!(!src.contains(&format!("Request::WpIntegrityScan{}", " {")));
+    assert_eq!(src.matches("request_integrity_scan(&state").count(), 2);
+}
+
+/// The node's flag decides, for as long as the page has been waiting up to two
+/// hours. A reload starts its own wait rather than never ending.
+#[test]
+fn a_card_polls_while_the_node_says_queued() {
+    let now = 1_700_000_000;
+    assert_eq!(poll_state(false, now - 60, now), (false, now - 60));
+    assert_eq!(poll_state(false, 0, now), (false, now));
+    assert_eq!(poll_state(true, now - 16 * 60, now), (true, now - 16 * 60));
+    assert_eq!(poll_state(true, 0, now), (true, now), "after a reload");
+    assert!(poll_state(true, now - 2 * 3600 + 1, now).0);
+    assert!(!poll_state(true, now - 2 * 3600, now).0);
+}
+
+/// A scan that stopped early or hit a limit isn't clean, and the card says why in
+/// its own words: the reasons name tenant files.
+#[test]
+fn a_partial_scan_says_it_did_not_finish() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        wp_cli_ok: true,
+        core_ok: true,
+        clamav_available: true,
+        native_scan_ran: true,
+        scanned_at: 1,
+        coverage: hyperion_types::ScanCoverage {
+            partial_reasons: vec!["symlinked directories not looked at: <evil>".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    assert!(!html.contains("Clean —"));
+    assert!(!html.contains("malware not scanned"));
+    assert!(html.contains("didn&#x27;t finish") || html.contains("didn't finish"));
+    assert!(!html.contains("evil"));
+}
+
+/// Hits from an earlier pass still show when the latest pass couldn't run.
+#[test]
+fn clamav_hits_show_when_the_last_pass_did_not_run() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        clamav_available: false,
+        scanned_at: 1,
+        malware: vec![hyperion_types::WpMalwareHit {
+            path: "/home/x/a.php".into(),
+            signature: "Php.Trojan.Webshell-1".into(),
+        }],
+        ..Default::default()
+    });
+    assert!(html.contains("Php.Trojan.Webshell-1"));
 }
 
 /// The outcome of a fix renders inside the row (HTMX won't swap an error

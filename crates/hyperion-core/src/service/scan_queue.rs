@@ -1,10 +1,11 @@
 //! When the native site scan runs, one site at a time, and what becomes of its
 //! answer.
 //!
-//! The per-node lock is FIFO and the tick holds it per site, so "Scan now"
-//! waiting on it runs after the current site and before the rest of the sweep:
-//! that is all the queue there is. The worker parses hostile files as root, so
-//! its reply is untrusted input here, clamped before anything stores it.
+//! The tick takes the node's lock per site and asks between sites whether anyone
+//! has requested a scan, so "Scan now" runs after the current site and before the
+//! rest of the sweep: that is all the queue there is. ClamAV is its own sweep
+//! beside it. The worker parses hostile files as root, so its reply is untrusted
+//! input here, clamped before anything stores it.
 
 use super::*;
 use chrono::{Datelike, Timelike};
@@ -12,7 +13,7 @@ use hyperion_adapters::sitescan::discover::Discovery;
 use hyperion_adapters::sitescan::manifest::ComponentKind;
 use hyperion_adapters::sitescan::runner::{WorkerJob, WorkerReply};
 use hyperion_adapters::sitescan::scan::{ScanInput, ScanMode, SiteScanOutcome};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 pub(super) use hyperion_adapters::sitescan::runner::SCAN_DIR;
@@ -67,15 +68,72 @@ const MAX_ID_BYTES: usize = 128;
 /// own message can carry tenant text.
 const SITE_SCAN_FAILED: &str = "the site scan could not finish; this is the last result it stored";
 const SITE_SCAN_BUSY: &str = "another site scan is still running on this node; try again shortly";
-pub(super) const SITE_SCAN_NO_FILES: &str = "a reverse proxy has no files of its own to scan";
+pub(super) const SITE_SCAN_NO_FILES: &str =
+    "a reverse proxy or a redirect has no files of its own to scan";
+const SITE_SCAN_CUT_SHORT: &str = "the scan did not finish; part of the site was not looked at";
+
+/// False for the hosting kinds with no files of their own to scan.
+pub(super) fn kind_has_files(kind: &str) -> bool {
+    !matches!(kind, "reverse_proxy" | "redirect")
+}
 
 // One of these is alive per site, so the size of the variants costs nothing.
 /// How one site's turn with the lock ended.
 #[allow(clippy::large_enum_variant)]
 pub(super) enum SiteScanRun {
-    Finished(hyperion_types::WpIntegrityScanResult),
+    Finished {
+        result: hyperion_types::WpIntegrityScanResult,
+        /// The worker answered. Otherwise `result` is the last run's.
+        native_ran: bool,
+    },
     /// A worker that survived an agent restart holds the unit. Nothing happened.
     Busy,
+}
+
+/// How one site's turn in the tick ended.
+enum SiteScanTurn {
+    NewFindings,
+    NothingNew,
+    Busy,
+}
+
+/// The half of a stored record that belongs to ClamAV. A scan's store takes it as
+/// it stands then, not as it stood when the scan began: a pass may have finished
+/// meanwhile.
+struct ClamavVerdict {
+    available: bool,
+    malware: Vec<hyperion_types::WpMalwareHit>,
+    at: i64,
+    failed_at: i64,
+    error: Option<String>,
+}
+
+impl ClamavVerdict {
+    fn of(record: Option<&StoredIntegrityScan>) -> Self {
+        match record {
+            Some(r) => Self {
+                available: r.result.clamav_available,
+                malware: r.result.malware.clone(),
+                at: r.clamav_at,
+                failed_at: r.clamav_failed_at,
+                error: r.clamav_error.clone(),
+            },
+            None => Self {
+                available: false,
+                malware: Vec::new(),
+                at: 0,
+                failed_at: 0,
+                error: None,
+            },
+        }
+    }
+}
+
+/// `result.error` from the two halves that can each have failed.
+fn record_error(native_failed: bool, clamav: Option<&str>) -> Option<String> {
+    let native = native_failed.then_some(SITE_SCAN_FAILED);
+    let parts: Vec<&str> = native.into_iter().chain(clamav).collect();
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -94,15 +152,20 @@ pub(super) struct ManifestPass {
 }
 
 impl<A: AdapterPort + 'static> HostingService<A> {
-    /// Scan the sites that are due on this node, oldest-scanned first, and tell
-    /// admins about what is new: a standing finding must not re-alert or the
-    /// operator learns to ignore the panel. Returns the number of hostings that
-    /// gained a new finding.
+    /// Scan the sites someone asked for, then the ones due on this node,
+    /// oldest-scanned first, asking again between sites, and tell admins about
+    /// what is new: a standing finding must not re-alert or the operator learns to
+    /// ignore the panel. Returns the number of hostings that gained a new finding.
     ///
     /// Everything that decides "due" lives in each site's stored record, so an
     /// agent restart (every deploy is one) starts nothing by itself.
     pub async fn site_scan_tick(&self) -> Result<i64, RpcError> {
         self.site_scan_tick_at(&chrono::Local, now_secs()).await
+    }
+
+    /// Returns when someone has asked for a scan since the last call returned.
+    pub async fn site_scan_wait_for_request(&self) {
+        self.site_scan.wake.notified().await;
     }
 
     pub(super) async fn site_scan_tick_at<Tz: chrono::TimeZone>(
@@ -112,9 +175,42 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<i64, RpcError> {
         self.site_scan_evict_daily(now).await;
         let started = std::time::Instant::now();
-        let mut queue = Vec::new();
+        let mut queue = self.site_scan_due_queue(tz, now).await?;
+        // What this tick has answered, so a request that can't be cleared (a
+        // database error) can't keep it here.
+        let mut answered = HashSet::new();
+        let mut newly_flagged = 0i64;
+        loop {
+            // A sweep can outlast the window it started in. To the minute is all
+            // a schedule needs.
+            let now = now + i64::try_from(started.elapsed().as_secs() / 60 * 60).unwrap_or(0);
+            let (id, requested) = match self.next_scan_request(&mut answered).await {
+                Some(id) => (id, true),
+                None => match queue.pop_front() {
+                    Some(id) => (id, false),
+                    None => return Ok(newly_flagged),
+                },
+            };
+            match self.site_scan_turn(&id, requested, tz, now).await {
+                SiteScanTurn::NewFindings => newly_flagged += 1,
+                SiteScanTurn::NothingNew => {}
+                SiteScanTurn::Busy => {
+                    tracing::debug!("site scan: another worker is running; next tick");
+                    return Ok(newly_flagged);
+                }
+            }
+        }
+    }
+
+    /// Who the schedule says is due, oldest-scanned first.
+    async fn site_scan_due_queue<Tz: chrono::TimeZone>(
+        &self,
+        tz: &Tz,
+        now: i64,
+    ) -> Result<VecDeque<HostingId>, RpcError> {
+        let mut due = Vec::new();
         for s in self.list().await? {
-            if s.state != HostingState::Active || s.kind.as_deref() == Some("reverse_proxy") {
+            if s.state != HostingState::Active || !kind_has_files(s.kind.as_deref().unwrap_or("")) {
                 continue;
             }
             // Per-site opt-out (default on). This is the switch the
@@ -133,80 +229,225 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             };
             if site_scan_due(prior.as_ref(), now, tz, s.id.as_str()).is_some() {
-                queue.push((prior.map_or(0, |p| p.scanned_at), s));
+                due.push((prior.map_or(0, |p| p.scanned_at), s.id));
             }
         }
-        queue.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| a.1.id.as_str().cmp(b.1.id.as_str()))
-        });
+        due.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_str().cmp(b.1.as_str())));
+        Ok(due.into_iter().map(|(_, id)| id).collect())
+    }
+
+    /// The longest-waiting request this tick hasn't answered yet.
+    async fn next_scan_request(
+        &self,
+        answered: &mut HashSet<(String, String)>,
+    ) -> Option<HostingId> {
+        let requests = hyperion_state::hosting_kv::list_by_key(&self.pool, SCAN_REQUESTED_KV_KEY)
+            .await
+            .map_err(|e| tracing::warn!(error = %e, "site scan: requests unreadable"))
+            .ok()?;
+        let next = requests
+            .into_iter()
+            .filter(|r| !answered.contains(r))
+            .min_by_key(|(_, at)| at.trim().parse::<i64>().unwrap_or(0))?;
+        let id = HostingId(next.0.clone());
+        answered.insert(next);
+        Some(id)
+    }
+
+    /// The value of this hosting's request, if one stands.
+    pub(super) async fn scan_request_flag(&self, hosting_id: &str) -> Option<String> {
+        hyperion_state::hosting_kv::get(&self.pool, hosting_id, SCAN_REQUESTED_KV_KEY)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn clear_scan_request(&self, hosting_id: &str) {
+        if let Err(e) =
+            hyperion_state::hosting_kv::delete(&self.pool, hosting_id, SCAN_REQUESTED_KV_KEY).await
+        {
+            tracing::warn!(error = %e, "site scan: request not cleared");
+        }
+    }
+
+    /// One site's turn: its scan under the node's lock, the alert after it.
+    async fn site_scan_turn<Tz: chrono::TimeZone>(
+        &self,
+        id: &HostingId,
+        requested: bool,
+        tz: &Tz,
+        now: i64,
+    ) -> SiteScanTurn {
+        let gate = self.site_scan.node.lock().await;
+        // Read before the run: a request made during it is about what's on disk
+        // by then, which the run may already have passed.
+        let request = self.scan_request_flag(id.as_str()).await;
+        // Asked again under the lock: "Scan now" may have got here first.
+        let Ok(prior) = self.integrity_record(id.as_str()).await else {
+            return SiteScanTurn::NothingNew;
+        };
+        let mode = if requested {
+            Some(ScanMode::Delta)
+        } else {
+            site_scan_due(prior.as_ref(), now, tz, id.as_str())
+        };
+        let Some(mode) = mode else {
+            return SiteScanTurn::NothingNew;
+        };
+        let detail = match self.get(HostingSelector::Id(id.clone())).await {
+            Ok(d) if d.state == HostingState::Active && kind_has_files(&d.kind) => d,
+            // Nothing will scan it, so nothing should wait for that.
+            _ => {
+                self.clear_scan_request(id.as_str()).await;
+                return SiteScanTurn::NothingNew;
+            }
+        };
+        let prior_keys = prior
+            .as_ref()
+            .map(|p| upstream_finding_keys(&p.result))
+            .unwrap_or_default();
+        let scan = match self
+            .site_scan_locked(&detail, mode, prior.as_ref(), now)
+            .await
+        {
+            SiteScanRun::Finished { result, .. } => result,
+            SiteScanRun::Busy => return SiteScanTurn::Busy,
+        };
+        if request.is_some() && self.scan_request_flag(id.as_str()).await == request {
+            self.clear_scan_request(id.as_str()).await;
+        }
+        drop(gate);
+
+        // Upstream's keys only: the new layers stay silent through the pilot, and
+        // ClamAV's hits are its own sweep's to tell.
+        let new_keys = upstream_finding_keys(&scan).difference(&prior_keys).count();
+        if new_keys == 0 {
+            return SiteScanTurn::NothingNew;
+        }
+        self.notify_integrity_findings(&detail.domain, &scan, new_keys)
+            .await;
+        SiteScanTurn::NewFindings
+    }
+
+    async fn notify_integrity_findings(
+        &self,
+        domain: &str,
+        scan: &hyperion_types::WpIntegrityScanResult,
+        new_keys: usize,
+    ) {
+        // A modified core file, a tampered plugin or a signature hit is a
+        // suspected compromise. A merely *missing* core file is usually a
+        // botched update: still worth saying, not worth waking someone up
+        // for.
+        let compromised = !scan.malware.is_empty()
+            || !scan.core_modified.is_empty()
+            || !scan.core_unexpected.is_empty()
+            || !scan.plugins_failed.is_empty();
+        self.notify_admins_say(
+            if compromised { "error" } else { "warn" },
+            "ops.integrity",
+            &[
+                ("domain", domain),
+                ("core", &scan.core_issue_count().to_string()),
+                ("plugins", &scan.plugin_issue_count().to_string()),
+                ("malware", &scan.malware.len().to_string()),
+                ("new", &new_keys.to_string()),
+            ],
+            &format!("/hostings/{domain}#wordpress"),
+            &format!("wp.integrity:{domain}"),
+        )
+        .await;
+    }
+
+    /// ClamAV over the sites this node scans, one at a time, longest-waiting
+    /// first, so a site whose pass keeps failing doesn't keep the sweep to itself.
+    /// Sites with no release to compare with aren't part of it, and neither is a
+    /// site nothing is known about yet. Returns the number of hostings with a new
+    /// hit.
+    pub async fn site_scan_clamav_tick(&self) -> Result<i64, RpcError> {
+        self.site_scan_clamav_tick_at(now_secs()).await
+    }
+
+    pub(super) async fn site_scan_clamav_tick_at(&self, now: i64) -> Result<i64, RpcError> {
+        let started = std::time::Instant::now();
+        let mut sites = Vec::new();
+        for s in self.list().await? {
+            if s.state != HostingState::Active
+                || !kind_has_files(s.kind.as_deref().unwrap_or(""))
+                || !self.integrity_scan_enabled(s.id.as_str()).await
+            {
+                continue;
+            }
+            let Some(rec) = self.stored_integrity_scan(s.id.as_str()).await else {
+                continue;
+            };
+            let known = rec.result.native_scan_ran || rec.failed_at > 0;
+            if known && !rec.result.coverage.no_upstream {
+                sites.push((rec.clamav_at.max(rec.clamav_failed_at), s.id));
+            }
+        }
+        sites.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_str().cmp(b.1.as_str())));
 
         let mut newly_flagged = 0i64;
-        for (_, s) in queue {
-            let gate = self.site_scan_gate.lock().await;
-            // A sweep can outlast the window it started in. To the minute is all
-            // a schedule needs.
-            let now = now + i64::try_from(started.elapsed().as_secs() / 60 * 60).unwrap_or(0);
-            // Asked again under the lock: "Scan now" may have got here first.
-            let Ok(prior) = self.integrity_record(s.id.as_str()).await else {
+        for (_, id) in sites {
+            let Ok(detail) = self.get(HostingSelector::Id(id)).await else {
                 continue;
             };
-            let Some(mode) = site_scan_due(prior.as_ref(), now, tz, s.id.as_str()) else {
-                continue;
-            };
-            let detail = match self.get(HostingSelector::Id(s.id.clone())).await {
-                Ok(d) if d.state == HostingState::Active => d,
-                _ => continue,
-            };
-            let prior_keys = prior
-                .as_ref()
+            // Passes take hours, so the clock has to keep up with them.
+            let now = now + i64::try_from(started.elapsed().as_secs()).unwrap_or(0);
+            let before = self
+                .stored_integrity_scan(detail.id.as_str())
+                .await
                 .map(|p| integrity_finding_keys(&p.result))
                 .unwrap_or_default();
-            let scan = match self
-                .site_scan_locked(&detail, mode, prior.as_ref(), now)
-                .await
-            {
-                SiteScanRun::Finished(r) => r,
-                SiteScanRun::Busy => {
-                    tracing::debug!("site scan: another worker is running; next tick");
-                    return Ok(newly_flagged);
-                }
-            };
-            drop(gate);
-
-            // Upstream's and ClamAV's keys only: the new layers stay silent
-            // through the pilot.
-            let new_keys = integrity_finding_keys(&scan)
-                .difference(&prior_keys)
-                .count();
-            if new_keys == 0 {
-                continue;
+            let (after, _) = self.site_scan_clamav_pass(&detail, now).await;
+            let new_keys = integrity_finding_keys(&after).difference(&before).count();
+            if new_keys > 0 {
+                newly_flagged += 1;
+                self.notify_integrity_findings(&detail.domain, &after, new_keys)
+                    .await;
             }
-            newly_flagged += 1;
-            // A modified core file, a tampered plugin or a signature hit is a
-            // suspected compromise. A merely *missing* core file is usually a
-            // botched update: still worth saying, not worth waking someone up
-            // for.
-            let compromised = !scan.malware.is_empty()
-                || !scan.core_modified.is_empty()
-                || !scan.core_unexpected.is_empty()
-                || !scan.plugins_failed.is_empty();
-            self.notify_admins_say(
-                if compromised { "error" } else { "warn" },
-                "ops.integrity",
-                &[
-                    ("domain", &s.domain),
-                    ("core", &scan.core_issue_count().to_string()),
-                    ("plugins", &scan.plugin_issue_count().to_string()),
-                    ("malware", &scan.malware.len().to_string()),
-                    ("new", &new_keys.to_string()),
-                ],
-                &format!("/hostings/{}#wordpress", s.domain),
-                &format!("wp.integrity:{}", s.domain),
-            )
-            .await;
         }
         Ok(newly_flagged)
+    }
+
+    /// One ClamAV pass and its half of the record. Says whether it actually ran
+    /// now. A pass held off rewrites nothing, so asking every ten minutes is cheap.
+    pub(super) async fn site_scan_clamav_pass(
+        &self,
+        detail: &HostingDetail,
+        now: i64,
+    ) -> (hyperion_types::WpIntegrityScanResult, bool) {
+        let prior = self.stored_integrity_scan(detail.id.as_str()).await;
+        let mut errors: Vec<String> = Vec::new();
+        let (available, malware, at, failed_at) = self
+            .integrity_malware_pass(detail, now, prior.as_ref(), &mut errors)
+            .await;
+        let ran_now = available && at == now;
+        let error = (!errors.is_empty()).then(|| errors.join("; "));
+
+        let _record = self.site_scan.record.lock().await;
+        let mut rec = self
+            .stored_integrity_scan(detail.id.as_str())
+            .await
+            .unwrap_or_default();
+        let changed = rec.result.clamav_available != available
+            || rec.result.malware != malware
+            || rec.clamav_at != at
+            || rec.clamav_failed_at != failed_at
+            || rec.clamav_error != error;
+        rec.result.clamav_available = available;
+        rec.result.malware = malware;
+        rec.clamav_at = at;
+        rec.clamav_failed_at = failed_at;
+        rec.clamav_error = error;
+        rec.result.error = record_error(rec.failed_at > 0, rec.clamav_error.as_deref());
+        rec.result.clamav_installed = integrity::clamav_available();
+        if changed {
+            self.set_stored_integrity_scan(detail.id.as_str(), &rec)
+                .await;
+        }
+        (rec.result, ran_now)
     }
 
     /// Scan one site and store the result. The caller holds the node's lock.
@@ -217,112 +458,58 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         prior: Option<&StoredIntegrityScan>,
         now: i64,
     ) -> SiteScanRun {
-        let native = self.native_site_scan(detail, mode, now).await;
-        if matches!(native, NativeScan::Busy) {
-            return SiteScanRun::Busy;
-        }
-        // Collected, not returned: one dead signal must not hide what the other
-        // found.
-        let mut errors: Vec<String> = Vec::new();
-        let (clamav_available, malware, clamav_at, clamav_failed_at) = integrity_malware_pass(
-            detail,
-            now,
-            self.malware_scan_niceness(),
-            prior,
-            &mut errors,
-        )
-        .await;
-        let clamav_installed = integrity::clamav_available();
+        let outcome = match self.native_site_scan(detail, mode, now).await {
+            NativeScan::Busy => return SiteScanRun::Busy,
+            NativeScan::Failed => None,
+            NativeScan::Ran(outcome) => Some(outcome),
+        };
+        let native_ran = outcome.is_some();
+        let report_only = !self.site_scan_new_layers_live();
+        let auto_accepted = outcome
+            .as_ref()
+            .map(|o| o.auto_accepted.clone())
+            .unwrap_or_default();
 
-        let (stored, returned) = if let NativeScan::Ran(mut outcome) = native {
-            let stopped = outcome.stopped;
-            let auto_accepted = std::mem::take(&mut outcome.auto_accepted);
-            let mut result = assemble_integrity_result(
-                outcome,
-                malware,
-                clamav_available,
-                !self.site_scan_new_layers_live(),
-            );
-            if let Some(p) = prior.filter(|_| stopped) {
-                carry_standing_findings(&mut result, &p.result);
-            }
-            result.scanned_at = now;
-            result.clamav_installed = clamav_installed;
-            result.error = (!errors.is_empty()).then(|| errors.join("; "));
-            let first_scan = prior.map_or(true, |p| !p.result.native_scan_ran);
-            let read_everything = !stopped && (mode == ScanMode::FullRehash || first_scan);
-            let stored = StoredIntegrityScan {
-                scanned_at: now,
-                clamav_at,
-                clamav_failed_at,
-                full_at: if read_everything {
-                    now
-                } else {
-                    prior.map_or(0, |p| p.full_at)
-                },
-                failed_at: 0,
-                stopped,
-                result: result.clone(),
-            };
-            if !auto_accepted.is_empty() {
-                self.append_audit(
-                    "wp.integrity.auto_accept",
-                    Some(detail.id.as_str()),
-                    &serde_json::json!({ "files": auto_accepted }).to_string(),
-                    "ok",
-                )
-                .await;
-            }
-            (stored, result)
-        } else {
-            // What the last run found is still the best anyone knows, and an
-            // empty list here would read as "those went away". The record's
-            // clock stays where it was: this run proved nothing.
-            errors.insert(0, SITE_SCAN_FAILED.to_string());
-            let mut result = prior.map_or_else(Default::default, |p| p.result.clone());
-            result.malware = malware;
-            result.clamav_available = clamav_available;
-            result.clamav_installed = clamav_installed;
-            result.error = Some(errors.join("; "));
-            let scanned_at = prior.map_or(now, |p| p.scanned_at);
-            if prior.is_none() {
-                result.scanned_at = now;
-            }
-            let stored = StoredIntegrityScan {
-                scanned_at,
-                clamav_at,
-                clamav_failed_at,
-                full_at: prior.map_or(0, |p| p.full_at),
-                failed_at: now,
-                stopped: prior.is_some_and(|p| p.stopped),
-                result: result.clone(),
-            };
-            (stored, scan_did_not_run(result))
+        let record_lock = self.site_scan.record.lock().await;
+        let current = self.stored_integrity_scan(detail.id.as_str()).await;
+        let clamav = ClamavVerdict::of(current.as_ref());
+        let stored = match outcome {
+            Some(outcome) => stored_from_outcome(outcome, prior, clamav, mode, now, report_only),
+            None => stored_after_failure(prior, clamav, now),
         };
         self.set_stored_integrity_scan(detail.id.as_str(), &stored)
             .await;
+        drop(record_lock);
+
+        if !auto_accepted.is_empty() {
+            self.append_audit(
+                "wp.integrity.auto_accept",
+                Some(detail.id.as_str()),
+                &serde_json::json!({ "files": auto_accepted }).to_string(),
+                "ok",
+            )
+            .await;
+        }
+        let r = &stored.result;
         self.append_audit(
             "wp.integrity.scan",
             Some(detail.id.as_str()),
             &serde_json::json!({
-                "core_issues": returned.core_issue_count(),
-                "plugin_issues": returned.plugin_issue_count(),
-                "malware": returned.malware.len(),
-                "findings": returned.findings.len(),
-                "review": returned.review.len(),
-                "upstream": returned.wp_cli_ok,
-                "native": returned.native_scan_ran,
-                "clamav": returned.clamav_available,
+                "core_issues": r.core_issue_count(),
+                "plugin_issues": r.plugin_issue_count(),
+                "findings": r.findings.len(),
+                "review": r.review.len(),
+                "upstream": r.wp_cli_ok,
+                "native": native_ran,
             })
             .to_string(),
-            if returned.native_scan_ran {
-                "ok"
-            } else {
-                "failed"
-            },
+            if native_ran { "ok" } else { "failed" },
         )
         .await;
-        SiteScanRun::Finished(returned)
+        SiteScanRun::Finished {
+            result: stored.result,
+            native_ran,
+        }
     }
 
     /// Discover in the worker, fetch here (the worker has no network), scan in
@@ -532,7 +719,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             tracing::warn!(error = %e, "site scan: eviction stamp not written");
             return;
         }
-        let _gate = self.site_scan_gate.lock().await;
+        let _gate = self.site_scan.node.lock().await;
         let dir = Path::new(&self.paths.scan_dir).join("manifests");
         self.adapters.site_scan_evict_manifests(&dir).await;
     }
@@ -605,61 +792,175 @@ fn full_rehash_due<Tz: chrono::TimeZone>(
         && (stamped_ahead(p.full_at, now) || now - p.full_at >= FULL_REHASH_MIN_AGE_SECS)
 }
 
-/// The stored result as the caller of a scan that didn't run should read it:
-/// the findings are the last run's, and nothing was verified just now.
+/// The record a finished run leaves.
+fn stored_from_outcome(
+    mut outcome: SiteScanOutcome,
+    prior: Option<&StoredIntegrityScan>,
+    clamav: ClamavVerdict,
+    mode: ScanMode,
+    now: i64,
+    report_only: bool,
+) -> StoredIntegrityScan {
+    let stopped = outcome.stopped;
+    let capped = outcome.capped;
+    let themes_unknown = std::mem::take(&mut outcome.upstream.themes_unknown);
+    let mut result =
+        assemble_integrity_result(outcome, clamav.malware, clamav.available, report_only);
+    if let Some(p) = prior {
+        carry_standing_findings(&mut result, &p.result, stopped || capped, &themes_unknown);
+    }
+    result.scanned_at = now;
+    result.clamav_installed = integrity::clamav_available();
+    result.error = record_error(false, clamav.error.as_deref());
+    let first_scan = prior.map_or(true, |p| !p.result.native_scan_ran);
+    let read_everything = !stopped && (mode == ScanMode::FullRehash || first_scan);
+    StoredIntegrityScan {
+        scanned_at: now,
+        clamav_at: clamav.at,
+        clamav_failed_at: clamav.failed_at,
+        clamav_error: clamav.error,
+        full_at: if read_everything {
+            now
+        } else {
+            prior.map_or(0, |p| p.full_at)
+        },
+        failed_at: 0,
+        stopped,
+        result,
+    }
+}
+
+/// The record a run that gave no answer leaves. What the last run found is still
+/// the best anyone knows, and an empty list here would read as "those went away".
+/// The record's clock stays where it was: this run proved nothing.
+fn stored_after_failure(
+    prior: Option<&StoredIntegrityScan>,
+    clamav: ClamavVerdict,
+    now: i64,
+) -> StoredIntegrityScan {
+    let mut result = prior.map_or_else(Default::default, |p| p.result.clone());
+    result.malware = clamav.malware;
+    result.clamav_available = clamav.available;
+    result.clamav_installed = integrity::clamav_available();
+    result.error = record_error(true, clamav.error.as_deref());
+    if prior.is_none() {
+        result.scanned_at = now;
+    }
+    StoredIntegrityScan {
+        scanned_at: prior.map_or(now, |p| p.scanned_at),
+        clamav_at: clamav.at,
+        clamav_failed_at: clamav.failed_at,
+        clamav_error: clamav.error,
+        full_at: prior.map_or(0, |p| p.full_at),
+        failed_at: now,
+        stopped: prior.is_some_and(|p| p.stopped),
+        result,
+    }
+}
+
+/// [`integrity_finding_keys`] without ClamAV's.
+fn upstream_finding_keys(
+    r: &hyperion_types::WpIntegrityScanResult,
+) -> std::collections::HashSet<String> {
+    let mut keys = integrity_finding_keys(r);
+    keys.retain(|k| !k.starts_with("malware:"));
+    keys
+}
+
+/// The stored result as the caller of a scan that didn't run should read it: the
+/// findings are the last run's, nothing was verified just now, and a ClamAV
+/// verdict carried from an earlier pass isn't this scan's.
 pub(super) fn scan_did_not_run(
     mut result: hyperion_types::WpIntegrityScanResult,
+    clamav_ran_now: bool,
 ) -> hyperion_types::WpIntegrityScanResult {
     result.wp_cli_ok = false;
     result.core_ok = false;
     result.native_scan_ran = false;
+    result.clamav_available = clamav_ran_now;
     result
 }
 
-/// The answer to "Scan now" while another worker holds the unit.
+/// The answer to a blocking scan while another worker holds the unit.
 pub(super) fn scan_busy_result(
     prior: Option<StoredIntegrityScan>,
 ) -> hyperion_types::WpIntegrityScanResult {
-    let mut result = scan_did_not_run(prior.map(|p| p.result).unwrap_or_default());
+    let mut result = scan_did_not_run(prior.map(|p| p.result).unwrap_or_default(), false);
     result.error = Some(SITE_SCAN_BUSY.to_string());
     result.clamav_installed = integrity::clamav_available();
     result
 }
 
-/// A scan that stopped early says nothing about the files it didn't reach, so
-/// what the last run listed stays until a complete run clears it. Dropping it
-/// would also read as "new" to the alert diff when the next run finds it again.
+/// A run says nothing about what it couldn't speak for, so what the last run
+/// listed there stays until a run that could clears it. Dropping it would read as
+/// "new" to the alert diff when the next run finds it again, at `error`, with
+/// wordpress.org back from an outage.
+///
+/// `everything` is a run cut short: anything could be past where it stopped.
+/// Otherwise that's core when it wasn't compared, and each plugin or theme with no
+/// manifest this time, however that came about. A site that has no WordPress any
+/// more has nothing upstream left to carry.
 fn carry_standing_findings(
     result: &mut hyperion_types::WpIntegrityScanResult,
     prior: &hyperion_types::WpIntegrityScanResult,
+    everything: bool,
+    themes_unknown: &[String],
 ) {
-    for (into, from) in [
-        (&mut result.core_modified, &prior.core_modified),
-        (&mut result.core_unexpected, &prior.core_unexpected),
-        (&mut result.core_missing, &prior.core_missing),
-    ] {
-        union_into(into, from);
-        into.truncate(MAX_ITEMS);
-    }
-    for (into, from) in [
-        (&mut result.plugins_failed, &prior.plugins_failed),
-        (&mut result.themes_failed, &prior.themes_failed),
-    ] {
-        for old in from {
-            match into.iter_mut().find(|p| p.slug == old.slug) {
-                Some(p) => union_into(&mut p.issues, &old.issues),
-                None => into.push(old.clone()),
-            }
+    use hyperion_types::FindingKind as Kind;
+    let upstream_applies = !result.coverage.no_upstream;
+    let carry_core = upstream_applies && (everything || !result.wp_cli_ok);
+    if carry_core {
+        for (into, from) in [
+            (&mut result.core_modified, &prior.core_modified),
+            (&mut result.core_unexpected, &prior.core_unexpected),
+            (&mut result.core_missing, &prior.core_missing),
+        ] {
+            union_into(into, from);
+            into.truncate(MAX_ITEMS);
         }
-        clamp_failed(into);
     }
-    for (into, from) in [
-        (&mut result.findings, &prior.findings),
-        (&mut result.review, &prior.review),
-    ] {
-        union_into(into, from);
-        into.truncate(MAX_ITEMS);
+    let unverified: HashSet<String> = result
+        .plugins_unknown
+        .iter()
+        .chain(themes_unknown)
+        .cloned()
+        .collect();
+    let carried_component = |slug: &str| everything || unverified.contains(slug);
+    if upstream_applies {
+        for (into, from) in [
+            (&mut result.plugins_failed, &prior.plugins_failed),
+            (&mut result.themes_failed, &prior.themes_failed),
+        ] {
+            for old in from.iter().filter(|p| carried_component(&p.slug)) {
+                match into.iter_mut().find(|p| p.slug == old.slug) {
+                    Some(p) => union_into(&mut p.issues, &old.issues),
+                    None => into.push(old.clone()),
+                }
+            }
+            clamp_failed(into);
+        }
     }
+    let carried_findings: Vec<_> = prior
+        .findings
+        .iter()
+        .filter(|f| match f.kind {
+            Kind::CoreModified | Kind::CoreUnexpected | Kind::CoreMissing => carry_core,
+            Kind::UpstreamModified | Kind::UpstreamAdded | Kind::UpstreamMissing => {
+                upstream_applies && carried_component(f.component.as_deref().unwrap_or(""))
+            }
+            _ => everything,
+        })
+        .cloned()
+        .collect();
+    union_into(&mut result.findings, &carried_findings);
+    result.findings.truncate(MAX_ITEMS);
+    if everything {
+        union_into(&mut result.review, &prior.review);
+        result.review.truncate(MAX_ITEMS);
+    }
+    // Worked out again: what was carried counts.
+    result.core_ok =
+        result.wp_cli_ok && result.core_modified.is_empty() && result.core_unexpected.is_empty();
 }
 
 fn union_into<T: Clone + PartialEq>(into: &mut Vec<T>, from: &[T]) {
@@ -671,7 +972,7 @@ fn union_into<T: Clone + PartialEq>(into: &mut Vec<T>, from: &[T]) {
 }
 
 /// Cut a string to at most `max` bytes, on a character boundary.
-fn clip(s: &mut String, max: usize) {
+pub(super) fn clip(s: &mut String, max: usize) {
     if s.len() > max {
         let mut end = max;
         while !s.is_char_boundary(end) {
@@ -770,6 +1071,10 @@ pub(super) fn clamp_scan_outcome(o: &mut SiteScanOutcome) {
             0,
             "the scan's reply was over its limits and was cut".to_string(),
         );
+    }
+    // A run cut short is never clean, whatever the worker said about it.
+    if (o.stopped || o.capped) && c.partial_reasons.is_empty() {
+        c.partial_reasons.push(SITE_SCAN_CUT_SHORT.to_string());
     }
     clip_list(&mut c.partial_reasons, MAX_REASONS, MAX_REASON_BYTES);
 }

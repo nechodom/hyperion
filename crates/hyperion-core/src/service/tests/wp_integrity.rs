@@ -550,6 +550,12 @@ mod site_scan {
         }
     }
 
+    /// A node with no scanner, for the blocking scan's ClamAV half.
+    fn no_clamav(mut a: MockAdapterPort) -> MockAdapterPort {
+        a.expect_clamav_facts().returning(|| (false, false));
+        a
+    }
+
     /// A worker that finds nothing to fetch and answers with `outcome`.
     fn answering(mut a: MockAdapterPort, outcome: SiteScanOutcome) -> MockAdapterPort {
         a.expect_site_scan_worker().returning(move |job| match job {
@@ -774,6 +780,24 @@ mod site_scan {
         assert_eq!(rec.scanned_at, t0 + 6 * HOUR);
     }
 
+    /// By the kind the rest of the code uses for these. The table's CHECK doesn't
+    /// allow it to be stored today, so there's no row to drive this through.
+    #[tokio::test]
+    async fn redirect_is_refused_like_a_reverse_proxy() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let mut detail = site_named(&s, "go.cz").await;
+        assert!(kind_has_files(&detail.kind));
+        assert!(!kind_has_files("reverse_proxy"));
+        assert!(!kind_has_files("redirect"));
+        detail.kind = "redirect".into();
+        let refused = scan_refusal(&detail)
+            .expect("not an error")
+            .expect("refused");
+        assert!(refused.error.is_some());
+        assert!(!refused.is_clean());
+    }
+
     #[tokio::test]
     async fn reverse_proxy_is_skipped() {
         let pool = open_memory().await.expect("open");
@@ -902,27 +926,21 @@ mod site_scan {
         assert_eq!(inputs[0].now, now);
     }
 
-    /// The tick lets go between sites, so a "Scan now" waiting on the lock runs
-    /// after the current site and before the rest of the queue, and the tick
-    /// doesn't then scan that site a second time.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn scan_now_goes_to_front() {
-        let pool = open_memory().await.expect("open");
-        let order = Arc::new(StdMutex::new(Vec::<std::path::PathBuf>::new()));
-        let started = Arc::new(AtomicBool::new(false));
-        let release = Arc::new(AtomicBool::new(false));
-        let (order2, started2, release2) = (order.clone(), started.clone(), release.clone());
-        let mut a = happy_mocks_many();
+    /// A worker held on a site, and a way to let it go.
+    fn holding_the_first_discover(
+        mut a: MockAdapterPort,
+        order: Arc<StdMutex<Vec<std::path::PathBuf>>>,
+        started: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    ) -> MockAdapterPort {
         a.expect_site_scan_worker().returning(move |job| match job {
             WorkerJob::Discover { root } => {
-                order2.lock().expect("lock").push(root);
-                started2.store(true, Ordering::SeqCst);
-                // Hold the first site until the test has queued its "Scan now".
+                order.lock().expect("lock").push(root);
+                started.store(true, Ordering::SeqCst);
                 // The real worker is awaited; a plain block here would also
-                // strand the pool connection sqlx is returning on this thread,
-                // and with it the "Scan now" this test is waiting for.
+                // strand the pool connection sqlx is returning on this thread.
                 tokio::task::block_in_place(|| {
-                    while !release2.load(Ordering::SeqCst) {
+                    while !release.load(Ordering::SeqCst) {
                         std::thread::sleep(std::time::Duration::from_millis(5));
                     }
                 });
@@ -931,6 +949,23 @@ mod site_scan {
             WorkerJob::Scan(_) => WorkerReply::Scan(upstream_verified(0)),
         });
         a.expect_site_scan_evict_manifests().returning(|_| ());
+        a
+    }
+
+    /// "Scan now" answers at once, while the worker is busy, and runs after the
+    /// current site and before the rest of the sweep, once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scan_now_goes_to_front() {
+        let pool = open_memory().await.expect("open");
+        let order = Arc::new(StdMutex::new(Vec::<std::path::PathBuf>::new()));
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let a = holding_the_first_discover(
+            happy_mocks_many(),
+            order.clone(),
+            started.clone(),
+            release.clone(),
+        );
         let s = Arc::new(svc(pool.clone(), a));
         let now = now_secs();
         let first = site_named(&s, "first.cz").await;
@@ -948,19 +983,246 @@ mod site_scan {
         while !started.load(Ordering::SeqCst) {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        let scan_now = {
-            let s = s.clone();
-            let sel = HostingSelector::Id(wanted.id.clone());
-            tokio::spawn(async move { s.wp_integrity_scan(sel).await })
-        };
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let r = s
+            .wp_integrity_scan_request(HostingSelector::Id(wanted.id.clone()))
+            .await
+            .expect("answers while the worker is busy");
+        assert!(r.scan_queued);
+        assert!(!release.load(Ordering::SeqCst));
         release.store(true, Ordering::SeqCst);
-        scan_now.await.expect("join").expect("scan now");
         tick.await.expect("join").expect("tick");
 
-        let order = order.lock().expect("lock");
+        let order = order.lock().expect("lock").clone();
         let root = |d: &HostingDetail| std::path::PathBuf::from(&d.root_dir);
-        assert_eq!(*order, vec![root(&first), root(&wanted), root(&second)]);
+        assert_eq!(order, vec![root(&first), root(&wanted), root(&second)]);
+        let r = s
+            .wp_integrity_stored(HostingSelector::Id(wanted.id.clone()))
+            .await
+            .expect("stored");
+        assert!(!r.scan_queued, "the flag goes when the scan is stored");
+    }
+
+    /// Asked for during that very site's run, a request is about what's on disk
+    /// now, which that run may have passed: it gets its own run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_request_during_that_sites_run_gets_its_own_run() {
+        let pool = open_memory().await.expect("open");
+        let order = Arc::new(StdMutex::new(Vec::<std::path::PathBuf>::new()));
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let a = holding_the_first_discover(
+            happy_mocks(),
+            order.clone(),
+            started.clone(),
+            release.clone(),
+        );
+        let s = Arc::new(svc(pool.clone(), a));
+        let site = site_named(&s, "kos.cz").await;
+        let now = now_secs();
+        let tick = {
+            let s = s.clone();
+            tokio::spawn(async move { s.site_scan_tick_at(&chrono::Utc, now).await })
+        };
+        while !started.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        s.wp_integrity_scan_request(HostingSelector::Id(site.id.clone()))
+            .await
+            .expect("request");
+        release.store(true, Ordering::SeqCst);
+        tick.await.expect("join").expect("tick");
+        assert_eq!(order.lock().expect("lock").len(), 2);
+        assert!(
+            !s.wp_integrity_stored(HostingSelector::Id(site.id.clone()))
+                .await
+                .expect("stored")
+                .scan_queued
+        );
+    }
+
+    /// Not due, opted out: asked for all the same, as "Scan now" always was. A
+    /// double click is one flag and one scan, and the request wakes the tick.
+    #[tokio::test]
+    async fn a_requested_site_runs_whatever_its_schedule_says() {
+        let pool = open_memory().await.expect("open");
+        let discovers = Arc::new(AtomicUsize::new(0));
+        let counted = discovers.clone();
+        let mut a = happy_mocks();
+        a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::Discover { .. } => {
+                counted.fetch_add(1, Ordering::SeqCst);
+                WorkerReply::Discovery(Discovery::default())
+            }
+            WorkerJob::Scan(_) => WorkerReply::Scan(upstream_verified(0)),
+        });
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let id = site.id.as_str();
+        let now = monday_at(0, 12, 0);
+        s.set_stored_integrity_scan(id, &scanned(now - 60, now))
+            .await;
+        hyperion_state::hosting_kv::set(&pool, id, INTEGRITY_ENABLED_KV_KEY, "off", 1)
+            .await
+            .expect("kv");
+
+        // Answering doesn't need the node's lock.
+        let held = s.site_scan.node.lock().await;
+        for _ in 0..2 {
+            let r = s
+                .wp_integrity_scan_request(HostingSelector::Id(site.id.clone()))
+                .await
+                .expect("request");
+            assert!(r.scan_queued);
+            assert_eq!(r.scanned_at, now - 60, "the stored result comes back");
+        }
+        drop(held);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            s.site_scan_wait_for_request(),
+        )
+        .await
+        .expect("woken");
+        // A reload keeps polling.
+        assert!(
+            s.wp_integrity_stored(HostingSelector::Id(site.id.clone()))
+                .await
+                .expect("stored")
+                .scan_queued
+        );
+
+        s.site_scan_tick_at(&chrono::Utc, now).await.expect("tick");
+        assert_eq!(discovers.load(Ordering::SeqCst), 1);
+        assert!(
+            !s.wp_integrity_stored(HostingSelector::Id(site.id.clone()))
+                .await
+                .expect("stored")
+                .scan_queued
+        );
+        // Done: the next tick has nothing to do.
+        s.site_scan_tick_at(&chrono::Utc, now + 60)
+            .await
+            .expect("tick");
+        assert_eq!(discovers.load(Ordering::SeqCst), 1);
+    }
+
+    /// The card stops waiting once something newer than the request is stored,
+    /// such as a scan `hctl` ran. The request still stands for the tick.
+    #[tokio::test]
+    async fn a_result_newer_than_the_request_ends_the_wait() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let site = site_named(&s, "kos.cz").await;
+        let id = site.id.as_str();
+        let sel = HostingSelector::Id(site.id.clone());
+        hyperion_state::hosting_kv::set(&pool, id, "scan_requested", "1000", 1000)
+            .await
+            .expect("kv");
+        assert!(
+            s.wp_integrity_stored(sel.clone())
+                .await
+                .expect("r")
+                .scan_queued
+        );
+        s.set_stored_integrity_scan(id, &scanned(1000, 1)).await;
+        assert!(
+            s.wp_integrity_stored(sel.clone())
+                .await
+                .expect("r")
+                .scan_queued,
+            "the same second could be a scan from before the request"
+        );
+        s.set_stored_integrity_scan(id, &scanned(1001, 1)).await;
+        assert!(!s.wp_integrity_stored(sel).await.expect("r").scan_queued);
+    }
+
+    /// A worker left over from before a restart: the flag stays for next time.
+    #[tokio::test]
+    async fn a_request_outlives_a_busy_worker() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_site_scan_worker().returning(|_| WorkerReply::Busy);
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        s.wp_integrity_scan_request(HostingSelector::Id(site.id.clone()))
+            .await
+            .expect("request");
+        s.site_scan_tick_at(&chrono::Utc, monday_at(0, 12, 0))
+            .await
+            .expect("tick");
+        assert!(
+            s.wp_integrity_stored(HostingSelector::Id(site.id.clone()))
+                .await
+                .expect("stored")
+                .scan_queued
+        );
+    }
+
+    /// Suspended since it was asked for: nothing will scan it, and a card must
+    /// not wait for it.
+    #[tokio::test]
+    async fn a_request_for_a_site_no_longer_active_is_dropped() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_site_scan_worker().never();
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let id = site.id.as_str();
+        hyperion_state::hosting_kv::set(&pool, id, "scan_requested", "5", 5)
+            .await
+            .expect("kv");
+        sqlx::query("UPDATE hostings SET state = 'suspended' WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("suspend");
+        s.site_scan_tick_at(&chrono::Utc, monday_at(0, 12, 0))
+            .await
+            .expect("tick");
+        assert_eq!(
+            hyperion_state::hosting_kv::get(&pool, id, "scan_requested")
+                .await
+                .expect("kv"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_request_refuses_what_cant_be_scanned() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_site_scan_worker().never();
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "go.cz").await;
+        let id = site.id.as_str();
+        sqlx::query("UPDATE hostings SET kind = 'reverse_proxy' WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("kind");
+        let r = s
+            .wp_integrity_scan_request(HostingSelector::Id(site.id.clone()))
+            .await
+            .expect("answers");
+        assert!(!r.scan_queued);
+        assert!(r.error.is_some());
+        assert_eq!(
+            hyperion_state::hosting_kv::get(&pool, id, "scan_requested")
+                .await
+                .expect("kv"),
+            None
+        );
+        sqlx::query("UPDATE hostings SET kind = 'php', state = 'suspended' WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("state");
+        assert!(s
+            .wp_integrity_scan_request(HostingSelector::Id(site.id.clone()))
+            .await
+            .is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -981,7 +1243,7 @@ mod site_scan {
             }
         });
         a.expect_site_scan_evict_manifests().returning(|_| ());
-        let s = Arc::new(svc(pool.clone(), a));
+        let s = Arc::new(svc(pool.clone(), no_clamav(a)));
         let mut sites = Vec::new();
         for d in ["a-site.cz", "b-site.cz", "c-site.cz"] {
             sites.push(site_named(&s, d).await);
@@ -1051,13 +1313,16 @@ mod site_scan {
         a.expect_site_scan_worker()
             .returning(move |_| WorkerReply::Failed(tenant_text.to_string()));
         a.expect_site_scan_evict_manifests().returning(|_| ());
-        let s = svc(pool.clone(), a);
+        let s = svc(pool.clone(), no_clamav(a));
         let site = site_named(&s, "kos.cz").await;
         let now = monday_at(0, 12, 0);
 
         let mut prior = scanned(now - 7 * HOUR, now - DAY);
         prior.result.scanned_at = now - 7 * HOUR;
         prior.result.wp_cli_ok = true;
+        prior.result.clamav_available = true;
+        prior.clamav_at = now - HOUR;
+        prior.result.malware = vec![webshell_hit()];
         prior.result.core_modified = vec!["wp-login.php".into()];
         prior.result.findings = vec![hyperion_types::SiteFileFinding {
             rel: "wp-content/uploads/a.php".into(),
@@ -1078,6 +1343,8 @@ mod site_scan {
             .expect("record");
         assert_eq!(rec.result.core_modified, prior.result.core_modified);
         assert_eq!(rec.result.findings, prior.result.findings);
+        assert_eq!(rec.result.malware, vec![webshell_hit()], "hits stand");
+        assert_eq!(rec.clamav_at, now - HOUR);
         assert_eq!(rec.scanned_at, now - 7 * HOUR, "this run proved nothing");
         assert_eq!(rec.full_at, now - DAY);
         assert_eq!(rec.failed_at, now);
@@ -1098,8 +1365,13 @@ mod site_scan {
             .await
             .expect("scan");
         assert!(!r.wp_cli_ok);
+        assert!(
+            !r.clamav_available,
+            "a verdict carried from an earlier pass isn't this scan's"
+        );
         assert!(!r.is_clean());
         assert_eq!(r.core_modified, prior.result.core_modified);
+        assert_eq!(r.malware, vec![webshell_hit()]);
         assert!(!r.error.expect("error").contains("evil"));
     }
 
@@ -1132,65 +1404,89 @@ mod site_scan {
     /// standing finding as if it were new.
     #[tokio::test]
     async fn stopped_run_keeps_standing_findings() {
-        let pool = open_memory().await.expect("open");
-        let reply = Arc::new(StdMutex::new(upstream_verified(0)));
-        let current = reply.clone();
-        let mut a = happy_mocks();
-        a.expect_site_scan_worker().returning(move |job| match job {
-            WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
-            WorkerJob::Scan(_) => WorkerReply::Scan(current.lock().expect("lock").clone()),
-        });
-        a.expect_site_scan_evict_manifests().returning(|_| ());
-        let s = svc(pool.clone(), a);
-        let site = site_named(&s, "kos.cz").await;
-        let t0 = monday_at(0, 12, 0);
+        for (stopped, capped) in [(true, false), (false, true)] {
+            let pool = open_memory().await.expect("open");
+            let reply = Arc::new(StdMutex::new(upstream_verified(0)));
+            let current = reply.clone();
+            let mut a = happy_mocks();
+            a.expect_site_scan_worker().returning(move |job| match job {
+                WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
+                WorkerJob::Scan(_) => WorkerReply::Scan(current.lock().expect("lock").clone()),
+            });
+            a.expect_site_scan_evict_manifests().returning(|_| ());
+            let s = svc(pool.clone(), a);
+            let site = site_named(&s, "kos.cz").await;
+            let t0 = monday_at(0, 12, 0);
 
-        let mut full = upstream_verified(0);
-        full.upstream.core_modified = vec!["wp-login.php".into()];
-        *reply.lock().expect("lock") = full.clone();
-        assert_eq!(
-            s.site_scan_tick_at(&chrono::Utc, t0).await.expect("tick"),
-            1
-        );
+            let mut full = upstream_verified(0);
+            full.upstream.core_modified = vec!["wp-login.php".into()];
+            *reply.lock().expect("lock") = full.clone();
+            assert_eq!(
+                s.site_scan_tick_at(&chrono::Utc, t0).await.expect("tick"),
+                1
+            );
+            // ClamAV has run too, so nothing else can keep this from clean.
+            let mut rec = s
+                .stored_integrity_scan(site.id.as_str())
+                .await
+                .expect("record");
+            rec.result.clamav_available = true;
+            s.set_stored_integrity_scan(site.id.as_str(), &rec).await;
 
-        let mut stopped = upstream_verified(0);
-        stopped.stopped = true;
-        *reply.lock().expect("lock") = stopped;
-        let t1 = t0 + 6 * HOUR;
-        assert_eq!(
-            s.site_scan_tick_at(&chrono::Utc, t1).await.expect("tick"),
-            0
-        );
-        let rec = s
-            .stored_integrity_scan(site.id.as_str())
-            .await
-            .expect("record");
-        assert!(rec.stopped);
-        assert_eq!(rec.scanned_at, t1);
-        assert_eq!(rec.result.core_modified, vec!["wp-login.php"]);
+            let mut cut_short = upstream_verified(0);
+            cut_short.stopped = stopped;
+            cut_short.capped = capped;
+            *reply.lock().expect("lock") = cut_short;
+            let t1 = t0 + 6 * HOUR;
+            assert_eq!(
+                s.site_scan_tick_at(&chrono::Utc, t1).await.expect("tick"),
+                0
+            );
+            let rec = s
+                .stored_integrity_scan(site.id.as_str())
+                .await
+                .expect("record");
+            assert_eq!(
+                rec.stopped, stopped,
+                "a capped site won't get further in an hour"
+            );
+            assert_eq!(rec.scanned_at, t1);
+            assert_eq!(rec.result.core_modified, vec!["wp-login.php"]);
+            assert!(!rec.result.core_ok, "worked out after the carry");
 
-        *reply.lock().expect("lock") = full;
-        let t2 = t1 + HOUR;
-        assert_eq!(
-            s.site_scan_tick_at(&chrono::Utc, t2).await.expect("tick"),
-            0,
-            "nothing new"
-        );
-        let rec = s
-            .stored_integrity_scan(site.id.as_str())
-            .await
-            .expect("record");
-        assert!(!rec.stopped);
+            // Clean but for the part it didn't reach: still not clean.
+            let mut nothing_standing = upstream_verified(0);
+            nothing_standing.stopped = stopped;
+            nothing_standing.capped = capped;
+            clamp_scan_outcome(&mut nothing_standing);
+            assert!(!nothing_standing.coverage.partial_reasons.is_empty());
+            let r = assemble_integrity_result(nothing_standing, vec![], true, true);
+            assert!(!r.is_clean(), "stopped {stopped}, capped {capped}");
 
-        // A complete run is the one thing that can clear a finding.
-        *reply.lock().expect("lock") = upstream_verified(0);
-        let t3 = t2 + 6 * HOUR;
-        s.site_scan_tick_at(&chrono::Utc, t3).await.expect("tick");
-        let rec = s
-            .stored_integrity_scan(site.id.as_str())
-            .await
-            .expect("record");
-        assert!(rec.result.core_modified.is_empty());
+            *reply.lock().expect("lock") = full;
+            let t2 = t1 + 6 * HOUR;
+            assert_eq!(
+                s.site_scan_tick_at(&chrono::Utc, t2).await.expect("tick"),
+                0,
+                "nothing new"
+            );
+            let rec = s
+                .stored_integrity_scan(site.id.as_str())
+                .await
+                .expect("record");
+            assert!(!rec.stopped);
+
+            // A complete run is the one thing that can clear a finding.
+            *reply.lock().expect("lock") = upstream_verified(0);
+            let t3 = t2 + 6 * HOUR;
+            s.site_scan_tick_at(&chrono::Utc, t3).await.expect("tick");
+            let rec = s
+                .stored_integrity_scan(site.id.as_str())
+                .await
+                .expect("record");
+            assert!(rec.result.core_modified.is_empty());
+            assert!(rec.result.core_ok);
+        }
     }
 
     /// A stopped re-hash didn't read everything, so it's still owed.
@@ -1333,7 +1629,7 @@ mod site_scan {
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => WorkerReply::Scan(upstream_verified(2)),
         });
-        let s = svc(pool.clone(), a);
+        let s = svc(pool.clone(), no_clamav(a));
         let site = site_named(&s, "kos.cz").await;
         wordpress::record_install(&pool, &site.id, "https://kos.cz", "6.6.2", "h", 1)
             .await
@@ -1356,7 +1652,7 @@ mod site_scan {
             WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
             WorkerJob::Scan(_) => WorkerReply::Scan(outcome.clone()),
         });
-        let s = svc(pool.clone(), a);
+        let s = svc(pool.clone(), no_clamav(a));
         let site = site_named(&s, "kos.cz").await;
         s.wp_integrity_scan(HostingSelector::Id(site.id.clone()))
             .await
@@ -1619,7 +1915,7 @@ mod site_scan {
         a.expect_site_scan_cached_manifest().returning(|_, _| None);
         a.expect_site_scan_fetch_manifest()
             .returning(|_, _| Err(AdapterError::Other("down".into())));
-        let s = svc(pool.clone(), a);
+        let s = svc(pool.clone(), no_clamav(a));
         let site = site_named(&s, "kos.cz").await;
         let r = s
             .wp_integrity_scan(HostingSelector::Id(site.id))
@@ -1705,5 +2001,411 @@ mod site_scan {
             remove_site_scan_state(&paths, id).await;
         }
         assert!(dir.path().join("quarantine/other").exists());
+    }
+
+    // ---- carrying what a run couldn't speak for ----
+
+    fn tampered_plugin(slug: &str) -> hyperion_types::WpIntegrityPluginResult {
+        hyperion_types::WpIntegrityPluginResult {
+            slug: slug.into(),
+            issues: vec![hyperion_types::WpIntegrityFileIssue {
+                path: "x.php".into(),
+                message: "Checksum does not match".into(),
+            }],
+        }
+    }
+
+    /// wordpress.org out of reach at rollout, then back. The first run compared
+    /// nothing, so it can't have cleared anything, and the second finds nothing
+    /// new.
+    #[tokio::test]
+    async fn a_network_blip_then_recovery_raises_no_alert() {
+        let pool = open_memory().await.expect("open");
+        let reply = Arc::new(StdMutex::new(upstream_verified(2)));
+        let current = reply.clone();
+        let mut a = happy_mocks();
+        a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
+            WorkerJob::Scan(_) => WorkerReply::Scan(current.lock().expect("lock").clone()),
+        });
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let t0 = monday_at(0, 12, 0);
+
+        let mut healthy = upstream_verified(2);
+        healthy.upstream.core_modified = vec!["wp-login.php".into()];
+        healthy.upstream.plugins_failed = vec![tampered_plugin("akismet")];
+        *reply.lock().expect("lock") = healthy.clone();
+        assert_eq!(
+            s.site_scan_tick_at(&chrono::Utc, t0).await.expect("tick"),
+            1
+        );
+
+        // Nothing compared: core not run, the plugin unverified.
+        let mut blip = SiteScanOutcome::default();
+        blip.upstream.plugins_unknown = vec!["akismet".into()];
+        blip.coverage.partial_reasons = vec!["wordpress.org couldn't be reached".into()];
+        *reply.lock().expect("lock") = blip;
+        let t1 = t0 + 6 * HOUR;
+        assert_eq!(
+            s.site_scan_tick_at(&chrono::Utc, t1).await.expect("tick"),
+            0
+        );
+        let rec = s
+            .stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record");
+        assert!(!rec.result.wp_cli_ok, "still \"couldn't check\"");
+        assert!(!rec.result.core_ok);
+        assert_eq!(rec.result.core_modified, vec!["wp-login.php"]);
+        assert_eq!(rec.result.plugins_failed.len(), 1);
+
+        *reply.lock().expect("lock") = healthy;
+        let t2 = t1 + 6 * HOUR;
+        assert_eq!(
+            s.site_scan_tick_at(&chrono::Utc, t2).await.expect("tick"),
+            0
+        );
+    }
+
+    /// Only what this run couldn't speak for is carried. A plugin it verified
+    /// clean is clear, a plugin gone is gone, and a site that no longer has
+    /// WordPress has no core to carry.
+    #[tokio::test]
+    async fn carrying_stops_at_what_the_run_could_not_speak_for() {
+        let pool = open_memory().await.expect("open");
+        let reply = Arc::new(StdMutex::new(upstream_verified(2)));
+        let current = reply.clone();
+        let mut a = happy_mocks();
+        a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
+            WorkerJob::Scan(_) => WorkerReply::Scan(current.lock().expect("lock").clone()),
+        });
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let t0 = monday_at(0, 12, 0);
+        let upstream_finding = |rel: &str, component: &str| hyperion_types::SiteFileFinding {
+            rel: rel.into(),
+            kind: hyperion_types::FindingKind::UpstreamModified,
+            severity: "high".into(),
+            component: Some(component.into()),
+            ..Default::default()
+        };
+
+        let mut first = upstream_verified(3);
+        first.upstream.plugins_failed = vec![
+            tampered_plugin("unreached"),
+            tampered_plugin("fixed"),
+            tampered_plugin("removed"),
+        ];
+        first.upstream.themes_failed = vec![tampered_plugin("a-theme")];
+        first.findings = vec![
+            upstream_finding("wp-content/plugins/unreached/x.php", "unreached"),
+            upstream_finding("wp-content/plugins/fixed/x.php", "fixed"),
+        ];
+        *reply.lock().expect("lock") = first;
+        s.site_scan_tick_at(&chrono::Utc, t0).await.expect("tick");
+
+        let mut second = upstream_verified(1);
+        second.upstream.plugins_unknown = vec!["unreached".into()];
+        second.upstream.themes_unknown = vec!["a-theme".into()];
+        *reply.lock().expect("lock") = second;
+        let t1 = t0 + 6 * HOUR;
+        s.site_scan_tick_at(&chrono::Utc, t1).await.expect("tick");
+        let rec = s
+            .stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record");
+        let slugs: Vec<&str> = rec
+            .result
+            .plugins_failed
+            .iter()
+            .map(|p| p.slug.as_str())
+            .collect();
+        assert_eq!(slugs, vec!["unreached"]);
+        assert_eq!(rec.result.themes_failed.len(), 1);
+        assert_eq!(rec.result.findings.len(), 1);
+        assert_eq!(
+            rec.result.findings[0].component.as_deref(),
+            Some("unreached")
+        );
+
+        // The site stopped being WordPress: nothing to compare, nothing to carry.
+        let mut gone = SiteScanOutcome::default();
+        gone.coverage.no_upstream = true;
+        *reply.lock().expect("lock") = gone;
+        let t2 = t1 + 6 * HOUR;
+        s.site_scan_tick_at(&chrono::Utc, t2).await.expect("tick");
+        let rec = s
+            .stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record");
+        assert!(rec.result.plugins_failed.is_empty());
+        assert!(rec.result.themes_failed.is_empty());
+    }
+
+    // ---- ClamAV, beside the node's lock ----
+
+    fn with_clamav(
+        mut a: MockAdapterPort,
+        answer: impl Fn() -> Result<integrity::MalwareScan, AdapterError> + Send + 'static,
+    ) -> MockAdapterPort {
+        a.expect_clamav_facts().returning(|| (true, true));
+        a.expect_clamav_scan().returning(move |_, _| answer());
+        a
+    }
+
+    fn found(hits: Vec<hyperion_types::WpMalwareHit>) -> integrity::MalwareScan {
+        integrity::MalwareScan {
+            available: true,
+            hits,
+            partial: false,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clamav_runs_without_the_nodes_lock() {
+        let pool = open_memory().await.expect("open");
+        let a = with_clamav(happy_mocks(), || Ok(found(vec![])));
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let now = monday_at(0, 12, 0);
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(now - 60, now))
+            .await;
+        let _held = s.site_scan.node.lock().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            s.site_scan_clamav_tick_at(now),
+        )
+        .await
+        .expect("didn't wait for the lock")
+        .expect("tick");
+        let rec = s
+            .stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record");
+        assert_eq!(rec.clamav_at, now);
+        assert!(rec.result.clamav_available);
+    }
+
+    /// The sweep goes on one site at a time as before, with new hits alerting
+    /// once and a held-off site left alone.
+    #[tokio::test]
+    async fn a_new_clamav_hit_alerts_once() {
+        let pool = open_memory().await.expect("open");
+        let a = with_clamav(happy_mocks(), || Ok(found(vec![webshell_hit()])));
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let now = monday_at(0, 12, 0);
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(now - 60, now))
+            .await;
+        assert_eq!(s.site_scan_clamav_tick_at(now).await.expect("tick"), 1);
+        assert_eq!(
+            s.site_scan_clamav_tick_at(now + 600).await.expect("tick"),
+            0,
+            "held off for a day"
+        );
+        let rec = s
+            .stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record");
+        assert_eq!(rec.clamav_at, now);
+        assert_eq!(rec.result.malware, vec![webshell_hit()]);
+        // Past the hold-off, the same hit is standing, not new.
+        assert_eq!(
+            s.site_scan_clamav_tick_at(now + DAY).await.expect("tick"),
+            0
+        );
+    }
+
+    /// No release to compare with: no ClamAV either, so no new alerts for sites
+    /// that never had this scan. And none before anyone knows what a site is.
+    #[tokio::test]
+    async fn clamav_skips_what_has_no_upstream() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks_many();
+        a.expect_clamav_facts().returning(|| (true, true));
+        a.expect_clamav_scan().never();
+        let s = svc(pool.clone(), a);
+        let plain = site_named(&s, "static.cz").await;
+        let _never_scanned = site_named(&s, "new.cz").await;
+        let mut rec = scanned(1, 1);
+        rec.result.coverage.no_upstream = true;
+        s.set_stored_integrity_scan(plain.id.as_str(), &rec).await;
+        assert_eq!(
+            s.site_scan_clamav_tick_at(monday_at(0, 12, 0))
+                .await
+                .expect("tick"),
+            0
+        );
+    }
+
+    /// The pass didn't run, so its hits still stand, its age stays, and no words
+    /// from clamscan (tenant file names) reach the record.
+    #[tokio::test]
+    async fn a_failed_clamav_pass_keeps_prior_hits_and_stores_no_tenant_text() {
+        let pool = open_memory().await.expect("open");
+        let a = with_clamav(happy_mocks(), || {
+            Err(AdapterError::Command {
+                cmd: "clamscan".into(),
+                code: 2,
+                stderr_tail: "/home/x/htdocs/<b>evil</b>.php: Can't open".into(),
+            })
+        });
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let now = monday_at(0, 12, 0);
+        let mut prior = scanned(now - 60, now);
+        prior.clamav_at = now - 2 * DAY;
+        prior.result.clamav_available = true;
+        prior.result.malware = vec![webshell_hit()];
+        s.set_stored_integrity_scan(site.id.as_str(), &prior).await;
+
+        assert_eq!(s.site_scan_clamav_tick_at(now).await.expect("tick"), 0);
+
+        let rec = s
+            .stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record");
+        assert_eq!(rec.result.malware, vec![webshell_hit()]);
+        assert_eq!(rec.clamav_at, now - 2 * DAY);
+        assert_eq!(rec.clamav_failed_at, now);
+        assert!(!rec.result.clamav_available, "not this time");
+        let error = rec.result.error.expect("said");
+        assert!(
+            !error.contains("evil") && !error.contains("/home"),
+            "{error}"
+        );
+        // Goes to the back of the sweep and holds off.
+        assert_eq!(
+            s.site_scan_clamav_tick_at(now + 600).await.expect("tick"),
+            0
+        );
+    }
+
+    /// A site that fails its pass doesn't keep the sweep to itself.
+    #[tokio::test]
+    async fn the_clamav_sweep_takes_the_longest_waiting_first() {
+        let pool = open_memory().await.expect("open");
+        let scanned_paths = Arc::new(StdMutex::new(Vec::new()));
+        let seen = scanned_paths.clone();
+        let mut a = happy_mocks_many();
+        a.expect_clamav_facts().returning(|| (true, true));
+        a.expect_clamav_scan().returning(move |root, _| {
+            seen.lock().expect("lock").push(root.to_string());
+            Ok(found(vec![]))
+        });
+        let s = svc(pool.clone(), a);
+        let now = monday_at(0, 12, 0);
+        let failed_lately = site_named(&s, "failed.cz").await;
+        let waiting = site_named(&s, "waiting.cz").await;
+        let mut f = scanned(now - 60, now);
+        f.clamav_failed_at = now - 2 * HOUR;
+        s.set_stored_integrity_scan(failed_lately.id.as_str(), &f)
+            .await;
+        let mut w = scanned(now - 60, now);
+        w.clamav_at = now - 3 * DAY;
+        s.set_stored_integrity_scan(waiting.id.as_str(), &w).await;
+
+        s.site_scan_clamav_tick_at(now).await.expect("tick");
+        assert_eq!(
+            *scanned_paths.lock().expect("lock"),
+            vec![waiting.root_dir.clone(), failed_lately.root_dir.clone()]
+        );
+    }
+
+    /// A pass that finishes while a long scan of that site runs keeps its result:
+    /// the scan's store doesn't write back what it read when it started.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scans_store_keeps_a_clamav_result_from_during_its_run() {
+        let pool = open_memory().await.expect("open");
+        let during = pool.clone();
+        let id_slot: Arc<StdMutex<String>> = Arc::new(StdMutex::new(String::new()));
+        let id_for_mock = id_slot.clone();
+        let now = monday_at(0, 12, 0);
+        let mut a = happy_mocks();
+        a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
+            WorkerJob::Scan(_) => {
+                let id = id_for_mock.lock().expect("lock").clone();
+                let mut rec = scanned(now - 7 * HOUR, now);
+                rec.clamav_at = now - 60;
+                rec.result.clamav_available = true;
+                rec.result.malware = vec![webshell_hit()];
+                let json = serde_json::to_string(&rec).expect("json");
+                let pool = during.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        hyperion_state::hosting_kv::set(&pool, &id, INTEGRITY_KV_KEY, &json, 1)
+                            .await
+                            .expect("kv")
+                    })
+                });
+                WorkerReply::Scan(upstream_verified(0))
+            }
+        });
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        *id_slot.lock().expect("lock") = site.id.as_str().to_string();
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(now - 7 * HOUR, now))
+            .await;
+
+        assert_eq!(
+            s.site_scan_tick_at(&chrono::Utc, now).await.expect("tick"),
+            0
+        );
+        let rec = s
+            .stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record");
+        assert_eq!(rec.scanned_at, now);
+        assert_eq!(rec.clamav_at, now - 60);
+        assert_eq!(rec.result.malware, vec![webshell_hit()]);
+        assert!(rec.result.clamav_available);
+    }
+
+    /// The blocking scan `hctl` uses: both halves, and it says which ran.
+    #[tokio::test]
+    async fn the_blocking_scan_reports_a_pass_that_ran_now() {
+        let pool = open_memory().await.expect("open");
+        let mut a = with_clamav(happy_mocks(), || Ok(found(vec![webshell_hit()])));
+        a.expect_site_scan_worker()
+            .returning(|_| WorkerReply::Failed("no".into()));
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let r = s
+            .wp_integrity_scan(HostingSelector::Id(site.id.clone()))
+            .await
+            .expect("scan");
+        assert!(!r.native_scan_ran);
+        assert!(r.clamav_available, "this one did run");
+        assert_eq!(r.malware, vec![webshell_hit()]);
+        assert!(r.error.is_some());
+    }
+
+    // ---- what other people read ----
+
+    #[tokio::test]
+    async fn the_dashboard_list_leaves_file_lists_out() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let site = site_named(&s, "kos.cz").await;
+        let finding = hyperion_types::SiteFileFinding {
+            rel: "a.php".into(),
+            ..Default::default()
+        };
+        let mut rec = scanned(1, 1);
+        rec.result.findings = vec![finding.clone()];
+        rec.result.review = vec![finding];
+        rec.result.core_modified = vec!["wp-login.php".into()];
+        s.set_stored_integrity_scan(site.id.as_str(), &rec).await;
+        let list = s.integrity_findings_list().await.expect("list");
+        assert_eq!(list.len(), 1);
+        assert!(list[0].result.findings.is_empty());
+        assert!(list[0].result.review.is_empty());
+        assert_eq!(list[0].result.total_findings(), 1, "the counts stay");
     }
 }

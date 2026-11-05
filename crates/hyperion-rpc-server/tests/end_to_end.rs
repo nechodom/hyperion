@@ -284,7 +284,7 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
             hyperion_types::ServiceInstallStatus::default(),
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        site_scan_gate: Arc::new(tokio::sync::Mutex::new(())),
+        site_scan: Default::default(),
     });
     let _ = adapters; // silence unused warning
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));

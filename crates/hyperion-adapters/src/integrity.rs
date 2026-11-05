@@ -10,6 +10,7 @@
 use crate::AdapterError;
 use hyperion_types::WpMalwareHit;
 use std::path::Path;
+use std::time::Duration;
 use tokio::process::Command;
 use tracing::debug;
 
@@ -29,20 +30,34 @@ pub struct Captured {
     pub stderr: String,
 }
 
-/// Run a command and return its exit code together with BOTH streams,
-/// treating a non-zero exit as data rather than as a failure.
+/// Run a command within `limit` and return its exit code together with BOTH
+/// streams, treating a non-zero exit as data rather than as a failure.
 ///
 /// Neither `cmd::run` nor `cmd::run_capturing_all` fits this module: both
 /// turn a non-zero exit into `AdapterError`, and both keep only the last
 /// 4 KiB of output. Here non-zero is the *normal* case — clamscan exits 1 on
 /// every detection — and the text it emits alongside it is precisely the
 /// finding list we must not lose or truncate. Only a failure to *spawn* (binary
-/// missing, fork failure) is an error.
-async fn run_capturing(program: &str, args: &[&str]) -> Result<Captured, AdapterError> {
+/// missing, fork failure) or the time limit is an error.
+///
+/// Given up on, the process is killed; a `nice` or `ionice` in front of the
+/// scanner has exec'd into it, so that is the scanner. Without this one stuck
+/// pass would hold ClamAV's slot for ever.
+async fn run_capturing_within(
+    program: &str,
+    args: &[&str],
+    limit: Duration,
+) -> Result<Captured, AdapterError> {
     // No redaction pass here (unlike `cmd::run`): every argument this module
     // builds is a flag or a docroot path — no credential ever reaches this argv.
     debug!(program, ?args, "exec (exit code is a result)");
-    let out = Command::new(program).args(args).output().await?;
+    let mut cmd = Command::new(program);
+    cmd.args(args).kill_on_drop(true);
+    let out = tokio::time::timeout(limit, cmd.output())
+        .await
+        .map_err(|_| {
+            AdapterError::Other(format!("hit its time limit of {} s", limit.as_secs()))
+        })??;
     Ok(Captured {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -84,6 +99,9 @@ pub struct MalwareScan {
     /// proven.
     pub partial: bool,
 }
+
+/// How long one pass over a docroot may take.
+const CLAMAV_TIME_LIMIT: Duration = Duration::from_secs(2 * 3600);
 
 /// Where freshclam keeps the signature database.
 const CLAMAV_DB_DIR: &str = "/var/lib/clamav";
@@ -201,9 +219,9 @@ pub async fn scan_malware_niced(path: &str, niceness: i32) -> Result<MalwareScan
             args.extend(["-n", &n, bin]);
         }
         args.extend(scan_args);
-        run_capturing("/usr/bin/nice", &args).await?
+        run_capturing_within("/usr/bin/nice", &args, CLAMAV_TIME_LIMIT).await?
     } else {
-        run_capturing(bin, &scan_args).await?
+        run_capturing_within(bin, &scan_args, CLAMAV_TIME_LIMIT).await?
     };
     let scan = classify_clamscan(out.code, &out.stdout);
     if scan.available {
@@ -355,6 +373,57 @@ LibClamAV Warning: something
         std::fs::write(dir.join("main.cvd"), b"x").expect("write");
         assert!(clamav_db_present_in(&dir));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- time limit --------------------------------------------------------
+
+    /// A pass over a site that won't end must not hold ClamAV's one slot for
+    /// ever: the process goes, not just the wait for it.
+    #[tokio::test]
+    async fn the_time_limit_kills_the_process() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let pid_file = dir.path().join("pid");
+        let script = format!("echo $$ > {}; exec sleep 60", pid_file.display());
+        let started = std::time::Instant::now();
+        let r = run_capturing_within(
+            "/bin/sh",
+            &["-c", &script],
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let e = r.expect_err("timed out").to_string();
+        assert!(e.contains("time limit"), "{e}");
+
+        let pid = std::fs::read_to_string(&pid_file).expect("pid");
+        let pid = pid.trim();
+        let mut gone = false;
+        for _ in 0..100 {
+            let ps = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", pid])
+                .output()
+                .expect("ps");
+            let stat = String::from_utf8_lossy(&ps.stdout);
+            if stat.trim().is_empty() || stat.trim().starts_with('Z') {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(gone, "process {pid} still running");
+    }
+
+    #[tokio::test]
+    async fn a_command_inside_the_limit_is_a_result() {
+        let out = run_capturing_within(
+            "/bin/sh",
+            &["-c", "echo found; exit 1"],
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("ran");
+        assert_eq!(out.code, 1);
+        assert_eq!(out.stdout.trim(), "found");
     }
 
     // -- guards ------------------------------------------------------------

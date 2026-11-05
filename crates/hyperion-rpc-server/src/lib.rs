@@ -885,6 +885,12 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(r) => Response::WpIntegrityScan(r),
             Err(e) => Response::Error(e),
         },
+        Request::WpIntegrityScanRequest { hosting } => {
+            match api.wp_integrity_scan_request(hosting).await {
+                Ok(r) => Response::WpIntegrityScan(r),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::IntegrityFindingsList => match api.integrity_findings_list().await {
             Ok(v) => Response::IntegrityFindingsList(v),
             Err(e) => Response::Error(e),
@@ -3063,6 +3069,12 @@ mod tests {
             Ok(hyperion_types::WpIntegrityScanResult::default())
         }
         async fn wp_integrity_stored(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+            Ok(hyperion_types::WpIntegrityScanResult::default())
+        }
+        async fn wp_integrity_scan_request(
             &self,
             _: HostingSelector,
         ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {

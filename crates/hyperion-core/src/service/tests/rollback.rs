@@ -90,7 +90,7 @@ async fn rollback_cleans_system_users_db_row_so_uid_can_be_reused() {
             hyperion_types::ServiceInstallStatus::default(),
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        site_scan_gate: Arc::new(tokio::sync::Mutex::new(())),
+        site_scan: Default::default(),
     };
     s2.create(req("test6.example.cz"))
         .await

@@ -67,11 +67,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await;
     }
 
-    /// "Scan now": wait for the node's one scan slot, scan this site, return the
-    /// result. Compares with the checksums WordPress.org publishes for the exact
-    /// installed versions by parsing and hashing, never by running wp-cli or any
-    /// tenant PHP, then sweeps the docroot with ClamAV when a scanner exists. A
-    /// probe that couldn't run comes back as "couldn't check" rather than a
+    /// Scan now and wait for the answer: the node's one scan slot, this site,
+    /// then ClamAV with the slot let go. `hctl`'s; the panel sends
+    /// [`wp_integrity_scan_request`](Self::wp_integrity_scan_request) instead.
+    /// Compares with the checksums WordPress.org publishes for the exact installed
+    /// versions by parsing and hashing, never by running wp-cli or any tenant PHP.
+    /// A probe that couldn't run comes back as "couldn't check" rather than a
     /// silent pass.
     ///
     /// The result is stored under the `integrity_scan` KV key so the dashboard,
@@ -82,33 +83,56 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         sel: HostingSelector,
     ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
         let detail = self.get(sel).await?;
-        if detail.state != HostingState::Active {
-            return Err(RpcError::Conflict {
-                message: "hosting must be active to scan".into(),
-            });
+        if let Some(refused) = scan_refusal(&detail)? {
+            return Ok(refused);
         }
-        // Not stored: a reverse proxy has no place on the integrity dashboard.
-        if detail.kind == "reverse_proxy" {
-            return Ok(hyperion_types::WpIntegrityScanResult {
-                error: Some(SITE_SCAN_NO_FILES.to_string()),
-                scanned_at: now_secs(),
-                // A node fact, true or not for this site: left at false the
-                // card would send the operator to install ClamAV again.
-                clamav_installed: integrity::clamav_available(),
-                ..Default::default()
-            });
-        }
-        let _gate = self.site_scan_gate.lock().await;
+        let gate = self.site_scan.node.lock().await;
         // After the wait, which can be as long as another site's scan.
         let now = now_secs();
         let prior = self.stored_integrity_scan(detail.id.as_str()).await;
-        match self
+        let run = self
             .site_scan_locked(&detail, ScanMode::Delta, prior.as_ref(), now)
-            .await
-        {
-            SiteScanRun::Finished(result) => Ok(result),
-            SiteScanRun::Busy => Ok(scan_busy_result(prior)),
+            .await;
+        drop(gate);
+        let (result, native_ran) = match run {
+            SiteScanRun::Finished { result, native_ran } => (result, native_ran),
+            SiteScanRun::Busy => return Ok(scan_busy_result(prior)),
+        };
+        if result.coverage.no_upstream {
+            return Ok(result);
         }
+        let (after, clamav_ran) = self.site_scan_clamav_pass(&detail, now_secs()).await;
+        Ok(if native_ran {
+            after
+        } else {
+            scan_did_not_run(after, clamav_ran)
+        })
+    }
+
+    /// "Scan now": note that a scan is wanted, wake the tick, and answer with what
+    /// is stored. The scan can be an hour away behind another site's, so nothing
+    /// waits for it; the card polls while `scan_queued` is set. Asking twice is
+    /// still one scan.
+    pub async fn wp_integrity_scan_request(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        if let Some(refused) = scan_refusal(&detail)? {
+            return Ok(refused);
+        }
+        let now = now_secs();
+        hyperion_state::hosting_kv::set(
+            &self.pool,
+            detail.id.as_str(),
+            SCAN_REQUESTED_KV_KEY,
+            &now.to_string(),
+            now,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("scan request: {e}")))?;
+        self.site_scan.wake.notify_one();
+        self.wp_integrity_stored(sel).await
     }
 
     /// What the last scan left for this hosting, without starting one.
@@ -121,17 +145,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         sel: HostingSelector,
     ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
         let detail = self.get(sel).await?;
+        // A reload of the page keeps polling for as long as the request stands
+        // and nothing newer than it has been stored.
+        let flag = self.scan_request_flag(detail.id.as_str()).await;
         if let Some(stored) = self.stored_integrity_scan(detail.id.as_str()).await {
+            let queued = flag.as_deref().is_some_and(|f| {
+                f.trim()
+                    .parse::<i64>()
+                    .map_or(true, |at| stored.scanned_at <= at)
+            });
             let mut result = stored.result;
             // The record's own clock wins over a result that predates the
             // field; the scanner flag is a node fact, read fresh.
             result.scanned_at = stored.scanned_at;
             result.clamav_installed = integrity::clamav_available();
-            result.scan_queued = false;
+            result.scan_queued = queued;
             return Ok(result);
         }
         Ok(hyperion_types::WpIntegrityScanResult {
             clamav_installed: integrity::clamav_available(),
+            scan_queued: flag.is_some(),
             ..Default::default()
         })
     }
@@ -159,6 +192,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if st.result.coverage.no_upstream {
                 continue;
             }
+            // The file lists are the site card's. With every site on the node in
+            // one reply they'd be most of a frame, and this page counts them.
+            let mut result = st.result;
+            result.findings = Vec::new();
+            result.review = Vec::new();
             // Same as `vuln_findings_list`: a hosting that does not resolve is
             // trashed or gone, and a nameless row is not information.
             let Some(domain) = summaries
@@ -173,7 +211,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 domain,
                 node_id: String::new(),
                 scanned_at: st.scanned_at,
-                result: st.result,
+                result,
             });
         }
         // Worst first: most findings, then anything not provably clean
@@ -201,10 +239,14 @@ pub(super) const INTEGRITY_KV_KEY: &str = "integrity_scan";
 /// it scans today. Only an explicit "off" opts a site out.
 pub(super) const INTEGRITY_ENABLED_KV_KEY: &str = "integrity_scan_enabled";
 
+/// `hosting_kv` key: unix seconds someone last asked for a scan of this hosting.
+/// Gone once a scan that started after that has been stored.
+pub(super) const SCAN_REQUESTED_KV_KEY: &str = "scan_requested";
+
 /// Minimum gap between two ClamAV passes over the same docroot. Twenty
-/// hours rather than a flat day so ordinary jitter in the daily sweep
-/// can't push a site's scan past the cutoff and silently halve its
-/// cadence to every other night.
+/// hours rather than a flat day so ordinary jitter in the sweep can't push
+/// a site's pass past the cutoff and silently halve its cadence to every
+/// other night.
 pub(super) const CLAMAV_MIN_INTERVAL_SECS: i64 = 20 * 3600;
 
 /// Minimum gap before retrying a ClamAV pass that failed.
@@ -220,13 +262,6 @@ pub(super) fn clamav_pass_held_off(prior: Option<&StoredIntegrityScan>, now: i64
     })
 }
 
-/// Node-wide gate: at most one `clamscan` at a time on this machine.
-/// It reads an entire docroot, so two concurrent passes turn a shared
-/// host's IO into a queue for every site on it. Callers `try_lock` and
-/// carry their previous verdict forward rather than waiting — see
-/// `integrity_malware_pass`.
-pub(super) static CLAMAV_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 /// What we persist per hosting under the `integrity_scan` KV key: the
 /// last result, when it ran, and — separately — when the ClamAV half of
 /// it last actually walked the disk. Both timestamps ride inside the
@@ -241,13 +276,17 @@ pub(super) struct StoredIntegrityScan {
     /// original age instead of looking freshly confirmed.
     #[serde(default)]
     pub(super) clamav_at: i64,
-    /// Unix seconds of the last ClamAV pass that FAILED (clamscan exit ≥ 2,
-    /// e.g. no signature database yet); 0 = none since the last good one.
-    /// Holds the next attempt off for [`CLAMAV_FAILED_RETRY_SECS`]: the card
-    /// scans lazily on view, and a failure that repeats otherwise re-walked
-    /// the whole docroot on every page load.
+    /// Unix seconds of the last ClamAV pass that FAILED (clamscan exit ≥ 2, or
+    /// its time limit); 0 = none since the last good one. Holds the next attempt
+    /// off for [`CLAMAV_FAILED_RETRY_SECS`] and sends the site to the back of the
+    /// sweep: a failure that repeats would otherwise re-walk the whole docroot,
+    /// ahead of every site still waiting, each time it came round.
     #[serde(default)]
     pub(super) clamav_failed_at: i64,
+    /// Why the last ClamAV pass said nothing. Generic text only: clamscan's own
+    /// words name tenant files.
+    #[serde(default)]
+    pub(super) clamav_error: Option<String>,
     /// Unix seconds of the last run that read every file: a first scan, or a
     /// full re-hash that wasn't stopped. 0 = none.
     #[serde(default)]
@@ -291,9 +330,10 @@ pub(super) fn malware_pass_precheck(
 ) -> Option<(bool, Vec<hyperion_types::WpMalwareHit>, i64, i64)> {
     // No scanner installed. A normal state on a shared host — never an
     // error, and explicitly NOT a clean bill of health (the caller renders
-    // `clamav_available = false` as "not scanned").
+    // `clamav_available = false` as "not scanned"). Hits from when there was
+    // one are still the last anyone knows.
     if !installed {
-        return Some((false, Vec::new(), 0, 0));
+        return Some(malware_pass_did_not_run(prior, 0));
     }
     // Installed but still downloading signatures right after the package
     // went in: clamscan would exit 2 on every run. Wait, without the
@@ -316,48 +356,67 @@ pub(super) fn malware_pass_precheck(
     None
 }
 
-/// The ClamAV half of an integrity scan, with the two guards that keep a
-/// signature sweep from hurting the node it protects:
-///
-///   * **one `clamscan` per node at a time.** It reads an entire docroot,
-///     so two at once turn a shared host's IO into a queue for every site
-///     on it. A scan that finds the gate busy carries the previous
-///     verdict forward instead of waiting — a panel "Scan now" must not
-///     block behind a night-long sweep.
-///   * **one pass per site per day.** Checksum verification is cheap and
-///     stays fresh on every call; re-walking a 20 GB docroot because
-///     someone reloaded a page is not.
-///
-/// Returns `(available, hits, produced_at)`, where `produced_at` is when
-/// those hits were actually observed (0 = never).
-pub(super) async fn integrity_malware_pass(
-    detail: &HostingDetail,
-    now: i64,
-    scan_niceness: i32,
+/// A pass that was meant to run and didn't: not scanned, so nothing to vouch for
+/// the site, but what the last one found stands until a pass says otherwise.
+/// Dropping it would read as new to the alert diff when it's found again.
+pub(super) fn malware_pass_did_not_run(
     prior: Option<&StoredIntegrityScan>,
-    errors: &mut Vec<String>,
+    failed_at: i64,
 ) -> (bool, Vec<hyperion_types::WpMalwareHit>, i64, i64) {
-    if let Some(done) = malware_pass_precheck(
-        integrity::clamav_available(),
-        integrity::clamav_db_present(),
-        now,
-        prior,
-        errors,
-    ) {
-        return done;
-    }
-    let Ok(_gate) = CLAMAV_GATE.try_lock() else {
-        errors.push("malware scan skipped: another scan is already running on this node".into());
-        return carried_malware_verdict(prior);
-    };
-    match integrity::scan_malware_niced(&detail.root_dir, scan_niceness).await {
-        Ok(scan) => malware_scan_outcome(scan, now, errors),
-        // clamscan exited ≥ 2 without a single detection: part of the tree
-        // could not be read, so this pass proves nothing. "Couldn't check"
-        // — we never build a pass on top of a partial walk.
-        Err(e) => {
-            errors.push(format!("malware scan failed: {e}"));
-            (false, Vec::new(), 0, now)
+    let (_, hits, at, _) = carried_malware_verdict(prior);
+    (false, hits, at, failed_at)
+}
+
+impl<A: AdapterPort + 'static> HostingService<A> {
+    /// The ClamAV half of an integrity scan, outside the node's scan lock, with
+    /// the guards that keep a signature sweep from hurting the node it protects:
+    ///
+    ///   * **one `clamscan` per node at a time.** It reads an entire docroot, so
+    ///     two at once turn a shared host's IO into a queue for every site on
+    ///     it. A pass that finds the gate busy carries the previous verdict
+    ///     forward instead of waiting.
+    ///   * **one pass per site per day**, however often its files are compared.
+    ///   * **a time limit** in the adapter: the process is killed, and that's a
+    ///     failed pass.
+    ///
+    /// Returns `(available, hits, produced_at, failed_at)`, where `produced_at`
+    /// is when those hits were actually observed (0 = never).
+    pub(super) async fn integrity_malware_pass(
+        &self,
+        detail: &HostingDetail,
+        now: i64,
+        prior: Option<&StoredIntegrityScan>,
+        errors: &mut Vec<String>,
+    ) -> (bool, Vec<hyperion_types::WpMalwareHit>, i64, i64) {
+        let (installed, db_present) = self.adapters.clamav_facts().await;
+        if let Some(done) = malware_pass_precheck(installed, db_present, now, prior, errors) {
+            return done;
+        }
+        let Ok(_gate) = self.site_scan.clamav.try_lock() else {
+            errors
+                .push("malware scan skipped: another scan is already running on this node".into());
+            return carried_malware_verdict(prior);
+        };
+        match self
+            .adapters
+            .clamav_scan(&detail.root_dir, self.malware_scan_niceness())
+            .await
+        {
+            Ok(scan) if scan.available => malware_scan_outcome(scan, now, errors),
+            // The scanner went away between the check and the pass.
+            Ok(_) => malware_pass_did_not_run(prior, 0),
+            // clamscan exited ≥ 2 without a single detection, or ran out of time:
+            // part of the tree could not be read, so this pass proves nothing.
+            // "Couldn't check": we never build a pass on top of a partial walk.
+            // Why goes to the log only, shortened and escaped: clamscan's words
+            // name tenant files, and the record reaches customers.
+            Err(e) => {
+                let mut why = e.to_string();
+                clip(&mut why, CLAMAV_LOG_BYTES);
+                tracing::warn!(domain = %detail.domain, why = ?why, "malware scan failed");
+                errors.push("malware scan failed; it is tried again later".into());
+                malware_pass_did_not_run(prior, now)
+            }
         }
     }
 }
@@ -451,6 +510,33 @@ pub(super) fn integrity_finding_keys(
         keys.insert(format!("malware:{}:{}", hit.path, hit.signature));
     }
     keys
+}
+
+/// How much of a failed pass's message goes to the log.
+const CLAMAV_LOG_BYTES: usize = 2048;
+
+/// A hosting that is never scanned, and why, or `Err` for one that can't be right
+/// now. A reverse proxy or a redirect has no files of its own.
+pub(super) fn scan_refusal(
+    detail: &HostingDetail,
+) -> Result<Option<hyperion_types::WpIntegrityScanResult>, RpcError> {
+    if detail.state != HostingState::Active {
+        return Err(RpcError::Conflict {
+            message: "hosting must be active to scan".into(),
+        });
+    }
+    if !kind_has_files(&detail.kind) {
+        // Not stored: these have no place on the integrity dashboard.
+        return Ok(Some(hyperion_types::WpIntegrityScanResult {
+            error: Some(SITE_SCAN_NO_FILES.to_string()),
+            scanned_at: now_secs(),
+            // A node fact, true or not for this site: left at false the
+            // card would send the operator to install ClamAV again.
+            clamav_installed: integrity::clamav_available(),
+            ..Default::default()
+        }));
+    }
+    Ok(None)
 }
 
 /// How much the malware sweep should yield to everything else, from

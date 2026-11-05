@@ -139,7 +139,6 @@ pub fn job_kind_label(kind: &str) -> String {
         "snapshot_now" => "Take snapshot",
         "snapshot_delete" => "Delete snapshot",
         "site_check" => "Site check",
-        "integrity_scan" => "Integrity scan",
         "gitsync_deploy" => "Git deploy",
         "cwv_measure" => "Measure Core Web Vitals",
         "normalize_www" => "Normalize www redirect",

@@ -453,9 +453,8 @@ pub struct WpIntegrityScanResult {
     /// a WordPress.org lookup that failed.
     #[serde(default)]
     pub wp_cli_ok: bool,
-    /// Plugins wp-cli actually compared against published checksums
-    /// (excludes `plugins_unknown`) — the denominator behind "verified
-    /// N of M plugins".
+    /// Plugins actually compared against published checksums (excludes
+    /// `plugins_unknown`) — the denominator behind "verified N of M plugins".
     #[serde(default)]
     pub plugins_checked: i64,
     /// Every plugin installed, checked or not.
@@ -507,11 +506,21 @@ impl WpIntegrityScanResult {
         self.core_issue_count() + self.plugin_issue_count() + self.malware.len()
     }
 
-    /// True only when BOTH signals ran and both came back empty. A scan
-    /// where wp-cli failed or ClamAV is absent is "unknown", never clean —
-    /// the UI must not print a green tick for it.
+    /// The native scan ran but couldn't look at all of the site: it stopped, hit
+    /// a limit, or something in the tree couldn't be read.
+    pub fn scan_partial(&self) -> bool {
+        self.native_scan_ran && !self.coverage.partial_reasons.is_empty()
+    }
+
+    /// True only when BOTH signals ran over the whole site and both came back
+    /// empty. A scan where upstream couldn't be compared, ClamAV is absent or the
+    /// native scan was partial is "unknown", never clean — the UI must not print
+    /// a green tick for it.
     pub fn is_clean(&self) -> bool {
-        self.wp_cli_ok && self.clamav_available && self.total_findings() == 0
+        self.wp_cli_ok
+            && self.clamav_available
+            && !self.scan_partial()
+            && self.total_findings() == 0
     }
 }
 
@@ -652,6 +661,25 @@ pub struct WpThemeActionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A partial scan isn't clean, and a record from before the native scan
+    /// keeps the meaning it had.
+    #[test]
+    fn is_clean_needs_a_scan_that_covered_the_site() {
+        let mut r = WpIntegrityScanResult {
+            wp_cli_ok: true,
+            clamav_available: true,
+            native_scan_ran: true,
+            ..Default::default()
+        };
+        assert!(r.is_clean());
+        r.coverage.partial_reasons = vec!["stopped early".into()];
+        assert!(r.scan_partial());
+        assert!(!r.is_clean());
+        r.native_scan_ran = false;
+        assert!(!r.scan_partial());
+        assert!(r.is_clean(), "old records keep their old meaning");
+    }
 
     #[test]
     fn request_defaults_apply_when_optional_fields_absent() {

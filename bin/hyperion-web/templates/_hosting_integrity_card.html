@@ -1,7 +1,7 @@
 {# File integrity & malware — one row of the WordPress tab's Updates &
    integrity group, lazily swapped in via hx-get="/hostings/:sel/integrity-panel"
    and re-rendered in place by "Scan now" (hx-target="#integrity-card"). Opening
-   the tab only READS the last stored result; "Scan now" starts a background job
+   the tab only READS the last stored result; "Scan now" asks the node for a scan
    and the card then polls (only while queued) until a newer result is stored. The
    tamper-detection sibling of the updates row: that one answers "is anything
    outdated?", this one answers "has anything been changed?".
@@ -30,6 +30,7 @@
       {% else if scan.scanned_at == 0 && scan.error.is_none() %}Not scanned yet — nothing was verified, so this is not a clean result
       {% else if !scan.wp_cli_ok %}Couldn't check — nothing was verified, so this is not a clean result
       {% else if scan.is_clean() %}Clean — files match WordPress.org, no malware found
+      {% else if scan.scan_partial() %}Scan didn't finish — this isn't a clean result
       {% else %}Files verified — malware not scanned{% endif %}
       {% if scan.scanned_at != 0 %}· {{ crate::handlers::stats::fmt_ago(scan.scanned_at) }}{% endif %}
       {% if scan.scan_queued %}· <span class="tone-warn">scan queued</span>{% endif %}
@@ -38,8 +39,8 @@
       {% if scan.scan_queued %}<span class="text-soft small"><span class="spinner-inline"></span> scanning in the background</span>{% endif %}
       <span id="integrity-spinner" class="htmx-indicator text-soft small"><span class="spinner-inline"></span> queuing…</span>
       {# A POST, not a re-GET: this re-reads every file on disk and can walk
-         the whole docroot with clamscan. It is an action, not a refresh. It
-         starts a background job, so the answer comes back at once. #}
+         the whole docroot with clamscan. It is an action, not a refresh. The
+         node only notes the request, so the answer comes back at once. #}
       <form hx-post="/hostings/integrity/scan" hx-target="#integrity-card" hx-swap="outerHTML"
             hx-indicator="#integrity-spinner">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -71,6 +72,11 @@
       checked. Usually a broken WordPress install, a missing wp-cli, or a
       blocked outbound lookup.{% if let Some(e) = scan.error %} Why: {{ e }}{% endif %}
     </p>
+    {% endif %}
+
+    {# Not the reasons themselves: they name files a tenant chose. #}
+    {% if scan.scan_partial() %}
+    <p class="chk-note">The last scan didn't finish: part of the site wasn't looked at, so this isn't a clean result.</p>
     {% endif %}
 
     {% if scan.scan_queued %}
@@ -161,7 +167,7 @@
     {% endfor %}
 
     {# ── ClamAV ──────────────────────────────────────────────────────── #}
-    {% if scan.clamav_available && !scan.malware.is_empty() %}
+    {% if !scan.malware.is_empty() %}
     <h4 class="chk-sub">ClamAV detections — {{ scan.malware.len() }}</h4>
     <ul class="chk-list chk-files">
       {% for m in scan.malware %}{% if loop.index0 < 50 %}

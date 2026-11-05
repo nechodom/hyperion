@@ -196,6 +196,9 @@ pub struct SiteScanOutcome {
     /// `pause` asked to stop before the walk ended. The next run resumes.
     #[serde(default)]
     pub stopped: bool,
+    /// The walk hit its entry limit. The next run gets no further.
+    #[serde(default)]
+    pub capped: bool,
 }
 
 /// Scan one site. `pause` is called every few hundred files and during long
@@ -1788,6 +1791,7 @@ impl<'a> Scan<'a> {
             auto_accepted: self.auto_accepted,
             files_hashed: self.files_hashed,
             stopped: self.stopped,
+            capped: stats.capped,
         }
     }
 }
@@ -1920,6 +1924,7 @@ mod tests {
             reasons.iter().any(|r| r.contains("limit of 20")),
             "{reasons:?}"
         );
+        assert!(out.capped);
         assert!(out.upstream.core_missing.is_empty());
         let first_run = Baseline::load(&inp.baseline_path)
             .expect("load")

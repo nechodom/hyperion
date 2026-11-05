@@ -225,6 +225,20 @@ pub trait AdapterPort: Send + Sync {
     /// Drop cached manifests nothing has read for 90 days.
     async fn site_scan_evict_manifests(&self, _cache_dir: &std::path::Path) {}
 
+    /// Is `clamscan` installed, and does it have signatures yet?
+    async fn clamav_facts(&self) -> (bool, bool) {
+        (false, false)
+    }
+
+    /// One time-limited ClamAV pass over a docroot.
+    async fn clamav_scan(
+        &self,
+        _root: &str,
+        _niceness: i32,
+    ) -> Result<integrity::MalwareScan, AdapterError> {
+        Err(AdapterError::Other("no scanner here".into()))
+    }
+
     async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError>;
     async fn delete_user(&self, name: &str) -> Result<(), AdapterError>;
     async fn ensure_dirs(
@@ -800,9 +814,25 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// clones so the concurrent read sees the running op's writes; ephemeral,
     /// cleared when the op finishes.
     pub backup_progress: Arc<tokio::sync::Mutex<HashMap<String, Vec<hyperion_types::JobSubstep>>>>,
-    /// One site scan at a time on this node. Tokio's mutex is FIFO, which is
-    /// what lets a "Scan now" waiting on it run ahead of the rest of a sweep.
-    pub site_scan_gate: Arc<tokio::sync::Mutex<()>>,
+    /// The site scan's locks and its wake-up. Shared across clones.
+    pub site_scan: Arc<SiteScanShared>,
+}
+
+/// What every holder of a [`HostingService`] shares about the site scan.
+#[derive(Default)]
+pub struct SiteScanShared {
+    /// One scan worker at a time on this node.
+    pub(crate) node: tokio::sync::Mutex<()>,
+    /// One `clamscan` at a time on this node. It reads an entire docroot, so two
+    /// at once turn a shared host's IO into a queue for every site on it. Taken
+    /// with `try_lock`: a pass that finds it busy carries the last verdict.
+    pub(crate) clamav: tokio::sync::Mutex<()>,
+    /// Held across reading and rewriting one stored scan record, never across a
+    /// scan: a scan and a ClamAV pass each own half of that record, and can both
+    /// finish while the other runs.
+    pub(crate) record: tokio::sync::Mutex<()>,
+    /// Someone asked for a scan: the tick needn't wait out its ten minutes.
+    pub(crate) wake: tokio::sync::Notify,
 }
 
 /// Default renewal window — matches Let's Encrypt's recommended
@@ -992,7 +1022,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 hyperion_types::ServiceInstallStatus::default(),
             )),
             backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            site_scan_gate: Arc::new(tokio::sync::Mutex::new(())),
+            site_scan: Arc::default(),
         }
     }
 

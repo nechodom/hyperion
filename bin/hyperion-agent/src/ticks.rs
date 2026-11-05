@@ -60,6 +60,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_wp_base_theme(svc);
     spawn_wp_system_cron(svc);
     spawn_site_scan(svc);
+    spawn_clamav_sweep(svc);
     spawn_billing_sweep(svc);
     spawn_package_enforce(svc);
     spawn_care_reports(svc);
@@ -566,16 +567,38 @@ fn spawn_wp_system_cron(svc: &Svc) {
 }
 
 /// Native site scan: every site's files against upstream and its baseline, one
-/// site at a time in a capped worker, plus ClamAV where it exists. Admins hear
-/// about NEWLY-appeared findings. Checked every 10 minutes; `site_scan_tick`
-/// decides from each site's stored record which are due, so a restart starts
-/// nothing by itself.
+/// site at a time in a capped worker. Admins hear about NEWLY-appeared findings.
+/// `site_scan_tick` decides from each site's stored record which are due, so a
+/// restart starts nothing by itself. Every 10 minutes, or as soon as someone asks
+/// for a scan.
 fn spawn_site_scan(svc: &Svc) {
-    every(svc, 6 * MIN, 10 * MIN, |svc| async move {
-        match svc.site_scan_tick().await {
-            Ok(n) if n > 0 => tracing::warn!(flagged = n, "site scan tick"),
-            Ok(_) => tracing::debug!("site scan tick: no new findings"),
-            Err(e) => tracing::warn!(error=%e, "site scan tick failed"),
+    let svc = svc.clone();
+    tokio::spawn(async move {
+        let mut wait = Duration::from_secs(6 * MIN);
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep(wait) => {}
+                () = svc.site_scan_wait_for_request() => {}
+            }
+            wait = Duration::from_secs(10 * MIN);
+            match svc.site_scan_tick().await {
+                Ok(n) if n > 0 => tracing::warn!(flagged = n, "site scan tick"),
+                Ok(_) => tracing::debug!("site scan tick: no new findings"),
+                Err(e) => tracing::warn!(error=%e, "site scan tick failed"),
+            }
+        }
+    });
+}
+
+/// ClamAV over each scanned site's docroot, about daily per site and one at a
+/// time. Beside the site scan rather than in it: a pass can take hours, and a
+/// "Scan now" must not wait behind one.
+fn spawn_clamav_sweep(svc: &Svc) {
+    every(svc, 8 * MIN, 10 * MIN, |svc| async move {
+        match svc.site_scan_clamav_tick().await {
+            Ok(n) if n > 0 => tracing::warn!(flagged = n, "clamav sweep"),
+            Ok(_) => tracing::debug!("clamav sweep: no new hits"),
+            Err(e) => tracing::warn!(error=%e, "clamav sweep failed"),
         }
     });
 }

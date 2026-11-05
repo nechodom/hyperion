@@ -421,7 +421,7 @@ pub async fn integrity(
     }
     Ok(Some(CareIntegrity {
         scanned_at,
-        checksums_ran: r.wp_cli_ok,
+        checksums_ran: r.wp_cli_ok && !r.scan_partial(),
         malware_scan_ran: r.clamav_available,
         core_issues: r.core_issue_count() as i64,
         plugin_issues: r.plugin_issue_count() as i64,
@@ -1088,6 +1088,30 @@ mod tests {
             integrity(&pool, a.as_str(), FROM, TO).await.expect("q"),
             None
         );
+    }
+
+    /// A scan that didn't reach the whole site can't tell a customer the files
+    /// were checked.
+    #[tokio::test]
+    async fn integrity_from_a_partial_native_scan_is_not_checked() {
+        let (pool, a, _b) = fresh().await;
+        put_scan(
+            &pool,
+            a.as_str(),
+            &format!(
+                r#"{{"scanned_at":{},"result":{{"native_scan_ran":true,"wp_cli_ok":true,
+                     "clamav_available":true,
+                     "coverage":{{"partial_reasons":["stopped early"]}}}}}}"#,
+                FROM + 1
+            ),
+        )
+        .await;
+        let i = integrity(&pool, a.as_str(), FROM, TO)
+            .await
+            .expect("q")
+            .expect("scanned");
+        assert!(!i.checksums_ran);
+        assert!(!i.is_clean());
     }
 
     #[tokio::test]

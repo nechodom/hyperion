@@ -684,6 +684,13 @@ pub enum Request {
     WpIntegrityStored {
         hosting: HostingSelector,
     },
+    /// Ask for a scan and return at once, answered by `Response::WpIntegrityScan`
+    /// with the stored result and `scan_queued` set. What "Scan now" sends: the
+    /// node's next tick runs it ahead of the schedule. The blocking
+    /// `WpIntegrityScan` is `hctl`'s.
+    WpIntegrityScanRequest {
+        hosting: HostingSelector,
+    },
     /// Every hosting's last stored integrity scan on this node — drives
     /// the cluster-wide integrity dashboard.
     IntegrityFindingsList,
