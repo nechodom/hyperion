@@ -289,6 +289,60 @@ fn url_for_audit(raw: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The address as an alert shows it: without a query, a fragment or
+/// credentials, since a check's address may carry a token and an alert goes
+/// to the bell, Slack, mail and a webhook. The path stays, as the audit
+/// trail's version leaves it out only because it records less.
+pub(super) fn url_for_message(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(mut u) => {
+            u.set_query(None);
+            u.set_fragment(None);
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.to_string()
+        }
+        // Not an address we can take apart: cut at the first character that
+        // starts a query or fragment, and bound it.
+        Err(_) => truncate_chars(raw.split(['?', '#']).next().unwrap_or(""), 200),
+    }
+}
+
+/// What the generic webhook is sent for a failure or its recovery.
+pub(super) fn down_payload(
+    url: &str,
+    down: bool,
+    error: &str,
+    status: Option<i64>,
+    context: &UrlAlertContext,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": if down { "DOWN" } else { "RESOLVED" },
+        "url": url_for_message(url),
+        "resolved": !down,
+        "error": down.then_some(error),
+        "http_status": status,
+        "node_unreachable": context.node_unreachable,
+        "stack": context.stack_summary.as_deref().map(one_line).filter(|s| !s.is_empty()),
+    })
+}
+
+/// What the generic webhook is sent for a certificate warning.
+pub(super) fn cert_payload(
+    url: &str,
+    expires: i64,
+    days_left: i64,
+    expired: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "CERT",
+        "url": url_for_message(url),
+        "expires_at": expires,
+        "days_left": days_left,
+        "expired": expired,
+    })
+}
+
 fn host_of(raw: &str) -> String {
     url::Url::parse(raw)
         .ok()
@@ -574,7 +628,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         } else {
             "ops.url_check_removed"
         };
-        let args = [("url", old.url.as_str())];
+        let shown = url_for_message(&old.url);
+        let args = [("url", shown.as_str())];
         self.notify_admins(
             "info",
             &cat.render(&format!("{id}.title"), &args),
@@ -787,8 +842,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ("warn", "ops.url_cert")
         };
         let left = format!("{days_left} {}", cat.plural("unit_day", days_left));
+        let shown = url_for_message(&row.url);
         let args = [
-            ("url", row.url.as_str()),
+            ("url", shown.as_str()),
             ("left", left.as_str()),
             ("date", date.as_str()),
         ];
@@ -797,13 +853,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let kind = format!("url.cert:{}", row.id);
         self.notify_admins(severity, &title, &body, ALERT_HREF, &kind)
             .await;
-        let payload = serde_json::json!({
-            "kind": "CERT",
-            "url": row.url,
-            "expires_at": expires,
-            "days_left": days_left,
-            "expired": expired,
-        });
+        let payload = cert_payload(&row.url, expires, days_left, expired);
         let subject = format!("{title}: {}", host_of(&row.url));
         self.url_outbound(row, &subject, &body, &kind, payload)
             .await;
@@ -851,6 +901,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map(one_line)
             .filter(|e| !e.is_empty())
             .unwrap_or_else(|| "no response".to_string());
+        let shown = url_for_message(&row.url);
         let (severity, title, body) = if down {
             let mut extra = String::new();
             if context.node_unreachable {
@@ -866,7 +917,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
             let args = [
-                ("url", row.url.as_str()),
+                ("url", shown.as_str()),
                 ("error", error.as_str()),
                 ("extra", extra.as_str()),
             ];
@@ -876,7 +927,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 cat.render("ops.url_down.body", &args),
             )
         } else {
-            let args = [("url", row.url.as_str())];
+            let args = [("url", shown.as_str())];
             (
                 "info",
                 cat.render("ops.url_up.title", &args),
@@ -888,15 +939,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.notify_admins(severity, &title, &body, ALERT_HREF, &kind)
             .await;
         let status = store::last_status(&self.pool, id).await.unwrap_or(None);
-        let payload = serde_json::json!({
-            "kind": if down { "DOWN" } else { "RESOLVED" },
-            "url": row.url,
-            "resolved": !down,
-            "error": down.then_some(&error),
-            "http_status": status,
-            "node_unreachable": context.node_unreachable,
-            "stack": context.stack_summary.as_deref().map(one_line).filter(|s| !s.is_empty()),
-        });
+        let payload = down_payload(&row.url, down, &error, status, &context);
         let subject = format!("{title}: {}", host_of(&row.url));
         let channels = self
             .url_outbound(&row, &subject, &body, &kind, payload)

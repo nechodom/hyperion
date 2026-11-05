@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::service::url_monitor::{
-    cert_alert_due, cert_check_due, cert_curl_config, parse_cert_expiry, read_cert_expiry,
-    url_check_outcome,
+    cert_alert_due, cert_check_due, cert_curl_config, cert_payload, down_payload,
+    parse_cert_expiry, read_cert_expiry, url_check_outcome, url_for_message,
 };
 use hyperion_state::web_users::WebRole;
 use hyperion_types::url_monitor::{UrlAlertContext, UrlMonitorInput};
@@ -764,6 +764,87 @@ async fn list_shows_figures_and_state() {
 // ---------------------------------------------------------------------------
 // Alerts
 // ---------------------------------------------------------------------------
+
+#[test]
+fn an_alert_shows_the_address_without_query_fragment_or_credentials() {
+    assert_eq!(
+        url_for_message("https://user:pw@shop.example.test/status?token=SECRET#top"),
+        "https://shop.example.test/status"
+    );
+    assert_eq!(
+        url_for_message("https://shop.example.test/"),
+        "https://shop.example.test/"
+    );
+    assert_eq!(
+        url_for_message("https://shop.example.test:8443/a/b"),
+        "https://shop.example.test:8443/a/b"
+    );
+    // Not an address: still cut before the query.
+    assert_eq!(url_for_message("not a url?token=SECRET"), "not a url");
+}
+
+#[test]
+fn the_webhook_payloads_carry_no_query_either() {
+    let url = "https://shop.example.test/status?token=SECRET";
+    let ctx = UrlAlertContext::default();
+    let down = down_payload(url, true, "HTTP 502", Some(502), &ctx);
+    let cert = cert_payload(url, 1_800_000_000, 3, false);
+    for p in [&down, &cert] {
+        assert_eq!(p["url"], "https://shop.example.test/status", "{p}");
+        assert!(!p.to_string().contains("SECRET"), "{p}");
+    }
+    assert_eq!(down["kind"], "DOWN");
+    assert_eq!(down["error"], "HTTP 502");
+}
+
+/// The address of a check may carry a token. It stays in the check; the
+/// bell and the mail leave it out.
+#[tokio::test]
+async fn alerts_leave_the_query_out_of_the_bell_and_the_mail() {
+    let (s, pool) = url_master_sending().await;
+    let mut i = input("https://shop.example.test/status?token=SECRET-QUERY");
+    i.alert_email = Some("team@example.cz".into());
+    let id = s.url_monitor_set(i).await.expect("set");
+
+    park(&pool, id, true, Some("HTTP 502")).await;
+    s.url_monitor_alert(id, UrlAlertContext::default())
+        .await
+        .expect("alert");
+    park(&pool, id, false, None).await;
+    s.url_monitor_alert(id, UrlAlertContext::default())
+        .await
+        .expect("recovery");
+    // A certificate warning too.
+    sqlx::query("UPDATE url_monitors SET cert_expires_at = ? WHERE id = ?")
+        .bind(now_secs() + 86_400)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect("expire");
+    s.url_cert_alerts(now_secs()).await.expect("cert");
+
+    let mails = url_mails(&s).await;
+    assert_eq!(mails.len(), 3, "{mails:?}");
+    for (subject, body) in &mails {
+        assert!(
+            !format!("{subject}{body}").contains("SECRET-QUERY"),
+            "{body}"
+        );
+        assert!(body.contains("https://shop.example.test/status"), "{body}");
+    }
+    let bells = url_bells(&pool).await;
+    assert_eq!(bells.len(), 2, "one folded card per kind: {bells:?}");
+    for b in &bells {
+        assert!(!format!("{b:?}").contains("SECRET-QUERY"), "{b:?}");
+    }
+    // The check itself still has the address it probes.
+    let (stored,): (String,) = sqlx::query_as("SELECT url FROM url_monitors WHERE id = ?")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+    assert!(stored.contains("SECRET-QUERY"));
+}
 
 #[tokio::test]
 async fn alert_includes_context() {
