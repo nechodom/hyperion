@@ -30,9 +30,42 @@ pub fn datetime(ts: &i64) -> askama::Result<String> {
         .unwrap_or_else(|| "—".to_string()))
 }
 
+/// Text a tenant chose (a file name, a snippet of their code) made safe to read.
+/// Askama still escapes the result for HTML; this is for what escaping leaves:
+/// terminal escapes, line breaks that split a row, and the right-to-left marks
+/// that make a name ending in U+202E then `gpj.php` read as `php.jpg`. Each
+/// becomes U+FFFD.
+pub fn tenant_text<T: std::fmt::Display>(s: T) -> askama::Result<String> {
+    Ok(s.to_string()
+        .chars()
+        .map(|c| {
+            let bidi = matches!(
+                c,
+                '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            );
+            if c.is_control() || bidi {
+                '\u{fffd}'
+            } else {
+                c
+            }
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tenant_text_replaces_what_escaping_leaves() {
+        assert_eq!(tenant_text("a/b.php").unwrap(), "a/b.php");
+        assert_eq!(
+            tenant_text("a\n\u{1b}[0m\u{202e}b").unwrap(),
+            "a\u{fffd}\u{fffd}[0m\u{fffd}b"
+        );
+        // Not HTML escaping: that is askama's, applied after.
+        assert_eq!(tenant_text("<b>").unwrap(), "<b>");
+    }
 
     #[test]
     fn formats_a_known_timestamp() {

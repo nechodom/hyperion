@@ -27,6 +27,13 @@ pub(super) struct IntegrityCardTpl {
 /// otherwise poll for as long as the tab stays open.
 const QUEUED_POLL_LIMIT_SECS: i64 = 2 * 3600;
 
+/// Does the overview tab carry the card? Sites with no WordPress and files to
+/// scan do: WordPress has its row on the WordPress tab, a reverse proxy has no
+/// site of its own and a redirect has nothing to scan.
+pub(super) fn integrity_on_overview(kind: &str, has_wordpress: bool) -> bool {
+    !has_wordpress && matches!(kind, "php" | "static")
+}
+
 /// A result meaning "nothing was checked", carrying why.
 ///
 /// `Default` leaves `wp_cli_ok` and `clamav_available` false, which is

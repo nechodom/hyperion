@@ -334,7 +334,7 @@ fn render_integrity(scan: hyperion_types::WpIntegrityScanResult) -> String {
 #[test]
 fn unchecked_never_renders_as_clean() {
     let html = render_integrity(integrity_not_checked("wp-cli exited 1".into()));
-    assert!(html.contains(r#"data-verdict="unchecked""#));
+    assert!(html.contains(r#"data-verdict="never""#));
     assert!(html.contains("Couldn't check"));
     assert!(html.contains("not a clean result"));
     assert!(!html.contains("Clean —"));
@@ -423,7 +423,7 @@ fn unknown_plugins_are_coverage_not_findings() {
     assert!(html.contains("elementor-pro"));
     // Still clean: unknown coverage is not a finding.
     assert!(html.contains(r#"data-verdict="clean""#));
-    assert!(!html.contains("don't match what should be on disk"));
+    assert!(!html.contains("need attention"));
 }
 
 /// Findings outrank a half-failed probe: something we DID see is more
@@ -451,7 +451,7 @@ fn findings_are_listed_with_their_paths() {
         ..Default::default()
     });
     assert!(html.contains(r#"data-verdict="findings""#));
-    assert!(html.contains("4 file(s) don't match"));
+    assert!(html.contains("4 file(s) need attention"));
     assert!(html.contains("wp-includes/load.php"));
     assert!(html.contains("wp-admin/x.php"));
     assert!(html.contains("akismet.php"));
@@ -527,7 +527,7 @@ fn an_old_node_renders_as_needs_updating() {
     let html = render_integrity(integrity_not_checked(why));
     assert!(html.contains("this node needs updating to show scan results"));
     assert!(!html.contains("unknown variant"));
-    assert!(html.contains(r#"data-verdict="unchecked""#));
+    assert!(html.contains(r#"data-verdict="never""#));
     assert!(!html.contains("Clean —"));
     assert_eq!(integrity_error_text("boom"), "boom");
 }
@@ -538,7 +538,7 @@ fn never_scanned_says_not_scanned_and_only_a_queued_card_polls() {
     let html = render_integrity(Default::default());
     assert!(html.contains("Not scanned yet"));
     assert!(!html.contains("Clean —"));
-    assert!(html.contains(r#"data-verdict="unchecked""#));
+    assert!(html.contains(r#"data-verdict="never""#));
     assert!(
         !html.contains("hx-trigger=\"every 10s\""),
         "idle card must not poll"
@@ -560,6 +560,7 @@ fn never_scanned_says_not_scanned_and_only_a_queued_card_polls() {
     assert!(queued.contains(
         r#"hx-get="/hostings/example.com/integrity-panel?queued_at=1700000000" hx-trigger="every 10s""#
     ));
+    assert!(queued.contains(r#"data-verdict="running""#));
     assert!(queued.contains("scan queued"));
     assert!(queued.contains(" disabled"));
     assert!(!queued.contains("Clean —"));
@@ -594,26 +595,417 @@ fn a_card_polls_while_the_node_says_queued() {
     assert!(!poll_state(true, now - 2 * 3600, now).0);
 }
 
-/// A scan that stopped early or hit a limit isn't clean, and the card says why in
-/// its own words: the reasons name tenant files.
-#[test]
-fn a_partial_scan_says_it_did_not_finish() {
-    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
-        wp_cli_ok: true,
+fn rule_hit(rel: &str) -> hyperion_types::SiteFileFinding {
+    hyperion_types::SiteFileFinding {
+        rel: rel.into(),
+        kind: hyperion_types::FindingKind::RuleHit,
+        severity: "high".into(),
+        rule_id: Some("php.eval-base64".into()),
+        line: 3,
+        snippet: "eval(base64_decode($x))".into(),
+        ..Default::default()
+    }
+}
+
+/// A finished native scan of a WordPress site that found nothing.
+fn native_scan() -> hyperion_types::WpIntegrityScanResult {
+    hyperion_types::WpIntegrityScanResult {
         core_ok: true,
-        clamav_available: true,
+        wp_cli_ok: true,
         native_scan_ran: true,
-        scanned_at: 1,
+        scanned_at: 1_794_055_205,
+        plugins_checked: 3,
+        plugins_total: 4,
         coverage: hyperion_types::ScanCoverage {
-            partial_reasons: vec!["symlinked directories not looked at: <evil>".into()],
+            plugins_verified: 3,
+            plugins_total: 4,
+            themes_verified: 1,
+            themes_total: 2,
+            files_watched: 1200,
+            watching_since: 1_794_055_205,
+            upstream_ran: true,
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+#[test]
+fn verdict_findings_lists_the_rule_hit_and_says_attention() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        findings: vec![rule_hit("wp-content/uploads/x.php")],
+        ..native_scan()
     });
+    assert!(html.contains(r#"data-verdict="findings""#));
+    assert!(html.contains("1 file(s) need attention"));
+    assert!(html.contains("wp-content/uploads/x.php"));
+    assert!(html.contains("php.eval-base64"));
+    assert!(html.contains("line 3"));
+    assert!(html.contains("chk-dot err"));
     assert!(!html.contains("Clean —"));
+}
+
+#[test]
+fn verdict_review_counts_changes_and_is_not_clean() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        review: vec![hyperion_types::SiteFileFinding {
+            rel: "wp-content/themes/t/new.js".into(),
+            ..Default::default()
+        }],
+        ..native_scan()
+    });
+    assert!(html.contains(r#"data-verdict="review""#));
+    assert!(html.contains("1 change(s) to review"));
+    assert!(html.contains("wp-content/themes/t/new.js"));
+    assert!(html.contains("chk-dot warn"));
+    assert!(!html.contains("Clean —"));
+}
+
+/// ClamAV isn't needed for a clean native scan, and the coverage line says what
+/// it did and didn't cover.
+#[test]
+fn verdict_clean_without_clamav() {
+    let html = render_integrity(native_scan());
+    assert!(html.contains(r#"data-verdict="clean""#));
+    assert!(html.contains("Clean —"));
+    assert!(html.contains("chk-dot ok"));
+}
+
+#[test]
+fn verdict_partial_when_the_scan_did_not_cover_the_site() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        coverage: hyperion_types::ScanCoverage {
+            partial_reasons: vec!["stopped after 500000 files".into()],
+            ..native_scan().coverage
+        },
+        ..native_scan()
+    });
+    assert!(html.contains(r#"data-verdict="partial""#));
+    assert!(html.contains("Partly checked"));
+    assert!(!html.contains("Clean —"));
+}
+
+/// A scan in flight shows its spinner next to a standing finding instead of
+/// hiding it, and stands in for the verdict when there is nothing else to say.
+#[test]
+fn verdict_running_keeps_standing_findings_visible() {
+    let idle = render_integrity(hyperion_types::WpIntegrityScanResult {
+        scan_queued: true,
+        ..native_scan()
+    });
+    assert!(idle.contains(r#"data-verdict="running""#));
+    assert!(idle.contains("No verdict until the scan finishes"));
+    assert!(idle.contains("scanning in the background"));
+    assert!(!idle.contains("Clean —"));
+
+    let busy = render_integrity(hyperion_types::WpIntegrityScanResult {
+        scan_queued: true,
+        findings: vec![rule_hit("a/shell.php")],
+        ..native_scan()
+    });
+    assert!(busy.contains(r#"data-verdict="findings""#));
+    assert!(busy.contains("a/shell.php"));
+    assert!(busy.contains("scanning in the background"));
+}
+
+#[test]
+fn verdict_never_says_nothing_was_verified() {
+    let html = render_integrity(Default::default());
+    assert!(html.contains(r#"data-verdict="never""#));
+    assert!(html.contains("Not scanned yet"));
+    assert!(html.contains("nothing was verified"));
+}
+
+#[test]
+fn coverage_line_names_database_not_scanned() {
+    let html = render_integrity(native_scan());
+    assert!(html.contains("The database is not scanned"));
+    // …on a state with no scan too.
+    assert!(render_integrity(Default::default()).contains("The database is not scanned"));
+}
+
+#[test]
+fn coverage_line_counts_themes() {
+    let html = render_integrity(native_scan());
+    assert!(html.contains("3 of 4 plugin(s)"));
+    assert!(html.contains("1 of 2 theme(s)"));
+    assert!(html.contains("against wordpress.org"));
+    assert!(html.contains("1200 files watched"));
+}
+
+#[test]
+fn watching_since_shown_after_first_scan() {
+    let html = render_integrity(native_scan());
+    assert!(html.contains("since 2026-11-07"), "{html}");
+    // Earlier changes can't be proven, and the card says why that date is there.
+    let fresh = render_integrity(hyperion_types::WpIntegrityScanResult {
+        coverage: hyperion_types::ScanCoverage {
+            watching_since: 0,
+            ..native_scan().coverage
+        },
+        ..native_scan()
+    });
+    assert!(!fresh.contains("watched since"));
+}
+
+#[test]
+fn pilot_label_shown_while_report_only() {
+    let pilot = render_integrity(hyperion_types::WpIntegrityScanResult {
+        report_only: true,
+        ..native_scan()
+    });
+    assert!(pilot.contains("running in test mode"));
+    assert!(pilot.contains("don't send alerts yet"));
+    let live = render_integrity(native_scan());
+    assert!(!live.contains("test mode"));
+    // The pilot changes no verdict: the panel shows what the scan found.
+    let hit = render_integrity(hyperion_types::WpIntegrityScanResult {
+        report_only: true,
+        findings: vec![rule_hit("x.php")],
+        ..native_scan()
+    });
+    assert!(hit.contains(r#"data-verdict="findings""#));
+}
+
+#[test]
+fn partial_names_what_did_not_run() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        coverage: hyperion_types::ScanCoverage {
+            partial_reasons: vec![
+                "symlinked directories not looked at: <evil>".into(),
+                "stopped after 500000 files".into(),
+            ],
+            ..native_scan().coverage
+        },
+        ..native_scan()
+    });
+    assert!(html.contains("didn't finish"));
+    assert!(html.contains("stopped after 500000 files"));
+    assert!(html.contains("symlinked directories not looked at: &lt;evil&gt;"));
+    assert!(!html.contains("<evil>"));
     assert!(!html.contains("malware not scanned"));
-    assert!(html.contains("didn&#x27;t finish") || html.contains("didn't finish"));
-    assert!(!html.contains("evil"));
+
+    // WordPress, and the comparison could not run: no wp-cli, no blame on the site.
+    let offline = render_integrity(hyperion_types::WpIntegrityScanResult {
+        wp_cli_ok: false,
+        coverage: hyperion_types::ScanCoverage {
+            upstream_ran: false,
+            ..native_scan().coverage
+        },
+        ..native_scan()
+    });
+    assert!(offline.contains(r#"data-verdict="partial""#));
+    assert!(offline
+        .contains("wordpress.org could not be reached or the WordPress version could not be read"));
+    assert!(!offline.contains("wp-cli"));
+    assert!(!offline.contains("Clean —"));
+}
+
+/// Everything a tenant controls reaches the page through askama's escaping, with
+/// control characters made visible.
+#[test]
+fn snippet_is_escaped() {
+    let nasty = hyperion_types::SiteFileFinding {
+        rel: "up/<script>alert(1)</script>\u{1b}[31m\nx\u{202e}.php".into(),
+        snippet: "<script>alert('s')</script>\u{7}".into(),
+        rule_id: Some("<b>rule</b>".into()),
+        domains: vec!["<i>evil.example</i>".into()],
+        ..rule_hit("x")
+    };
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        findings: vec![nasty.clone()],
+        review: vec![nasty],
+        coverage: hyperion_types::ScanCoverage {
+            partial_reasons: vec!["<script>reason</script>".into()],
+            ..native_scan().coverage
+        },
+        malware: vec![hyperion_types::WpMalwareHit {
+            path: "/h/<script>m</script>".into(),
+            signature: "<script>sig</script>".into(),
+        }],
+        ..native_scan()
+    });
+    assert!(!html.contains("<script"), "{html}");
+    assert!(!html.contains("<b>rule"));
+    assert!(!html.contains("<i>evil"));
+    assert!(html.contains("&lt;script&gt;alert(1)"));
+    for bad in ['\u{1b}', '\u{7}', '\u{202e}'] {
+        assert!(!html.contains(bad), "{bad:?} leaked");
+    }
+    // A newline in a path doesn't break the line it sits on.
+    assert!(!html.contains("\nx"));
+}
+
+#[test]
+fn lists_are_capped_at_fifty_with_a_count() {
+    let many: Vec<_> = (0..60).map(|i| rule_hit(&format!("f/{i}.php"))).collect();
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        findings: many.clone(),
+        review: many,
+        ..native_scan()
+    });
+    assert!(html.contains("f/49.php"));
+    assert!(!html.contains("f/50.php"));
+    assert!(html.contains("Showing 50 of 60"));
+}
+
+/// A whole plugin differing is one fact, worded as such.
+#[test]
+fn component_level_finding_says_the_plugin_no_longer_matches() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        plugins_failed: vec![hyperion_types::WpIntegrityPluginResult {
+            slug: "akismet".into(),
+            issues: vec![hyperion_types::WpIntegrityFileIssue {
+                path: ".".into(),
+                message: "9 of 10 files differ from wordpress.org, 0 added".into(),
+            }],
+        }],
+        findings: vec![hyperion_types::SiteFileFinding {
+            rel: "wp-content/plugins/akismet".into(),
+            kind: hyperion_types::FindingKind::UpstreamModified,
+            severity: "high".into(),
+            component: Some("akismet".into()),
+            source_label: Some("wordpress.org".into()),
+            snippet: "9 of 10 files differ from wordpress.org, 0 added".into(),
+            ..Default::default()
+        }],
+        core_modified: vec![".".into()],
+        ..native_scan()
+    });
+    assert!(html.contains("this plugin no longer matches wordpress.org"));
+    assert!(html.contains("most of WordPress core no longer matches"));
+    // The same fact isn't listed a second time under the findings.
+    assert!(!html.contains("<code>wp-content/plugins/akismet</code>"));
+    // Core's "." and the plugin's "." are one fact each.
+    assert!(html.contains("2 file(s) need attention"));
+}
+
+/// A vendor package is not wordpress.org, and the card doesn't claim it is.
+#[test]
+fn component_finding_names_its_own_reference() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        plugins_failed: vec![hyperion_types::WpIntegrityPluginResult {
+            slug: "elementor-pro".into(),
+            issues: vec![hyperion_types::WpIntegrityFileIssue {
+                path: ".".into(),
+                message: "x".into(),
+            }],
+        }],
+        findings: vec![hyperion_types::SiteFileFinding {
+            rel: "wp-content/plugins/elementor-pro".into(),
+            kind: hyperion_types::FindingKind::UpstreamModified,
+            component: Some("elementor-pro".into()),
+            source_label: Some("vendor package".into()),
+            ..Default::default()
+        }],
+        ..native_scan()
+    });
+    assert!(html.contains("this plugin no longer matches vendor package"));
+}
+
+#[test]
+fn theme_failures_are_listed() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        themes_failed: vec![hyperion_types::WpIntegrityPluginResult {
+            slug: "twentytwentyfour".into(),
+            issues: vec![hyperion_types::WpIntegrityFileIssue {
+                path: "functions.php".into(),
+                message: "Checksum does not match".into(),
+            }],
+        }],
+        ..native_scan()
+    });
+    assert!(html.contains(r#"data-verdict="findings""#));
+    assert!(html.contains("Theme <code>twentytwentyfour</code>"));
+    assert!(html.contains("functions.php"));
+    assert!(html.contains("1 file(s) need attention"));
+    // File actions come later: no button on a theme yet.
+    assert!(!html.contains("reinstall-theme"));
+}
+
+/// A site with no WordPress has no release to compare with, which is not a
+/// failure, and its card never talks about wordpress.org.
+fn non_wordpress_scan() -> hyperion_types::WpIntegrityScanResult {
+    hyperion_types::WpIntegrityScanResult {
+        native_scan_ran: true,
+        scanned_at: 1_794_055_205,
+        coverage: hyperion_types::ScanCoverage {
+            no_upstream: true,
+            files_watched: 80,
+            watching_since: 1_794_055_205,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn non_wordpress_card_never_mentions_wordpress() {
+    for scan in [
+        non_wordpress_scan(),
+        hyperion_types::WpIntegrityScanResult {
+            findings: vec![rule_hit("index.php")],
+            ..non_wordpress_scan()
+        },
+        hyperion_types::WpIntegrityScanResult {
+            review: vec![hyperion_types::SiteFileFinding {
+                rel: "a.js".into(),
+                ..Default::default()
+            }],
+            ..non_wordpress_scan()
+        },
+        hyperion_types::WpIntegrityScanResult {
+            coverage: hyperion_types::ScanCoverage {
+                partial_reasons: vec!["stopped early".into()],
+                ..non_wordpress_scan().coverage
+            },
+            ..non_wordpress_scan()
+        },
+    ] {
+        let html = render_integrity(scan);
+        assert!(!html.to_lowercase().contains("wordpress"), "{html}");
+        assert!(!html.contains("plugin(s)"));
+        assert!(!html.contains("theme(s)"));
+    }
+    let clean = render_integrity(non_wordpress_scan());
+    assert!(clean.contains(r#"data-verdict="clean""#));
+    assert!(clean.contains("80 files watched"));
+    // ClamAV doesn't run on such a site; the card doesn't call it missing.
+    assert!(clean.contains("ClamAV doesn't run on this kind of site"));
+    assert!(!clean.contains("isn't installed"));
+}
+
+/// Hostings other than WordPress ones get the card on the overview tab: PHP and
+/// static sites that have no WordPress, never a reverse proxy.
+#[test]
+fn card_on_overview_tab_for_php_kind_without_wordpress() {
+    assert!(integrity_on_overview("php", false));
+    assert!(integrity_on_overview("static", false));
+    // WordPress keeps its row on the WordPress tab, and one card per site.
+    assert!(!integrity_on_overview("php", true));
+    let page = include_str!("../../../templates/hostings_detail.html");
+    let overview = page
+        .split(r#"id="tab-overview""#)
+        .nth(1)
+        .and_then(|r| r.split(r#"id="tab-ssl""#).next())
+        .expect("overview tab");
+    assert!(overview.contains("self.integrity_on_overview()"));
+    assert!(overview.contains(r#"hx-get="/hostings/{{ detail.id.as_str() }}/integrity-panel""#));
+    assert_eq!(overview.matches("integrity-panel").count(), 1);
+    // The WordPress tab still has its own row, under a WordPress site only.
+    let wp = page
+        .split(r#"id="tab-wordpress""#)
+        .nth(1)
+        .and_then(|r| r.split(r#"id="tab-settings""#).next())
+        .expect("wordpress tab");
+    assert!(wp.contains("integrity-panel"));
+}
+
+#[test]
+fn no_card_for_reverse_proxy() {
+    assert!(!integrity_on_overview("reverse_proxy", false));
+    assert!(!integrity_on_overview("reverse_proxy", true));
+    assert!(!integrity_on_overview("redirect", false));
 }
 
 /// Hits from an earlier pass still show when the latest pass couldn't run.

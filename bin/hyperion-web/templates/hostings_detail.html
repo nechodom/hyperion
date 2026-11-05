@@ -826,6 +826,20 @@
   </div>
 </div>
 
+{# File integrity for a site with no WordPress row: the same lazy card the
+   WordPress tab carries, so a PHP or static site is scanned and shown too.
+   Never both, so the id is unique. #}
+{% if self.integrity_on_overview() %}
+<div class="group wp-checks">
+  <div class="ghead">File integrity</div>
+  <div class="chk-row" id="integrity-card"
+       hx-get="/hostings/{{ detail.id.as_str() }}/integrity-panel"
+       hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Integrity &amp; malware</h3><span class="chk-sum"><span class="spinner-inline"></span> Reading the last scan…</span></div>
+  </div>
+</div>
+{% endif %}
+
 {# Security at a glance — the controls are spread across tabs (WAF on
    Settings, bans on Settings, updates on WordPress); this card is the single
    entry point. #}

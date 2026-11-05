@@ -101,11 +101,11 @@ pub use stats::{
 };
 pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};
 pub use wp::{
-    FindingKind, HostingIntegritySummary, HostingVulnSummary, ScanCoverage, SiteFileFinding,
-    WpCoreUpdate, WpFatalReport, WpInstallRequest, WpInstallStatus, WpIntegrityFileIssue,
-    WpIntegrityPluginResult, WpIntegrityScanResult, WpMalwareHit, WpPlugin, WpPluginAction,
-    WpPluginActionResult, WpPluginListResponse, WpTheme, WpThemeAction, WpThemeActionResult,
-    WpThemeListResponse, WpVulnFinding, WpVulnScanResult,
+    FindingKind, HostingIntegritySummary, HostingVulnSummary, ScanCoverage, ScanVerdict,
+    SiteFileFinding, WpCoreUpdate, WpFatalReport, WpInstallRequest, WpInstallStatus,
+    WpIntegrityFileIssue, WpIntegrityPluginResult, WpIntegrityScanResult, WpMalwareHit, WpPlugin,
+    WpPluginAction, WpPluginActionResult, WpPluginListResponse, WpTheme, WpThemeAction,
+    WpThemeActionResult, WpThemeListResponse, WpVulnFinding, WpVulnScanResult,
 };
 
 /// Leads the DNS-01 "TXT not on the authoritative nameservers yet"

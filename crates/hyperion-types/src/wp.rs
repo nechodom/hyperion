@@ -349,6 +349,86 @@ pub struct SiteFileFinding {
     pub source_label: Option<String>,
 }
 
+impl FindingKind {
+    /// What the card says about a file of this kind.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CoreModified => "core file differs from the release",
+            Self::CoreUnexpected => "not part of the release",
+            Self::CoreMissing => "official core file is missing",
+            Self::UpstreamModified => "differs from its reference copy",
+            Self::UpstreamAdded => "not in the reference copy",
+            Self::UpstreamMissing => "missing from the reference copy",
+            Self::RuleHit => "matches a malware rule",
+            Self::TooLargeToInspect => "too large to inspect",
+            Self::BaselineChange => "new or changed since the first scan",
+        }
+    }
+}
+
+impl SiteFileFinding {
+    /// A failed comparison with core, a plugin or a theme: the card lists these
+    /// under that component, where its fix is.
+    pub fn is_comparison(&self) -> bool {
+        matches!(
+            self.kind,
+            FindingKind::CoreModified
+                | FindingKind::CoreUnexpected
+                | FindingKind::CoreMissing
+                | FindingKind::UpstreamModified
+                | FindingKind::UpstreamAdded
+                | FindingKind::UpstreamMissing
+        )
+    }
+
+    /// "plugin" or "theme" when the finding stands for that whole folder rather
+    /// than a file in it. Core's whole-component finding is `.`, which the card
+    /// words on its own.
+    pub fn component_wide(&self) -> Option<&'static str> {
+        let slug = self.component.as_deref()?;
+        let mut parts = self.rel.rsplit('/');
+        if !self.is_comparison() || parts.next() != Some(slug) {
+            return None;
+        }
+        match parts.next() {
+            Some("plugins" | "mu-plugins") => Some("plugin"),
+            Some("themes") => Some("theme"),
+            _ => None,
+        }
+    }
+}
+
+/// What the card says about a hosting, in the order the answers win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanVerdict {
+    /// Something needs a look: a failed comparison, a rule hit, a ClamAV hit.
+    Findings,
+    /// Only changes to review.
+    Review,
+    /// The scan ran, covered the site and found nothing.
+    Clean,
+    /// A named part didn't run, so nothing here is a clean result.
+    Partial,
+    /// A scan is queued and nothing standing outranks it.
+    Running,
+    /// No scan has finished.
+    Never,
+}
+
+impl ScanVerdict {
+    /// Stable name for markup and tests.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Findings => "findings",
+            Self::Review => "review",
+            Self::Clean => "clean",
+            Self::Partial => "partial",
+            Self::Running => "running",
+            Self::Never => "never",
+        }
+    }
+}
+
 /// What the native scan could speak for. A verdict states this rather than
 /// implying everything was looked at.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -504,6 +584,68 @@ impl WpIntegrityScanResult {
     /// Everything an operator would have to look at on this hosting.
     pub fn total_findings(&self) -> usize {
         self.core_issue_count() + self.plugin_issue_count() + self.malware.len()
+    }
+
+    /// What a plugin or theme was compared with: its finding's label, else
+    /// wordpress.org, the only reference a record without one can have meant.
+    pub fn reference_of(&self, slug: &str) -> &str {
+        self.findings
+            .iter()
+            .chain(&self.review)
+            .filter(|f| f.component.as_deref() == Some(slug))
+            .find_map(|f| f.source_label.as_deref())
+            .unwrap_or("wordpress.org")
+    }
+
+    /// Theme files flagged, across all failed themes.
+    pub fn theme_issue_count(&self) -> usize {
+        self.themes_failed.iter().map(|t| t.issues.len()).sum()
+    }
+
+    /// The findings the card lists on their own. Failed comparisons are left out:
+    /// the core, plugin and theme sections already show them, with the fix. One
+    /// that also hit a rule stays, because those sections don't carry the rule.
+    pub fn listed_findings(&self) -> impl Iterator<Item = &SiteFileFinding> {
+        self.findings
+            .iter()
+            .filter(|f| !f.is_comparison() || f.rule_id.is_some())
+    }
+
+    /// Everything the card puts under "needs attention".
+    pub fn shown_finding_count(&self) -> usize {
+        self.total_findings() + self.theme_issue_count() + self.listed_findings().count()
+    }
+
+    /// What the card says. Standing findings and changes to review come first and
+    /// stay in front of a queued scan, which only adds its spinner; a queued scan
+    /// otherwise stands in for the last verdict. A record from before the native
+    /// scan keeps its old meanings. `report_only` doesn't matter here: the panel
+    /// shows the pilot's results, it is the alerts and reports that wait.
+    pub fn verdict(&self) -> ScanVerdict {
+        if self.shown_finding_count() > 0 {
+            return ScanVerdict::Findings;
+        }
+        if !self.review.is_empty() {
+            return ScanVerdict::Review;
+        }
+        if self.scan_queued {
+            return ScanVerdict::Running;
+        }
+        if self.scanned_at == 0 {
+            return ScanVerdict::Never;
+        }
+        if !self.native_scan_ran {
+            return if self.is_clean() {
+                ScanVerdict::Clean
+            } else {
+                ScanVerdict::Partial
+            };
+        }
+        if self.scan_partial() || !(self.coverage.upstream_ran || self.coverage.no_upstream) {
+            ScanVerdict::Partial
+        } else {
+            ScanVerdict::Clean
+        }
     }
 
     /// The native scan ran but couldn't look at all of the site: it stopped, hit
@@ -679,6 +821,153 @@ mod tests {
         r.native_scan_ran = false;
         assert!(!r.scan_partial());
         assert!(r.is_clean(), "old records keep their old meaning");
+    }
+
+    fn finding(kind: FindingKind) -> SiteFileFinding {
+        SiteFileFinding {
+            rel: "wp-content/x.php".into(),
+            kind,
+            ..Default::default()
+        }
+    }
+
+    fn native() -> WpIntegrityScanResult {
+        WpIntegrityScanResult {
+            native_scan_ran: true,
+            scanned_at: 100,
+            coverage: ScanCoverage {
+                upstream_ran: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// One state per answer the card can give, and the order they win in.
+    #[test]
+    fn verdict_names_what_the_scan_found() {
+        use ScanVerdict::*;
+        assert_eq!(WpIntegrityScanResult::default().verdict(), Never);
+        assert_eq!(native().verdict(), Clean);
+
+        let mut r = native();
+        r.review = vec![finding(FindingKind::BaselineChange)];
+        assert_eq!(r.verdict(), Review);
+
+        // Findings outrank a review bucket.
+        r.findings = vec![finding(FindingKind::RuleHit)];
+        assert_eq!(r.verdict(), Findings);
+
+        let mut r = native();
+        r.malware = vec![WpMalwareHit::default()];
+        assert_eq!(r.verdict(), Findings);
+
+        let mut r = native();
+        r.themes_failed = vec![WpIntegrityPluginResult {
+            slug: "t".into(),
+            issues: vec![WpIntegrityFileIssue::default()],
+        }];
+        assert_eq!(r.verdict(), Findings);
+
+        let mut r = native();
+        r.coverage.partial_reasons = vec!["stopped early".into()];
+        assert_eq!(r.verdict(), Partial);
+
+        // WordPress, and wordpress.org could not be reached: a part didn't run.
+        let mut r = native();
+        r.coverage.upstream_ran = false;
+        assert_eq!(r.verdict(), Partial);
+        // Not WordPress: nothing to compare with is not a failure.
+        r.coverage.no_upstream = true;
+        assert_eq!(r.verdict(), Clean);
+    }
+
+    /// Standing findings stay in front while a scan is queued; anything weaker
+    /// gives way to the spinner. ClamAV is not needed for a clean native scan.
+    #[test]
+    fn running_never_hides_standing_findings() {
+        use ScanVerdict::*;
+        let mut r = native();
+        r.scan_queued = true;
+        assert_eq!(r.verdict(), Running);
+        r.review = vec![finding(FindingKind::BaselineChange)];
+        assert_eq!(r.verdict(), Review);
+        r.findings = vec![finding(FindingKind::RuleHit)];
+        assert_eq!(r.verdict(), Findings);
+        let first = WpIntegrityScanResult {
+            scan_queued: true,
+            ..Default::default()
+        };
+        assert_eq!(first.verdict(), Running);
+        let mut r = native();
+        r.clamav_available = false;
+        assert_eq!(r.verdict(), Clean);
+    }
+
+    /// A record from before the native scan keeps the meanings it had, and
+    /// `report_only` changes nothing about what the card says.
+    #[test]
+    fn verdict_of_an_old_record_keeps_its_meaning() {
+        use ScanVerdict::*;
+        let old = WpIntegrityScanResult {
+            wp_cli_ok: true,
+            clamav_available: true,
+            scanned_at: 1,
+            ..Default::default()
+        };
+        assert_eq!(old.verdict(), Clean);
+        let no_clamav = WpIntegrityScanResult {
+            clamav_available: false,
+            ..old.clone()
+        };
+        assert_eq!(no_clamav.verdict(), Partial);
+        let no_wpcli = WpIntegrityScanResult {
+            wp_cli_ok: false,
+            ..old.clone()
+        };
+        assert_eq!(no_wpcli.verdict(), Partial);
+        let hit = WpIntegrityScanResult {
+            core_modified: vec!["wp-includes/load.php".into()],
+            ..old.clone()
+        };
+        assert_eq!(hit.verdict(), Findings);
+        let mut pilot = native();
+        pilot.report_only = true;
+        pilot.findings = vec![finding(FindingKind::RuleHit)];
+        assert_eq!(pilot.verdict(), Findings);
+    }
+
+    /// A failed comparison is listed under its core, plugin or theme section;
+    /// the findings list adds only what those sections can't say.
+    #[test]
+    fn listed_findings_skip_what_the_component_sections_show() {
+        let mut r = native();
+        r.findings = vec![
+            finding(FindingKind::CoreModified),
+            finding(FindingKind::UpstreamModified),
+            finding(FindingKind::UpstreamAdded),
+            finding(FindingKind::RuleHit),
+            SiteFileFinding {
+                rule_id: Some("php.eval".into()),
+                ..finding(FindingKind::UpstreamModified)
+            },
+        ];
+        assert_eq!(r.listed_findings().count(), 2);
+        let folder = SiteFileFinding {
+            rel: "wp-content/plugins/akismet".into(),
+            component: Some("akismet".into()),
+            ..finding(FindingKind::UpstreamModified)
+        };
+        assert_eq!(folder.component_wide(), Some("plugin"));
+        let file = SiteFileFinding {
+            rel: "wp-content/plugins/akismet/a.php".into(),
+            ..folder.clone()
+        };
+        assert_eq!(file.component_wide(), None);
+        assert_eq!(finding(FindingKind::RuleHit).component_wide(), None);
+        // Counted on top of the core, plugin, theme and ClamAV lists.
+        r.core_modified = vec!["a".into()];
+        assert_eq!(r.shown_finding_count(), 3);
     }
 
     #[test]

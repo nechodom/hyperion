@@ -1,36 +1,56 @@
-{# File integrity & malware — one row of the WordPress tab's Updates &
-   integrity group, lazily swapped in via hx-get="/hostings/:sel/integrity-panel"
-   and re-rendered in place by "Scan now" (hx-target="#integrity-card"). Opening
-   the tab only READS the last stored result; "Scan now" asks the node for a scan
-   and the card then polls (only while queued) until a newer result is stored. The
-   tamper-detection sibling of the updates row: that one answers "is anything
-   outdated?", this one answers "has anything been changed?".
+{# File integrity & malware — one row, lazily swapped in via
+   hx-get="/hostings/:sel/integrity-panel": on the WordPress tab for a WordPress
+   site, on the overview tab for a PHP or static one. It re-renders in place
+   after "Scan now" (hx-target="#integrity-card"). Opening the page only READS
+   the last stored result; "Scan now" asks the node for a scan and the card then
+   polls (only while queued) until a newer result is stored. The tamper-detection
+   sibling of the updates row: that one answers "is anything outdated?", this one
+   answers "has anything been changed?".
 
-   Both signals are keyless — wp-cli's checksum comparison against
-   WordPress.org, and ClamAV where a scanner happens to exist on the node.
-   Either can be ABSENT, and the whole point of this row is that absence
-   renders as "couldn't check" and never as a green dot: the operator sells
-   this scan, so a false all-clear is the one failure mode that costs a
-   customer their site. #}
+   The native scan compares core, plugins and themes with their reference copies,
+   keeps a baseline of everything nothing vouches for and reads PHP for known
+   malware patterns; ClamAV is optional on top. Any of it can be ABSENT, and the
+   point of this row is that absence renders as what didn't run and never as a
+   green dot: the operator sells this scan, so a false all-clear is the one
+   failure mode that costs a customer their site. A site with no WordPress has no
+   reference copy to compare with. That is not a failure, and nothing here says
+   "wordpress.org" for it.
+
+   Everything a tenant chose (paths, snippets, domains, reasons) goes through
+   `tenant_text` and askama's escaping, never `|safe`. #}
+{% macro finding_row(f) %}
+<li><span class="chk-dot {% if f.severity == "high" %}err{% else %}warn{% endif %}"></span><code>{{ f.rel|tenant_text }}</code><span class="chk-detail">
+  {% if f.rel == "." %}most of WordPress core no longer matches the release
+  {% else if let Some(noun) = f.component_wide() %}this {{ noun }} no longer matches {% if let Some(l) = f.source_label %}{{ l|tenant_text }}{% else %}wordpress.org{% endif %}
+  {% else %}{{ f.kind.label() }}{% endif %}
+  {% if let Some(r) = f.rule_id %} · rule <code>{{ r|tenant_text }}</code>{% if f.line > 0 %}, line {{ f.line }}{% endif %}{% endif %}
+  {% if !f.domains.is_empty() %} · mentions {% for d in f.domains %}{% if loop.index0 < 5 %}<code>{{ d|tenant_text }}</code> {% endif %}{% endfor %}{% endif %}
+  {% if !f.snippet.is_empty() %} · <code>{{ f.snippet|tenant_text }}</code>{% endif %}
+</span></li>
+{% endmacro %}
+{% let v = scan.verdict().as_str() %}
 <div class="chk-row" id="integrity-card"
      {% if scan.scan_queued %}hx-get="/hostings/{{ selector }}/integrity-panel?queued_at={{ queued_since }}" hx-trigger="every 10s" hx-swap="outerHTML"{% endif %}
-     data-verdict="{% if scan.total_findings() > 0 %}findings{% else if !scan.wp_cli_ok %}unchecked{% else if scan.is_clean() %}clean{% else %}partial{% endif %}">
+     data-verdict="{{ v }}">
   <div class="chk-head">
-    {# Findings win over a failed probe: something we DID see is more
-       actionable than something we couldn't. Four states, never three:
-       "files verified but no malware scanner" is its own answer and must
-       not borrow the green one. #}
-    {% if scan.total_findings() > 0 %}<span class="chk-dot err"></span>
-    {% else if !scan.wp_cli_ok %}<span class="chk-dot warn"></span>
-    {% else if scan.is_clean() %}<span class="chk-dot ok"></span>
+    {% if v == "findings" %}<span class="chk-dot err"></span>
+    {% else if v == "clean" %}<span class="chk-dot ok"></span>
+    {% else if v == "running" %}<span class="chk-dot"></span>
     {% else %}<span class="chk-dot warn"></span>{% endif %}
     <h3 class="chk-name">Integrity &amp; malware</h3>
     <span class="chk-sum">
-      {% if scan.total_findings() > 0 %}<strong class="tone-err">{{ scan.total_findings() }} file(s) don't match what should be on disk</strong>
-      {% else if scan.scanned_at == 0 && scan.error.is_none() %}Not scanned yet — nothing was verified, so this is not a clean result
+      {# Six states, never fewer: "files verified but no malware scanner" and
+         "part of the site wasn't looked at" are answers of their own and must
+         not borrow the green one. #}
+      {% if v == "findings" %}<strong class="tone-err">{{ scan.shown_finding_count() }} file(s) need attention</strong>
+      {% else if v == "review" %}<strong class="tone-warn">{{ scan.review.len() }} change(s) to review</strong> — not confirmed as a problem
+      {% else if v == "running" %}No verdict until the scan finishes
+      {% else if v == "never" && scan.error.is_none() %}Not scanned yet — nothing was verified, so this is not a clean result
+      {% else if v == "never" %}Couldn't check — nothing was verified, so this is not a clean result
+      {% else if v == "clean" && scan.native_scan_ran %}Clean — {% if scan.coverage.upstream_ran %}files match WordPress.org, {% endif %}no suspicious files found
+      {% else if v == "clean" %}Clean — files match WordPress.org, no malware found
+      {% else if scan.native_scan_ran %}Partly checked — this isn't a clean result
       {% else if !scan.wp_cli_ok %}Couldn't check — nothing was verified, so this is not a clean result
-      {% else if scan.is_clean() %}Clean — files match WordPress.org, no malware found
-      {% else if scan.scan_partial() %}Scan didn't finish — this isn't a clean result
       {% else %}Files verified — malware not scanned{% endif %}
       {% if scan.scanned_at != 0 %}· {{ crate::handlers::stats::fmt_ago(scan.scanned_at) }}{% endif %}
       {% if scan.scan_queued %}· <span class="tone-warn">scan queued</span>{% endif %}
@@ -56,27 +76,46 @@
     {% if let Some((ok, text)) = notice %}
     <p class="chk-note {% if ok %}tone-ok{% else %}tone-err{% endif %}" style="white-space:pre-line">{% if ok %}Fixed: {% else %}Fix failed: {% endif %}{{ text }}</p>
     {% endif %}
+    {# The pilot: what is shown is real, but nothing leaves the panel yet. #}
+    {% if scan.report_only && scan.native_scan_ran %}
+    <p class="chk-note">The new file checks are running in test mode: their results show here, but they don't send alerts yet and aren't in care reports.</p>
+    {% endif %}
+
     {% if scan.total_findings() > 0 %}
     <p class="chk-note tone-err">
       Modified core files and files that shouldn't exist are how a backdoor
       survives a password reset — treat this as a compromise until you've
       looked at each path below.
     </p>
-    {% else if scan.scanned_at == 0 && scan.error.is_none() %}
+    {% endif %}
+    {% if v == "never" %}
     <p class="chk-note">
-      No scan of this site has finished yet.{% if !scan.scan_queued %} Opening this page doesn't start one — use Scan now.{% endif %}
-    </p>
-    {% else if !scan.wp_cli_ok %}
-    <p class="chk-note">
-      wp-cli couldn't compare this site against WordPress.org, so no file was
-      checked. Usually a broken WordPress install, a missing wp-cli, or a
-      blocked outbound lookup.{% if let Some(e) = scan.error %} Why: {{ e }}{% endif %}
+      {% if let Some(e) = scan.error %}Nothing was checked. Why: {{ e }}
+      {% else %}No scan of this site has finished yet.{% if !scan.scan_queued %} Opening this page doesn't start one — use Scan now.{% endif %}{% endif %}
     </p>
     {% endif %}
 
-    {# Not the reasons themselves: they name files a tenant chose. #}
+    {# Not the scan's fault and not the site's: the lookup that decides what core
+       and the plugins should look like. Nothing here says the site has a problem.
+       A site with no WordPress has nothing to look up. #}
+    {% if scan.scanned_at != 0 && !scan.coverage.no_upstream && !scan.wp_cli_ok %}
+    <p class="chk-note">
+      wordpress.org could not be reached or the WordPress version could not be read, so core, plugin and theme files were not compared with their official copies. This says nothing about the site itself; the next scan tries again.{% if let Some(e) = scan.error %} Why: {{ e }}{% endif %}
+    </p>
+    {% endif %}
+
+    {# What did not run, in the scanner's own words. They can name files a tenant
+       chose, so each goes through tenant_text and the escaping. #}
     {% if scan.scan_partial() %}
-    <p class="chk-note">The last scan didn't finish: part of the site wasn't looked at, so this isn't a clean result.</p>
+    <p class="chk-note">The last scan didn't finish: part of the site wasn't looked at, so this isn't a clean result. What didn't run:</p>
+    <ul class="chk-list">
+      {% for r in scan.coverage.partial_reasons %}{% if loop.index0 < 50 %}
+      <li><span class="chk-dot warn"></span><span class="chk-detail">{{ r|tenant_text }}</span></li>
+      {% endif %}{% endfor %}
+    </ul>
+    {% if scan.coverage.partial_reasons.len() > 50 %}
+    <p class="chk-note">Showing 50 of {{ scan.coverage.partial_reasons.len() }} reasons.</p>
+    {% endif %}
     {% endif %}
 
     {% if scan.scan_queued %}
@@ -86,12 +125,29 @@
     {# Coverage line: what actually ran, on every state. "No findings" only
        means something once you know what was looked at. #}
     <p class="chk-note">
-      Checksums:
-      {% if scan.wp_cli_ok %}core + {{ scan.plugins_checked }} of {{ scan.plugins_total }} plugin(s){% else %}<span class="tone-warn">not verified</span>{% endif %}
+      {% if scan.scanned_at == 0 %}
+      Checked: nothing yet.
+      {% else %}
+      Checked:
+      {% if scan.coverage.no_upstream %}
+      {# No release to compare with: not a failure, and nothing to name. #}
+      {% else if scan.wp_cli_ok %}core, {{ scan.plugins_checked }} of {{ scan.plugins_total }} plugin(s){% if scan.native_scan_ran %} and {{ scan.coverage.themes_verified }} of {{ scan.coverage.themes_total }} theme(s){% endif %} against wordpress.org
+      {% else %}<span class="tone-warn">not compared with wordpress.org</span>{% endif %}
+      {% if scan.native_scan_ran %}
+      {% if !scan.coverage.no_upstream %}·{% endif %}
+      {% if scan.coverage.watching_since != 0 %}{{ scan.coverage.files_watched }} files watched since {{ scan.coverage.watching_since|date }}
+      {% else %}{{ scan.coverage.files_watched }} files watched{% endif %}
+      {% if scan.coverage.files_partly_inspected > 0 %}· {{ scan.coverage.files_partly_inspected }} large file(s) only partly read{% endif %}
+      {% if scan.coverage.symlinks_skipped > 0 %}· {{ scan.coverage.symlinks_skipped }} symlink(s) not followed{% endif %}
+      {% endif %}
       · Malware:
-      {% if scan.clamav_available %}ClamAV scanned the site's files{% else if scan.clamav_installed %}<span class="tone-warn">not scanned</span> — ClamAV is installed, but no pass over this site's files has finished yet (the reason, if it failed, is below){% else if scan.scanned_at == 0 %}<span class="tone-warn">not scanned</span>{% else %}<span class="tone-warn">not scanned</span> — ClamAV isn't installed on this node; add it on the <a href="/services">Services page</a> to look inside <code>uploads/</code>{% endif %}
-      {% if scan.scanned_at == 0 %}· never run{% endif %}
-      {% if scan.wp_cli_ok %}{% if let Some(e) = scan.error %}· {{ e }}{% endif %}{% endif %}
+      {# ClamAV never runs over a site with no WordPress, so don't say it is
+         waiting or missing there. #}
+      {% if scan.coverage.no_upstream && !scan.clamav_available %}files are read for known malware patterns; ClamAV doesn't run on this kind of site
+      {% else if scan.clamav_available %}ClamAV scanned the site's files{% else if scan.clamav_installed %}<span class="tone-warn">not scanned</span> — ClamAV is installed, but no pass over this site's files has finished yet (the reason, if it failed, is below){% else %}<span class="tone-warn">not scanned</span> — ClamAV isn't installed on this node; add it on the <a href="/services">Services page</a> to look inside <code>uploads/</code>{% endif %}
+      {% if scan.wp_cli_ok || scan.coverage.no_upstream %}{% if let Some(e) = scan.error %}· {{ e }}{% endif %}{% endif %}.
+      {% endif %}
+      The database is not scanned.
     </p>
 
     {# ── WordPress core ──────────────────────────────────────────────── #}
@@ -101,14 +157,19 @@
       {# Capped per bucket: a mass-injector compromise can touch a
          thousand files, and a row that renders a thousand lines is one
          nobody scrolls. The count above stays exact. #}
+      {# "." is the scanner's one finding for a core that mostly differs. #}
       {% for p in scan.core_modified %}{% if loop.index0 < 50 %}
-      <li><span class="chk-dot err"></span><code>{{ p }}</code><span class="chk-detail">modified — differs from the official release</span></li>
+      {% if p == "." %}
+      <li><span class="chk-dot err"></span><span>WordPress core</span><span class="chk-detail">most of WordPress core no longer matches the official release</span></li>
+      {% else %}
+      <li><span class="chk-dot err"></span><code>{{ p|tenant_text }}</code><span class="chk-detail">modified — differs from the official release</span></li>
+      {% endif %}
       {% endif %}{% endfor %}
       {% for p in scan.core_unexpected %}{% if loop.index0 < 50 %}
-      <li><span class="chk-dot err"></span><code>{{ p }}</code><span class="chk-detail">shouldn't exist — not part of WordPress</span></li>
+      <li><span class="chk-dot err"></span><code>{{ p|tenant_text }}</code><span class="chk-detail">shouldn't exist — not part of WordPress</span></li>
       {% endif %}{% endfor %}
       {% for p in scan.core_missing %}{% if loop.index0 < 50 %}
-      <li><span class="chk-dot warn"></span><code>{{ p }}</code><span class="chk-detail">missing — official file is gone</span></li>
+      <li><span class="chk-dot warn"></span><code>{{ p|tenant_text }}</code><span class="chk-detail">missing — official file is gone</span></li>
       {% endif %}{% endfor %}
     </ul>
     {% if scan.core_modified.len() > 50 || scan.core_unexpected.len() > 50 || scan.core_missing.len() > 50 %}
@@ -143,10 +204,14 @@
        every premium plugin in the findings column and train the operator
        to ignore this row. ─────────────────────────────────────────────── #}
     {% for pl in scan.plugins_failed %}
-    <h4 class="chk-sub">Plugin <code>{{ pl.slug }}</code> — {{ pl.issues.len() }} file(s) don't match wordpress.org</h4>
+    <h4 class="chk-sub">Plugin <code>{{ pl.slug|tenant_text }}</code> — {{ pl.issues.len() }} file(s) don't match {{ scan.reference_of(pl.slug) }}</h4>
     <ul class="chk-list chk-files">
       {% for i in pl.issues %}{% if loop.index0 < 25 %}
-      <li><span class="chk-dot err"></span><code>{{ i.path }}</code><span class="chk-detail">{{ i.message }}</span></li>
+      {% if i.path == "." %}
+      <li><span class="chk-dot err"></span><span>whole plugin</span><span class="chk-detail">this plugin no longer matches {{ scan.reference_of(pl.slug) }} — {{ i.message|tenant_text }}</span></li>
+      {% else %}
+      <li><span class="chk-dot err"></span><code>{{ i.path|tenant_text }}</code><span class="chk-detail">{{ i.message|tenant_text }}</span></li>
+      {% endif %}
       {% endif %}{% endfor %}
     </ul>
     {% if pl.issues.len() > 25 %}
@@ -166,12 +231,58 @@
     </div>
     {% endfor %}
 
+    {# ── Themes that failed comparison. No fix button yet: those come with the
+       file actions. ───────────────────────────────────────────────────── #}
+    {% for th in scan.themes_failed %}
+    <h4 class="chk-sub">Theme <code>{{ th.slug|tenant_text }}</code> — {{ th.issues.len() }} file(s) don't match {{ scan.reference_of(th.slug) }}</h4>
+    <ul class="chk-list chk-files">
+      {% for i in th.issues %}{% if loop.index0 < 25 %}
+      {% if i.path == "." %}
+      <li><span class="chk-dot err"></span><span>whole theme</span><span class="chk-detail">this theme no longer matches {{ scan.reference_of(th.slug) }} — {{ i.message|tenant_text }}</span></li>
+      {% else %}
+      <li><span class="chk-dot err"></span><code>{{ i.path|tenant_text }}</code><span class="chk-detail">{{ i.message|tenant_text }}</span></li>
+      {% endif %}
+      {% endif %}{% endfor %}
+    </ul>
+    {% if th.issues.len() > 25 %}
+    <p class="chk-note">Showing 25 of {{ th.issues.len() }} files.</p>
+    {% endif %}
+    {% endfor %}
+
+    {# ── What the rules and the baseline found. Failed comparisons are not
+       repeated here: the sections above carry them. ───────────────────── #}
+    {% if scan.listed_findings().count() > 0 %}
+    <h4 class="chk-sub">Files that need a look — {{ scan.listed_findings().count() }}</h4>
+    <ul class="chk-list chk-files">
+      {% for f in scan.listed_findings() %}{% if loop.index0 < 50 %}
+      {% call finding_row(f) %}
+      {% endif %}{% endfor %}
+    </ul>
+    {% if scan.listed_findings().count() > 50 %}
+    <p class="chk-note">Showing 50 of {{ scan.listed_findings().count() }} files.</p>
+    {% endif %}
+    {% endif %}
+
+    {# Changes to review: the lower bucket. New or changed files nothing vouches
+       for, and medium rule hits. Not a verdict of bad. #}
+    {% if !scan.review.is_empty() %}
+    <h4 class="chk-sub">Changes to review — {{ scan.review.len() }}</h4>
+    <ul class="chk-list chk-files">
+      {% for f in scan.review %}{% if loop.index0 < 50 %}
+      {% call finding_row(f) %}
+      {% endif %}{% endfor %}
+    </ul>
+    {% if scan.review.len() > 50 %}
+    <p class="chk-note">Showing 50 of {{ scan.review.len() }} changes.</p>
+    {% endif %}
+    {% endif %}
+
     {# ── ClamAV ──────────────────────────────────────────────────────── #}
     {% if !scan.malware.is_empty() %}
     <h4 class="chk-sub">ClamAV detections — {{ scan.malware.len() }}</h4>
     <ul class="chk-list chk-files">
       {% for m in scan.malware %}{% if loop.index0 < 50 %}
-      <li><span class="chk-dot err"></span><code>{{ m.path }}</code><span class="chk-detail">{{ m.signature }}</span></li>
+      <li><span class="chk-dot err"></span><code>{{ m.path|tenant_text }}</code><span class="chk-detail">{{ m.signature|tenant_text }}</span></li>
       {% endif %}{% endfor %}
     </ul>
     {% if scan.malware.len() > 50 %}
@@ -190,7 +301,7 @@
         there's nothing to compare them against. They're listed so you know what
         the check <em>didn't</em> cover — not because anything is wrong with them.
       </p>
-      <p class="chk-note">{% for s in scan.plugins_unknown %}<code>{{ s }}</code> {% endfor %}</p>
+      <p class="chk-note">{% for s in scan.plugins_unknown %}<code>{{ s|tenant_text }}</code> {% endfor %}</p>
     </details>
     {% endif %}
   </div>
