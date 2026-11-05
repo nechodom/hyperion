@@ -357,6 +357,8 @@ fn verified_without_clamav_is_not_clean() {
     assert!(html.contains(r#"data-verdict="partial""#));
     assert!(html.contains("malware not scanned"));
     assert!(html.contains("ClamAV isn't installed"));
+    // What the weekly pass covers: not only uploads/.
+    assert!(html.contains("every file of the site but media and files over 64 MiB"));
     assert!(!html.contains("Clean —"));
 }
 

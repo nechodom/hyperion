@@ -198,7 +198,9 @@ install to sites that are running and backed up:
   weekly pass for the node, only with 2 GiB of memory free. Findings alert
   once, care reports and `hctl` carry the same verdict, and repair of core files
   and reinstall of tampered plugins start from the findings. The new checks run
-  as a silent pilot until `[integrity] new_layers_live` is switched on.
+  as a silent pilot until `[integrity] new_layers_live` is switched on. That
+  flag is per node: set it in each node's own `agent.toml` (the settings sync
+  doesn't carry `[integrity]`).
 - Staging copy with push to production (production is backed up first), Redis
   object cache, a `WP_DEBUG` switch, admin password reset, a sign-up spam
   guard, and a mail self-repair that sends WordPress mail through the local

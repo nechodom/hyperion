@@ -355,6 +355,11 @@ strategy = "mobile"
 
 # Site scan. Scanning never runs wp-cli or any tenant PHP.
 #
+# These flags are per node: each node reads its own file, the settings sync
+# doesn't copy [integrity], and the per-node settings page doesn't edit it.
+# Set them in /etc/hyperion/agent.toml on every node whose sites should change;
+# they are read at each scan, with no restart.
+#
 # [integrity]
 # Rule hits, changes to review and theme comparisons show in the panel only, with
 # no alerts and no effect on care reports, until this is true. Default false.
