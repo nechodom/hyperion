@@ -421,7 +421,9 @@ pub async fn integrity(
     }
     Ok(Some(CareIntegrity {
         scanned_at,
-        checksums_ran: r.wp_cli_ok && !r.scan_partial(),
+        // An action edited the record since the scan: this isn't its result yet, so
+        // the report says what it says for a scan that didn't cover the site.
+        checksums_ran: r.wp_cli_ok && !r.scan_partial() && !r.awaiting_rescan,
         malware_scan_ran: r.clamav_available,
         core_issues: r.core_issue_count() as i64,
         plugin_issues: r.plugin_issue_count() as i64,
@@ -1088,6 +1090,29 @@ mod tests {
             integrity(&pool, a.as_str(), FROM, TO).await.expect("q"),
             None
         );
+    }
+
+    /// Quarantine or Trust edited the record: not a scan's answer until a scan gives
+    /// one, however clean it looks. A report mustn't call that verified.
+    #[tokio::test]
+    async fn integrity_from_an_edited_record_is_not_checked() {
+        let (pool, a, _b) = fresh().await;
+        put_scan(
+            &pool,
+            a.as_str(),
+            &format!(
+                r#"{{"scanned_at":{},"result":{{"native_scan_ran":true,"wp_cli_ok":true,
+                     "clamav_available":true,"awaiting_rescan":true}}}}"#,
+                FROM + 1
+            ),
+        )
+        .await;
+        let i = integrity(&pool, a.as_str(), FROM, TO)
+            .await
+            .expect("q")
+            .expect("scanned");
+        assert!(!i.checksums_ran);
+        assert!(!i.is_clean());
     }
 
     /// A scan that didn't reach the whole site can't tell a customer the files

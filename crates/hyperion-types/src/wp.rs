@@ -294,6 +294,11 @@ pub struct WpMalwareHit {
     pub signature: String,
 }
 
+/// What the scan says about a hard-linked file: it never reads one.
+pub const HARD_LINKED_SNIPPET: &str = "hard-linked file: not read";
+/// How the scan's words for a file it didn't read end.
+const NOT_READ_SNIPPET_END: &str = "too large to read";
+
 /// The root file quarantine refuses by name.
 const WP_CONFIG_REL: &str = "wp-config.php";
 /// How the scanner marks a name it cut, and the shortest such name. The name of a
@@ -391,6 +396,10 @@ pub struct QuarantinedFile {
     pub kind: FindingKind,
     #[serde(default)]
     pub rule_id: Option<String>,
+    /// ClamAV's hits on this file when it was moved. They went with it, and come
+    /// back with it: a hit only ever clears by a ClamAV pass not finding it.
+    #[serde(default)]
+    pub malware: Vec<WpMalwareHit>,
 }
 
 /// What a hosting has in quarantine, newest first. `total` counts what the cap
@@ -517,6 +526,24 @@ impl SiteFileFinding {
             None => true,
             Some((slug, file)) => file.strip_suffix(".php") == Some(slug),
         }
+    }
+
+    /// Too large for the scan to have opened: its hash is only of its metadata, so
+    /// nothing at all is known about what's in it.
+    pub fn never_read(&self) -> bool {
+        self.rule_id.is_none() && self.snippet.ends_with(NOT_READ_SNIPPET_END)
+    }
+
+    /// Read in part: past the size the rules look at, so its hash is real but the
+    /// rest of it wasn't inspected.
+    pub fn read_in_part(&self) -> bool {
+        self.kind == FindingKind::TooLargeToInspect && self.rule_id.is_some()
+    }
+
+    /// Reported without being read because it has other names. It gets no hash, so
+    /// no button, and SFTP is how to deal with it.
+    pub fn is_hard_linked(&self) -> bool {
+        self.sha256.is_empty() && self.snippet == HARD_LINKED_SNIPPET
     }
 
     /// Is this the file a failed component lists as `path`? Issue paths are
@@ -702,6 +729,12 @@ pub struct WpIntegrityScanResult {
     pub themes_failed: Vec<WpIntegrityPluginResult>,
     #[serde(default)]
     pub coverage: ScanCoverage,
+    /// Someone's quarantine, restore or trust edited this record since a scan wrote
+    /// it, and no scan has spoken since. What's here is still the last scan's minus
+    /// what was acted on, so nothing may call it clean: on the card or in a report.
+    /// Gone with the next result a scan stores.
+    #[serde(default)]
+    pub awaiting_rescan: bool,
 }
 
 impl WpIntegrityScanResult {
@@ -772,11 +805,13 @@ impl WpIntegrityScanResult {
     }
 
     /// What "Trust all changes to review" takes: no rule hit, nothing a comparison
-    /// failed, and a hash to hold it to.
+    /// failed, a hash to hold it to, and nothing too large to inspect. Padding a
+    /// PHP file past what's read mustn't get it through in bulk; one at a time, the
+    /// dialog says it was never read.
     pub fn trust_all_items(&self) -> impl Iterator<Item = &SiteFileFinding> {
-        self.review
-            .iter()
-            .filter(|f| f.can_trust() && f.rule_id.is_none())
+        self.review.iter().filter(|f| {
+            f.can_trust() && f.rule_id.is_none() && f.kind != FindingKind::TooLargeToInspect
+        })
     }
 
     /// Would "Trust all" accept a symlink? Its dialog has to say what that means.
@@ -829,7 +864,7 @@ impl WpIntegrityScanResult {
         if !self.review.is_empty() {
             return ScanVerdict::Review;
         }
-        if self.scan_queued {
+        if self.scan_queued || self.awaiting_rescan {
             return ScanVerdict::Running;
         }
         if self.scanned_at == 0 {
@@ -863,6 +898,7 @@ impl WpIntegrityScanResult {
         self.wp_cli_ok
             && self.clamav_available
             && !self.scan_partial()
+            && !self.awaiting_rescan
             && self.total_findings() == 0
     }
 }
@@ -1011,6 +1047,54 @@ mod tests {
 
     /// A partial scan isn't clean, and a record from before the native scan
     /// keeps the meaning it had.
+    /// A record someone's action edited says less than a scan's would: nothing in
+    /// it reads as clean, and standing findings still come first.
+    #[test]
+    fn a_record_awaiting_a_rescan_has_no_clean_verdict() {
+        let mut r = WpIntegrityScanResult {
+            wp_cli_ok: true,
+            clamav_available: true,
+            native_scan_ran: true,
+            scanned_at: 1,
+            coverage: ScanCoverage {
+                upstream_ran: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(r.is_clean());
+        assert_eq!(r.verdict(), ScanVerdict::Clean);
+        r.awaiting_rescan = true;
+        assert!(!r.is_clean());
+        assert_eq!(r.verdict(), ScanVerdict::Running);
+        r.review = vec![SiteFileFinding::default()];
+        assert_eq!(r.verdict(), ScanVerdict::Review);
+        // An older record has no such field and keeps its meaning.
+        let old: WpIntegrityScanResult = serde_json::from_str("{}").expect("json");
+        assert!(!old.awaiting_rescan);
+    }
+
+    /// Padding a file past what's read mustn't get it through in bulk.
+    #[test]
+    fn trust_all_takes_nothing_it_never_read() {
+        let file = |kind| SiteFileFinding {
+            rel: "a.php".into(),
+            kind,
+            sha256: "aa".into(),
+            ..Default::default()
+        };
+        let r = WpIntegrityScanResult {
+            review: vec![
+                file(FindingKind::TooLargeToInspect),
+                file(FindingKind::BaselineChange),
+            ],
+            ..Default::default()
+        };
+        let kinds: Vec<FindingKind> = r.trust_all_items().map(|f| f.kind).collect();
+        assert_eq!(kinds, [FindingKind::BaselineChange]);
+        assert!(file(FindingKind::TooLargeToInspect).can_trust());
+    }
+
     #[test]
     fn is_clean_needs_a_scan_that_covered_the_site() {
         let mut r = WpIntegrityScanResult {

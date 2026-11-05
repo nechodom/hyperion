@@ -1233,6 +1233,85 @@ fn reinstall_goes_through_the_checked_request() {
     assert!(!src.contains("WpPluginAction::Reinstall"));
 }
 
+/// A file never read says so before anyone accepts it, and one read only in part
+/// isn't called a malware match.
+#[test]
+fn trusting_something_unread_says_it_was_unread() {
+    let render = |f: hyperion_types::SiteFileFinding| {
+        IntegrityCardTpl {
+            scan: hyperion_types::WpIntegrityScanResult {
+                review: vec![f],
+                ..native_scan()
+            },
+            selector: "example.com".into(),
+            csrf_token: "t".into(),
+            can_trust: true,
+            ..Default::default()
+        }
+        .render()
+        .expect("renders")
+    };
+    let unread = render(hyperion_types::SiteFileFinding {
+        rel: "pad.php".into(),
+        kind: hyperion_types::FindingKind::TooLargeToInspect,
+        sha256: "aa".into(),
+        snippet: "70000000 bytes: too large to read".into(),
+        ..Default::default()
+    });
+    assert!(unread.contains("This file was never read"), "{unread}");
+    // Not on offer in bulk.
+    assert!(!unread.contains("/hostings/integrity/trust-all"));
+
+    let part = render(hyperion_types::SiteFileFinding {
+        rel: "big.php".into(),
+        kind: hyperion_types::FindingKind::TooLargeToInspect,
+        rule_id: Some("too_large_to_inspect".into()),
+        sha256: "aa".into(),
+        ..Default::default()
+    });
+    assert!(part.contains("never read to the end"), "{part}");
+    assert!(!part.contains("matched a malware rule"), "{part}");
+}
+
+/// With no hash there's no button, and it says what to do instead.
+#[test]
+fn a_hard_linked_item_says_to_remove_it_over_sftp() {
+    let html = IntegrityCardTpl {
+        scan: hyperion_types::WpIntegrityScanResult {
+            review: vec![hyperion_types::SiteFileFinding {
+                rel: "a.php".into(),
+                kind: hyperion_types::FindingKind::BaselineChange,
+                snippet: hyperion_types::HARD_LINKED_SNIPPET.into(),
+                ..Default::default()
+            }],
+            ..native_scan()
+        },
+        selector: "example.com".into(),
+        csrf_token: "t".into(),
+        can_manage: true,
+        can_trust: true,
+        ..Default::default()
+    }
+    .render()
+    .expect("renders");
+    assert!(html.contains("remove it over SFTP"), "{html}");
+    assert!(!html.contains("/hostings/integrity/quarantine"));
+    assert!(!html.contains(r#"/hostings/integrity/trust""#));
+}
+
+/// The card says why there's no verdict, and it isn't the scan's own.
+#[test]
+fn an_edited_record_says_it_is_being_checked_again() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        awaiting_rescan: true,
+        clamav_available: true,
+        ..native_scan()
+    });
+    assert!(html.contains(r#"data-verdict="running""#), "{html}");
+    assert!(html.contains("re-checking after your change"), "{html}");
+    assert!(!html.contains("Clean —"), "{html}");
+}
+
 /// A node too old to list quarantine doesn't take the rest of the card with it.
 #[test]
 fn an_unlistable_quarantine_says_so() {

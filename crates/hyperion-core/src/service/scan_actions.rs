@@ -26,6 +26,8 @@ pub(super) const SCAN_TRUST_KV_KEY: &str = "scan_trust";
 const TRUST_CAP: usize = 5000;
 /// Quarantined files one reply lists.
 const QUARANTINE_LIST_CAP: usize = 50;
+/// A scan records no longer name.
+const MAX_TRUST_PATH_BYTES: usize = 1024;
 /// Files named per audit row of a bulk trust.
 const TRUST_AUDIT_CHUNK: usize = 100;
 /// How much of a path from a form goes into a row about refusing it.
@@ -100,9 +102,10 @@ fn check_movable(item: &SiteFileFinding) -> Result<(), RpcError> {
     Ok(())
 }
 
-/// A file is off the card: from its item, its line on a core or component list, and
-/// a ClamAV hit on it. What wasn't touched stays.
-fn drop_file(result: &mut WpIntegrityScanResult, root_dir: &str, rel: &str) {
+/// A file moved or put back is off the card: its item, and its line on a core or
+/// component list. What ClamAV said about it is the caller's: that goes with the
+/// file and comes back with it.
+fn drop_file(result: &mut WpIntegrityScanResult, rel: &str) {
     let item = result
         .findings
         .iter()
@@ -123,10 +126,49 @@ fn drop_file(result: &mut WpIntegrityScanResult, root_dir: &str, rel: &str) {
             list.retain(|c| !c.issues.is_empty());
         }
     }
-    let path = format!("{root_dir}/{rel}");
-    result.malware.retain(|m| m.path != path);
     result.core_ok =
         result.wp_cli_ok && result.core_modified.is_empty() && result.core_unexpected.is_empty();
+}
+
+/// Trust speaks for the items it matched and nothing else. A comparison at the same
+/// path is the manifest's to clear, and a ClamAV hit is ClamAV's.
+fn drop_trusted(result: &mut WpIntegrityScanResult, rel: &str, sha256: &str) {
+    let matched = |f: &SiteFileFinding| f.rel == rel && f.sha256 == sha256 && !f.is_comparison();
+    result.findings.retain(|f| !matched(f));
+    result.review.retain(|f| !matched(f));
+}
+
+/// Is this a path a scan could have reported? Relative, every step a real name, and
+/// no longer than a scan records. What it opens is still checked again on the way.
+fn plausible_rel(rel: &str) -> bool {
+    !rel.is_empty()
+        && rel.len() <= MAX_TRUST_PATH_BYTES
+        && !rel.contains('\0')
+        && rel
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != "..")
+}
+
+/// A carried trust list as this node will store it: what could be a scan's entries,
+/// up to the cap, hashes in the form a scan writes them. A bundle is a file someone
+/// could have edited, and this list is what stops a file being flagged. Returns the
+/// JSON, how many were kept and how many weren't.
+pub(super) fn clean_carried_trust(json: &str) -> (String, usize, usize) {
+    let parsed: BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(json).unwrap_or_default();
+    let total = parsed.len();
+    let clean: BTreeMap<String, String> = parsed
+        .into_iter()
+        .filter(|(rel, _)| plausible_rel(rel))
+        .filter_map(|(rel, hash)| Some((rel, hex::encode(decode_hash(hash.as_str()?)?))))
+        .take(TRUST_CAP)
+        .collect();
+    let kept = clean.len();
+    (
+        serde_json::to_string(&clean).unwrap_or_default(),
+        kept,
+        total - kept,
+    )
 }
 
 fn decode_hash(hex_hash: &str) -> Option<[u8; 32]> {
@@ -185,15 +227,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .ok_or_else(stale)
     }
 
-    /// The file is gone from the card right away, and a scan is asked for to say
-    /// what is true now.
-    async fn after_file_action(&self, detail: &HostingDetail, rel: &str) {
+    /// The file is gone from the card right away, its ClamAV hits go with it or come
+    /// back with it, and a scan is asked for to say what is true now. Until it does
+    /// the record is marked as not being a scan's.
+    async fn after_file_action(
+        &self,
+        detail: &HostingDetail,
+        change: impl FnOnce(&mut StoredIntegrityScan),
+    ) {
         let id = detail.id.as_str();
         {
             let _record = self.site_scan.record.lock().await;
-            if let Ok(Some(mut rec)) = self.integrity_record(id).await {
-                drop_file(&mut rec.result, &detail.root_dir, rel);
-                self.set_stored_integrity_scan(id, &rec).await;
+            match self.integrity_record(id).await {
+                Ok(Some(mut rec)) => {
+                    change(&mut rec);
+                    rec.result.awaiting_rescan = true;
+                    self.set_stored_integrity_scan(id, &rec).await;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "site scan: record not updated"),
             }
         }
         self.request_rescan(id).await;
@@ -239,8 +291,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             outcome_of(&done),
         )
         .await;
-        done?;
-        self.after_file_action(&detail, &rel).await;
+        let file = done?;
+        self.after_file_action(&detail, |rec| {
+            drop_file(&mut rec.result, &rel);
+            // Only what the held record has: a hit a ClamAV pass added since stays.
+            rec.result.malware.retain(|m| !file.malware.contains(m));
+        })
+        .await;
         self.wp_integrity_stored(HostingSelector::Id(detail.id))
             .await
     }
@@ -254,6 +311,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let rec = self.scan_action_record(detail.id.as_str()).await?;
         let item = item_named(&rec.result, rel, sha256)?;
         check_movable(item)?;
+        let path = format!("{}/{rel}", detail.root_dir);
         let req = QuarantineRequest {
             root: PathBuf::from(&detail.root_dir),
             quarantine_dir: PathBuf::from(&self.paths.quarantine_dir),
@@ -263,6 +321,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             kind: item.kind,
             rule_id: item.rule_id.clone(),
             now: now_secs(),
+            malware: rec
+                .result
+                .malware
+                .iter()
+                .filter(|m| m.path == path)
+                .cloned()
+                .collect(),
         };
         Ok(self.adapters.site_scan_quarantine(req).await?)
     }
@@ -303,7 +368,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         let file = done?;
-        self.after_file_action(&detail, &file.rel).await;
+        self.after_file_action(&detail, |rec| {
+            drop_file(&mut rec.result, &file.rel);
+            for hit in &file.malware {
+                if !rec.result.malware.contains(hit) {
+                    rec.result.malware.push(hit.clone());
+                }
+            }
+        })
+        .await;
         self.wp_integrity_stored(HostingSelector::Id(detail.id))
             .await
     }
@@ -440,9 +513,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
         self.write_trust(id, &trust).await?;
-        for (rel, _) in &items {
-            drop_file(&mut rec.result, &detail.root_dir, rel);
+        for (rel, sha256) in &items {
+            drop_trusted(&mut rec.result, rel, sha256);
         }
+        rec.result.awaiting_rescan = true;
         self.set_stored_integrity_scan(id, &rec).await;
         Ok(items)
     }

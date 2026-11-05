@@ -106,6 +106,7 @@ pub use wp::{
     WpInstallStatus, WpIntegrityFileIssue, WpIntegrityPluginResult, WpIntegrityScanResult,
     WpMalwareHit, WpPlugin, WpPluginAction, WpPluginActionResult, WpPluginListResponse, WpTheme,
     WpThemeAction, WpThemeActionResult, WpThemeListResponse, WpVulnFinding, WpVulnScanResult,
+    HARD_LINKED_SNIPPET,
 };
 
 /// Leads the DNS-01 "TXT not on the authoritative nameservers yet"

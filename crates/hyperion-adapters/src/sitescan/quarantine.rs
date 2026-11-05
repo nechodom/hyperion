@@ -14,9 +14,10 @@ use std::fs::{self, DirBuilder, File, Metadata, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{fchown, DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::UNIX_EPOCH;
 
-use hyperion_types::{FindingKind, QuarantineList, QuarantinedFile};
+use hyperion_types::{FindingKind, QuarantineList, QuarantinedFile, WpMalwareHit};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -28,10 +29,28 @@ use crate::AdapterError;
 /// The refusal for an item that isn't what the scan reported any more.
 pub const CHANGED_SINCE_SCAN: &str = "this changed since the last scan; scan again";
 /// Bigger files stay where they are.
-pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-/// What one site may hold. The copies are outside its disk quota, and a tenant
-/// can make a large sparse file for free.
-pub const MAX_HELD_BYTES: u64 = 4 * MAX_FILE_BYTES;
+pub const MAX_FILE_BYTES: u64 = 2 * GIB;
+/// What quarantine may take up. The copies are real and outside any disk quota,
+/// and a tenant can make a large sparse file for free. Sizes are apparent sizes.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    /// Held for one site.
+    hosting_bytes: u64,
+    /// Held for all of them.
+    node_bytes: u64,
+    /// Free space a copy must leave behind on the quarantine's disk.
+    min_free_bytes: u64,
+}
+
+const GIB: u64 = 1024 * 1024 * 1024;
+const LIMITS: Limits = Limits {
+    hosting_bytes: 8 * GIB,
+    node_bytes: 32 * GIB,
+    min_free_bytes: 5 * GIB,
+};
+/// One move at a time on this node, from the check of the limits to the end of the
+/// copy, or two at once could each see room for one.
+static MOVING: Mutex<()> = Mutex::new(());
 /// Held files are removed this long after they came in.
 pub const PURGE_AFTER_SECS: i64 = 90 * 86_400;
 
@@ -56,6 +75,9 @@ pub struct QuarantineRequest {
     pub kind: FindingKind,
     pub rule_id: Option<String>,
     pub now: i64,
+    /// ClamAV's hits on this file, kept with it: restoring it brings them back.
+    #[serde(default)]
+    pub malware: Vec<WpMalwareHit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +289,7 @@ fn place_copy(
         time: req.now,
         kind: req.kind,
         rule_id: req.rule_id.clone(),
+        malware: req.malware.clone(),
     };
     let tmp_record = dir.join(format!(".{id}.json.tmp"));
     let body = serde_json::to_vec(&rec).map_err(|e| AdapterError::Other(e.to_string()))?;
@@ -279,9 +302,52 @@ fn place_copy(
     Ok(rec)
 }
 
+/// Is there room for `size` more? Everything said here ends the same way: the file
+/// stays, and SFTP is how to be rid of it.
+fn check_room(base: &Path, dir: &Path, size: u64, limits: &Limits) -> Result<(), AdapterError> {
+    let total = |d: &Path| -> io::Result<u64> {
+        Ok(held_records(d)?
+            .iter()
+            .fold(0u64, |sum, r| sum.saturating_add(r.size)))
+    };
+    if total(dir)?.saturating_add(size) > limits.hosting_bytes {
+        return Err(refused(
+            "this site's quarantine is full; restore or wait for older files to expire, or remove this one over SFTP",
+        ));
+    }
+    let mut node = size;
+    for entry in fs::read_dir(base)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            node = node.saturating_add(total(&entry.path())?);
+        }
+    }
+    if node > limits.node_bytes {
+        return Err(refused(
+            "this server's quarantine is full; remove this file over SFTP",
+        ));
+    }
+    let st = rustix::fs::statvfs(dir)
+        .map_err(|e| refused(format!("the free disk space can't be read: {e}")))?;
+    let free = st.f_bavail.saturating_mul(st.f_frsize);
+    if free < size.saturating_add(limits.min_free_bytes) {
+        return Err(refused(
+            "this server would run too low on free disk space to hold a copy; remove this file over SFTP",
+        ));
+    }
+    Ok(())
+}
+
 /// Move one file into quarantine: check it is what the scan reported, hold a
 /// durable copy, remove the original.
 pub fn quarantine_file(req: &QuarantineRequest) -> Result<QuarantinedFile, AdapterError> {
+    quarantine_with_limits(req, &LIMITS)
+}
+
+fn quarantine_with_limits(
+    req: &QuarantineRequest,
+    limits: &Limits,
+) -> Result<QuarantinedFile, AdapterError> {
     let root = open_root(&req.root)?;
     let src = root.open_file(&req.rel).map_err(|e| open_refusal(&e))?;
     let before = src.metadata()?;
@@ -290,13 +356,10 @@ pub fn quarantine_file(req: &QuarantineRequest) -> Result<QuarantinedFile, Adapt
             "this file is over 2 GiB, too large to quarantine; remove it over SFTP",
         ));
     }
+    // A panic in here left nothing behind that the next caller's checks get wrong.
+    let _moving = MOVING.lock().unwrap_or_else(PoisonError::into_inner);
     let dir = prepare_dir(&req.quarantine_dir, &req.hosting_id)?;
-    let held: u64 = held_records(&dir)?.iter().map(|r| r.size).sum();
-    if held.saturating_add(before.len()) > MAX_HELD_BYTES {
-        return Err(refused(
-            "this site's quarantine is full; restore or wait for older files to expire, or remove this one over SFTP",
-        ));
-    }
+    check_room(&req.quarantine_dir, &dir, before.len(), limits)?;
     let id = new_id();
     let done = place_copy(&src, &before, req, &dir, &id).and_then(|rec| {
         // Still the same inode, and on a name reached without following anything.
@@ -315,10 +378,15 @@ pub fn quarantine_file(req: &QuarantineRequest) -> Result<QuarantinedFile, Adapt
     done
 }
 
-/// Write the held copy to `out`, then its mode and owner. Never the setuid or
-/// setgid bit: a tenant can't have set those for root's benefit, and root is the
-/// one writing this back.
-fn write_back(held: &File, out: &mut File, rec: &QuarantinedFile) -> Result<(), AdapterError> {
+/// Write the held copy to `out`, then its mode and owner, then make it and its name
+/// durable. Never the setuid or setgid bit: a tenant can't have set those for root's
+/// benefit, and root is the one writing this back.
+fn write_back(
+    held: &File,
+    out: &mut File,
+    parent: &File,
+    rec: &QuarantinedFile,
+) -> Result<(), AdapterError> {
     let (copied, _) = copy_hashing(held, out, MAX_FILE_BYTES)?;
     if copied != rec.size {
         return Err(refused(
@@ -328,6 +396,7 @@ fn write_back(held: &File, out: &mut File, rec: &QuarantinedFile) -> Result<(), 
     out.set_permissions(fs::Permissions::from_mode(rec.mode & 0o777))?;
     fchown(&*out, Some(rec.uid), Some(rec.gid))?;
     out.sync_all()?;
+    parent.sync_all()?;
     Ok(())
 }
 
@@ -341,8 +410,9 @@ pub fn restore_file(req: &RestoreRequest) -> Result<QuarantinedFile, AdapterErro
     let rec = read_record(&dir, &req.id).ok_or_else(|| refused(GONE))?;
     let held = File::open(dir.join(&req.id)).map_err(|_| refused(GONE))?;
     let root = open_root(&req.root)?;
-    let mut out = root.create_new(&rec.rel).map_err(|e| restore_refusal(&e))?;
-    if let Err(e) = write_back(&held, &mut out, &rec) {
+    let (mut out, parent) = root.create_new(&rec.rel).map_err(|e| restore_refusal(&e))?;
+    // Only once this is on disk can the held copy go.
+    if let Err(e) = write_back(&held, &mut out, &parent, &rec) {
         let _ = root.unlink(&rec.rel, &out);
         return Err(e);
     }
@@ -448,6 +518,14 @@ mod tests {
         hex::encode(Sha256::digest(body))
     }
 
+    /// The real limits, on whatever disk the tests happen to have.
+    fn roomy() -> Limits {
+        Limits {
+            min_free_bytes: 0,
+            ..LIMITS
+        }
+    }
+
     impl Site {
         fn new() -> Site {
             let t = tempfile::tempdir().expect("tmp");
@@ -474,11 +552,12 @@ mod tests {
                 kind: FindingKind::RuleHit,
                 rule_id: Some("php.eval_post".to_string()),
                 now: 1_000,
+                malware: Vec::new(),
             }
         }
 
         fn quarantine(&self, rel: &str, sha256: &str) -> Result<QuarantinedFile, AdapterError> {
-            quarantine_file(&self.request(rel, sha256))
+            quarantine_with_limits(&self.request(rel, sha256), &roomy())
         }
 
         fn restore(&self, id: &str) -> Result<QuarantinedFile, AdapterError> {
@@ -626,13 +705,129 @@ mod tests {
         // Pretend what's held is almost at the limit.
         let meta = s.held().join(format!("{}.json", first.id));
         let mut rec = first.clone();
-        rec.size = MAX_HELD_BYTES - 2;
+        rec.size = LIMITS.hosting_bytes - 2;
         fs::write(&meta, serde_json::to_vec(&rec).expect("json")).expect("w");
 
         let p = s.write("b.php", b"xxxx");
         let m = refusal(s.quarantine("b.php", &sha(b"xxxx")));
-        assert!(m.contains("restore or wait"), "{m}");
+        assert!(m.contains("restore or wait") && m.contains("SFTP"), "{m}");
         assert!(p.exists());
+        assert_eq!(s.held_names().len(), 2, "{:?}", s.held_names());
+    }
+
+    #[test]
+    fn the_limits_are_what_was_decided() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(LIMITS.hosting_bytes, 8 * GIB);
+        assert_eq!(LIMITS.node_bytes, 32 * GIB);
+        assert_eq!(LIMITS.min_free_bytes, 5 * GIB);
+    }
+
+    /// Every site at its own limit can still fill a disk.
+    #[test]
+    fn what_a_node_holds_is_capped() {
+        let s = Site::new();
+        let limits = Limits {
+            node_bytes: 100,
+            ..roomy()
+        };
+        // Another site's, with room left on this one's own limit.
+        let other = s.dir.join("H2");
+        fs::create_dir_all(&other).expect("mkdir");
+        let id = "0".repeat(32);
+        fs::write(other.join(&id), b"x").expect("w");
+        let rec = QuarantinedFile {
+            id: id.clone(),
+            rel: "x.php".into(),
+            size: 98,
+            ..Default::default()
+        };
+        fs::write(
+            other.join(format!("{id}.json")),
+            serde_json::to_vec(&rec).expect("json"),
+        )
+        .expect("w");
+
+        let p = s.write("a.php", b"xxxx");
+        let m = refusal(quarantine_with_limits(
+            &s.request("a.php", &sha(b"xxxx")),
+            &limits,
+        ));
+        assert!(m.contains("server") && m.contains("SFTP"), "{m}");
+        assert!(p.exists());
+        assert!(s.held_names().is_empty(), "{:?}", s.held_names());
+
+        // Exactly at it is allowed.
+        let q = s.write("b.php", b"xx");
+        quarantine_with_limits(&s.request("b.php", &sha(b"xx")), &limits).expect("fits");
+        assert!(!q.exists());
+    }
+
+    #[test]
+    fn a_disk_that_would_run_low_is_refused() {
+        let s = Site::new();
+        let p = s.write("a.php", b"xxxx");
+        let limits = Limits {
+            min_free_bytes: u64::MAX,
+            ..roomy()
+        };
+        let m = refusal(quarantine_with_limits(
+            &s.request("a.php", &sha(b"xxxx")),
+            &limits,
+        ));
+        assert!(m.contains("free") && m.contains("SFTP"), "{m}");
+        assert!(p.exists());
+        assert!(s.held_names().is_empty(), "{:?}", s.held_names());
+    }
+
+    /// Two at once can't both see room for one.
+    #[test]
+    fn the_check_and_the_copy_are_one_step() {
+        let s = Site::new();
+        for i in 0..8 {
+            s.write(&format!("f{i}.php"), b"xxxx");
+        }
+        let limits = Limits {
+            hosting_bytes: 12,
+            ..roomy()
+        };
+        let moved: usize = std::thread::scope(|scope| {
+            let runs: Vec<_> = (0..8)
+                .map(|i| {
+                    let (s, limits) = (&s, &limits);
+                    scope.spawn(move || {
+                        let req = s.request(&format!("f{i}.php"), &sha(b"xxxx"));
+                        quarantine_with_limits(&req, limits).is_ok()
+                    })
+                })
+                .collect();
+            runs.into_iter()
+                .map(|r| usize::from(r.join().expect("join")))
+                .sum()
+        });
+        assert_eq!(moved, 3);
+    }
+
+    /// A ClamAV hit goes with the file and comes back with it, so two clicks can't
+    /// clear it. What goes on the record is what the caller said.
+    #[test]
+    fn a_clamav_hit_travels_in_the_record() {
+        let s = Site::new();
+        s.write("a.php", b"x");
+        let hit = hyperion_types::WpMalwareHit {
+            path: "/home/u/htdocs/a.php".into(),
+            signature: "Php.Trojan.Webshell-1".into(),
+        };
+        let mut req = s.request("a.php", &sha(b"x"));
+        req.malware = vec![hit.clone()];
+        let rec = quarantine_with_limits(&req, &roomy()).expect("q");
+        assert_eq!(rec.malware, [hit.clone()]);
+        let on_disk: QuarantinedFile = serde_json::from_slice(
+            &fs::read(s.held().join(format!("{}.json", rec.id))).expect("record"),
+        )
+        .expect("json");
+        assert_eq!(on_disk.malware, [hit.clone()]);
+        assert_eq!(s.restore(&rec.id).expect("restore").malware, [hit]);
     }
 
     impl Site {
@@ -854,7 +1049,7 @@ mod tests {
             s.write(&rel, b"x");
             let mut req = s.request(&rel, &sha(b"x"));
             req.now = now;
-            quarantine_file(&req).expect("q");
+            quarantine_with_limits(&req, &roomy()).expect("q");
         }
         // A copy with no record, and a half-written temp, aren't listed.
         fs::write(s.held().join("0".repeat(32)), b"x").expect("w");
@@ -875,11 +1070,11 @@ mod tests {
         s.write("old.php", b"old");
         let mut req = s.request("old.php", &sha(b"old"));
         req.now = 1_000;
-        let old = quarantine_file(&req).expect("q");
+        let old = quarantine_with_limits(&req, &roomy()).expect("q");
         s.write("new.php", b"new");
         let mut req = s.request("new.php", &sha(b"new"));
         req.now = 1_000 + 80 * 86_400;
-        let new = quarantine_file(&req).expect("q");
+        let new = quarantine_with_limits(&req, &roomy()).expect("q");
 
         let day_89 = 1_000 + 89 * 86_400;
         assert_eq!(purge_quarantine(&s.dir, day_89), 0);

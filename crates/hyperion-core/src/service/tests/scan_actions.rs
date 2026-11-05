@@ -94,6 +94,7 @@ fn moved(req: QuarantineRequest) -> QuarantinedFile {
         kind: req.kind,
         rule_id: req.rule_id,
         time: req.now,
+        malware: req.malware,
         ..Default::default()
     }
 }
@@ -628,8 +629,84 @@ async fn trust_all_skips_rule_hits_and_upstream() {
     let kv = trust_kv(&pool, &id).await;
     let mut names: Vec<&str> = kv.keys().map(String::as_str).collect();
     names.sort_unstable();
-    assert_eq!(names, ["big.bin", "link.php", "one.php", "two.php"]);
+    assert_eq!(names, ["link.php", "one.php", "two.php"]);
     assert!(rescan_asked(&pool, &id).await);
+}
+
+/// Trust speaks for the scan's new layers only. A ClamAV hit at that path is ClamAV's
+/// to clear, and a comparison at that path is the manifest's.
+#[tokio::test]
+async fn trust_leaves_a_clamav_hit_alone() {
+    let review = vec![finding("a.php", FindingKind::BaselineChange, SHA)];
+    let mut r = result(vec![], review);
+    r.malware = vec![hyperion_types::WpMalwareHit {
+        path: "ROOT/a.php".into(),
+        signature: "Php.Trojan.Webshell-1".into(),
+    }];
+    let (s, _pool, sel, id) = fixture(no_file_touched(), r).await;
+    let root = s.get(sel.clone()).await.expect("get").root_dir;
+    let mut rec = s.stored_integrity_scan(&id).await.expect("stored");
+    rec.result.malware[0].path = format!("{root}/a.php");
+    s.set_stored_integrity_scan(&id, &rec).await;
+
+    let after = s
+        .scan_file_trust(sel, "a.php".into(), SHA.into(), String::new())
+        .await
+        .expect("trust");
+    assert!(after.review.is_empty());
+    assert_eq!(after.malware.len(), 1, "a Trust cleared ClamAV's finding");
+}
+
+#[tokio::test]
+async fn trust_all_leaves_a_carried_comparison_alone() {
+    let rel = "wp-content/plugins/foo/x.php";
+    let comparison = SiteFileFinding {
+        component: Some("foo".into()),
+        source_label: Some("wordpress.org".into()),
+        ..finding(rel, FindingKind::UpstreamModified, SHA)
+    };
+    let mut r = result(
+        vec![comparison],
+        vec![finding(rel, FindingKind::BaselineChange, SHA)],
+    );
+    r.plugins_failed = vec![failed("foo", "1.0")];
+    r.core_modified = vec!["wp-load.php".into()];
+    let (s, _pool, sel, _id) = fixture(no_file_touched(), r).await;
+    let after = s
+        .scan_trust_all_review(sel, String::new())
+        .await
+        .expect("trust all");
+    assert!(after.review.is_empty());
+    assert_eq!(after.findings.len(), 1);
+    assert_eq!(after.plugins_failed.len(), 1);
+    assert_eq!(after.plugins_failed[0].issues.len(), 1);
+    assert_eq!(after.core_modified, ["wp-load.php"]);
+}
+
+/// Padding a PHP file past what's read must not get it accepted in bulk.
+#[tokio::test]
+async fn trust_all_leaves_files_never_read() {
+    let php = SiteFileFinding {
+        snippet: "70000000 bytes: too large to read".into(),
+        ..finding("pad.php", FindingKind::TooLargeToInspect, SHA)
+    };
+    let r = result(
+        vec![],
+        vec![php, finding("ok.php", FindingKind::BaselineChange, SHA2)],
+    );
+    let (s, pool, sel, id) = fixture(no_file_touched(), r).await;
+    let after = s
+        .scan_trust_all_review(sel.clone(), String::new())
+        .await
+        .expect("trust all");
+    assert_eq!(after.review.len(), 1);
+    assert_eq!(after.review[0].rel, "pad.php");
+    assert!(!trust_kv(&pool, &id).await.contains_key("pad.php"));
+    // One at a time it can still be accepted, so it isn't stuck on the card.
+    s.scan_file_trust(sel, "pad.php".into(), SHA.into(), String::new())
+        .await
+        .expect("trust");
+    assert!(trust_kv(&pool, &id).await.contains_key("pad.php"));
 }
 
 #[tokio::test]
@@ -756,6 +833,290 @@ async fn trust_travels_with_copy() {
     s.apply_carried_settings(&target, Some(&settings), true)
         .await;
     assert_eq!(trust_kv(&pool, target.id.as_str()).await["a.php"], SHA);
+}
+
+/// A bundle is a file someone could have edited, so what it says goes through the
+/// same shape a scan's own items have.
+#[tokio::test]
+async fn a_carried_trust_list_is_checked_on_import() {
+    let (s, pool, _sel, _id) = fixture(carry_mocks(), result(vec![], vec![])).await;
+    s.create(req("copy.cz")).await.expect("create target");
+    let tsel = HostingSelector::Domain(Domain::parse("copy.cz").expect("parse"));
+    let target = s.get(tsel).await.expect("get");
+    let tid = target.id.as_str();
+    let long = "a/".repeat(600);
+    let upper = SHA.to_uppercase();
+    let settings = hyperion_types::migration::HostingCarriedSettings {
+        kv: BTreeMap::from([(
+            "scan_trust".to_string(),
+            serde_json::json!({
+                "ok.php": SHA,
+                "upper.php": upper,
+                "../../etc/passwd": SHA,
+                "/etc/passwd": SHA,
+                "a//b.php": SHA,
+                "./a.php": SHA,
+                "nul\u{0}.php": SHA,
+                long: SHA,
+                "bad-hash.php": "zz",
+                "short-hash.php": "abcd",
+                "number.php": 7,
+            })
+            .to_string(),
+        )]),
+        ..Default::default()
+    };
+    s.apply_carried_settings(&target, Some(&settings), true)
+        .await;
+    let kv = trust_kv(&pool, tid).await;
+    assert_eq!(kv.len(), 2, "{kv:?}");
+    assert_eq!(kv["ok.php"], SHA);
+    // As a scan writes it, so it compares equal to one.
+    assert_eq!(kv["upper.php"], SHA);
+
+    let rows = audit_rows(&pool, "wp.integrity.trust_imported").await;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].1.contains("\"kept\":2"), "{}", rows[0].1);
+    assert!(rows[0].1.contains("\"dropped\":9"), "{}", rows[0].1);
+}
+
+#[tokio::test]
+async fn a_carried_trust_list_stops_at_the_cap_and_junk_writes_nothing() {
+    let (s, pool, _sel, _id) = fixture(carry_mocks(), result(vec![], vec![])).await;
+    for (domain, value, kept) in [
+        (
+            "many.cz",
+            serde_json::to_string(
+                &(0..5100)
+                    .map(|i| (format!("f{i}.php"), SHA.to_string()))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+            .expect("json"),
+            5000,
+        ),
+        ("junk.cz", "not json".to_string(), 0),
+    ] {
+        s.create(req(domain)).await.expect("create target");
+        let tsel = HostingSelector::Domain(Domain::parse(domain).expect("parse"));
+        let target = s.get(tsel).await.expect("get");
+        let settings = hyperion_types::migration::HostingCarriedSettings {
+            kv: BTreeMap::from([("scan_trust".to_string(), value)]),
+            ..Default::default()
+        };
+        s.apply_carried_settings(&target, Some(&settings), true)
+            .await;
+        assert_eq!(
+            trust_kv(&pool, target.id.as_str()).await.len(),
+            kept,
+            "{domain}"
+        );
+    }
+    assert_eq!(
+        audit_rows(&pool, "wp.integrity.trust_imported").await.len(),
+        2
+    );
+}
+
+// ---- an edited record isn't a scan's ----
+
+fn verified_clean() -> hyperion_types::WpIntegrityScanResult {
+    let mut r = result(
+        vec![],
+        vec![finding("a.php", FindingKind::BaselineChange, SHA)],
+    );
+    r.clamav_available = true;
+    r.coverage.upstream_ran = true;
+    r
+}
+
+/// What the last scan looked like, edited by hand, isn't a scan's result. Nothing
+/// may read clean, on the card or in a paid report, until a scan says so.
+#[tokio::test]
+async fn an_edited_record_is_not_clean_until_a_scan_stores_one() {
+    let mut a = happy_mocks();
+    a.expect_site_scan_worker().returning(move |job| match job {
+        WorkerJob::Discover { .. } => WorkerReply::Discovery(Default::default()),
+        WorkerJob::Scan(_) => WorkerReply::Scan(SiteScanOutcome {
+            upstream: hyperion_adapters::sitescan::scan::UpstreamResult {
+                ran: true,
+                ..Default::default()
+            },
+            coverage: hyperion_types::ScanCoverage {
+                upstream_ran: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    });
+    a.expect_site_scan_evict_manifests().returning(|_| ());
+    let (s, pool, sel, id) = fixture(a, verified_clean()).await;
+    let after = s
+        .scan_file_trust(sel.clone(), "a.php".into(), SHA.into(), String::new())
+        .await
+        .expect("trust");
+    assert!(after.awaiting_rescan);
+    assert!(after.findings.is_empty() && after.review.is_empty());
+    assert!(!after.is_clean(), "an edited record read clean");
+    assert_eq!(after.verdict(), hyperion_types::ScanVerdict::Running);
+
+    // The care report reads the record itself, and says it was only partly checked.
+    let care = hyperion_state::reports::integrity(&pool, &id, 0, i64::MAX)
+        .await
+        .expect("report")
+        .expect("in period");
+    assert!(!care.checksums_ran);
+    assert!(!care.is_clean());
+
+    s.site_scan_tick_at(&chrono::Utc, 2_000_000)
+        .await
+        .expect("tick");
+    let stored = s.stored_integrity_scan(&id).await.expect("stored");
+    assert!(!stored.result.awaiting_rescan, "a stored scan answers it");
+    let care = hyperion_state::reports::integrity(&pool, &id, 0, i64::MAX)
+        .await
+        .expect("report")
+        .expect("in period");
+    assert!(care.checksums_ran);
+}
+
+/// A run that gave no answer hasn't answered anything.
+#[tokio::test]
+async fn a_failed_run_leaves_the_record_awaiting() {
+    let mut a = happy_mocks();
+    a.expect_site_scan_worker()
+        .returning(|_| WorkerReply::Failed("no".into()));
+    a.expect_site_scan_evict_manifests().returning(|_| ());
+    let (s, _pool, sel, id) = fixture(a, verified_clean()).await;
+    s.scan_file_trust(sel, "a.php".into(), SHA.into(), String::new())
+        .await
+        .expect("trust");
+    s.site_scan_tick_at(&chrono::Utc, 2_000_000)
+        .await
+        .expect("tick");
+    let stored = s.stored_integrity_scan(&id).await.expect("stored");
+    assert!(stored.result.awaiting_rescan);
+    assert!(!stored.result.is_clean());
+}
+
+async fn assert_marked_then_clear(s: &HostingService<MockAdapterPort>, id: &str) {
+    let mut rec = s.stored_integrity_scan(id).await.expect("stored");
+    assert!(rec.result.awaiting_rescan);
+    rec.result.awaiting_rescan = false;
+    s.set_stored_integrity_scan(id, &rec).await;
+}
+
+#[tokio::test]
+async fn every_file_action_marks_the_record() {
+    let mut a = happy_mocks();
+    a.expect_site_scan_quarantine().returning(|r| Ok(moved(r)));
+    a.expect_site_scan_restore().returning(|_| {
+        Ok(QuarantinedFile {
+            rel: "gone.php".into(),
+            ..Default::default()
+        })
+    });
+    let items = vec![
+        finding("q.php", FindingKind::BaselineChange, SHA),
+        finding("t.php", FindingKind::BaselineChange, SHA),
+        finding("all.php", FindingKind::BaselineChange, SHA),
+    ];
+    let (s, _pool, sel, id) = fixture(a, result(vec![], items)).await;
+    s.scan_file_quarantine(sel.clone(), "q.php".into(), SHA.into(), String::new())
+        .await
+        .expect("quarantine");
+    assert_marked_then_clear(&s, &id).await;
+    s.scan_file_trust(sel.clone(), "t.php".into(), SHA.into(), String::new())
+        .await
+        .expect("trust");
+    assert_marked_then_clear(&s, &id).await;
+    s.scan_trust_all_review(sel.clone(), String::new())
+        .await
+        .expect("trust all");
+    assert_marked_then_clear(&s, &id).await;
+    s.scan_file_restore(sel, "1".repeat(32), String::new())
+        .await
+        .expect("restore");
+    assert_marked_then_clear(&s, &id).await;
+}
+
+// ---- a ClamAV hit can't be laundered ----
+
+/// Quarantine takes a ClamAV hit with it and restore brings it back. Otherwise a
+/// customer clears a paid report with two clicks and the malware back on disk.
+#[tokio::test]
+async fn quarantine_then_restore_keeps_the_clamav_hit() {
+    let held = Arc::new(StdMutex::new(None::<QuarantinedFile>));
+    let (put, take) = (held.clone(), held.clone());
+    let mut a = happy_mocks();
+    a.expect_site_scan_quarantine()
+        .times(1)
+        .returning(move |r| {
+            let rec = moved(r);
+            *put.lock().expect("lock") = Some(rec.clone());
+            Ok(rec)
+        });
+    a.expect_site_scan_restore()
+        .times(1)
+        .returning(move |_| Ok(take.lock().expect("lock").clone().expect("was held")));
+    // The scan that follows finds nothing wrong: it doesn't speak for ClamAV.
+    a.expect_site_scan_worker().returning(move |job| match job {
+        WorkerJob::Discover { .. } => WorkerReply::Discovery(Default::default()),
+        WorkerJob::Scan(_) => WorkerReply::Scan(SiteScanOutcome {
+            upstream: hyperion_adapters::sitescan::scan::UpstreamResult {
+                ran: true,
+                ..Default::default()
+            },
+            coverage: hyperion_types::ScanCoverage {
+                upstream_ran: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    });
+    a.expect_site_scan_evict_manifests().returning(|_| ());
+    let mut r = result(vec![rule_hit("up.php", SHA)], vec![]);
+    r.clamav_available = true;
+    let (s, _pool, sel, id) = fixture(a, r).await;
+    let root = s.get(sel.clone()).await.expect("get").root_dir;
+    let other = hyperion_types::WpMalwareHit {
+        path: format!("{root}/other.php"),
+        signature: "Other".into(),
+    };
+    let hit = hyperion_types::WpMalwareHit {
+        path: format!("{root}/up.php"),
+        signature: "Php.Trojan.Webshell-1".into(),
+    };
+    let mut rec = s.stored_integrity_scan(&id).await.expect("stored");
+    rec.result.malware = vec![hit.clone(), other.clone()];
+    s.set_stored_integrity_scan(&id, &rec).await;
+
+    let after = s
+        .scan_file_quarantine(sel.clone(), "up.php".into(), SHA.into(), String::new())
+        .await
+        .expect("quarantine");
+    // Gone with the file, and written down where it went.
+    assert_eq!(after.malware, [other.clone()]);
+    assert_eq!(
+        held.lock().expect("lock").as_ref().expect("held").malware,
+        [hit.clone()]
+    );
+
+    let back = s
+        .scan_file_restore(sel, "1".repeat(32), String::new())
+        .await
+        .expect("restore");
+    assert!(back.malware.contains(&hit));
+    assert!(!back.is_clean());
+
+    // And a scan that runs next carries it, as it does any standing ClamAV hit.
+    s.site_scan_tick_at(&chrono::Utc, 2_000_000)
+        .await
+        .expect("tick");
+    let stored = s.stored_integrity_scan(&id).await.expect("stored");
+    assert!(stored.result.malware.contains(&hit), "laundered");
+    assert!(stored.result.malware.contains(&other));
+    assert!(!stored.result.awaiting_rescan);
+    assert!(!stored.result.is_clean());
 }
 
 // ---- audit ----

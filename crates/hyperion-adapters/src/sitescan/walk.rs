@@ -350,8 +350,9 @@ impl TenantRoot {
     /// Create the file `rel` for writing, root-only until the caller says
     /// otherwise. Never follows anything: every parent is reached like `open_file`
     /// reaches one, and whatever is at the name already, a symlink included, is
-    /// an error.
-    pub fn create_new(&self, rel: &str) -> io::Result<File> {
+    /// an error. Also returns the parent directory it was made in, for the caller
+    /// to fsync once the file is done: that is what makes the name durable.
+    pub fn create_new(&self, rel: &str) -> io::Result<(File, File)> {
         let comps = split_rel(rel, false)?;
         let (leaf, parents) = comps
             .split_last()
@@ -364,7 +365,7 @@ impl TenantRoot {
             Mode::from_raw_mode(0o600),
         )
         .map_err(io::Error::from)?;
-        Ok(File::from(fd))
+        Ok((File::from(fd), File::from(parent)))
     }
 
     /// The target of the symlink `rel`, reached like `open_file` reaches a file.

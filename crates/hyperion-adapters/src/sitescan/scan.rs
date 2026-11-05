@@ -23,6 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hyperion_types::{
     FindingKind, ScanCoverage, SiteFileFinding, WpIntegrityFileIssue, WpIntegrityPluginResult,
+    HARD_LINKED_SNIPPET,
 };
 use md5::Md5;
 use serde::{Deserialize, Serialize};
@@ -869,7 +870,7 @@ impl<'a> Scan<'a> {
             SkipReason::Symlink => return self.on_symlink(&rel),
             SkipReason::Vanished if self.is_churn_path(&rel) => return,
             SkipReason::HardLinked if in_scope(&rel) => {
-                self.report_unread(&rel, "hard-linked file: not read");
+                self.report_unread(&rel, HARD_LINKED_SNIPPET);
             }
             _ => {}
         }

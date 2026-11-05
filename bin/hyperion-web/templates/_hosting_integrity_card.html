@@ -41,7 +41,7 @@
   <form hx-post="/hostings/integrity/trust" hx-target="#integrity-card" hx-swap="outerHTML"
         hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
         data-confirm-title="Trust {{ f.rel|tenant_text }}"
-        data-confirm-body="{% if f.symlink %}Accepts this symlink as long as it points where it does now. The target's content isn't scanned.{% else %}Accepts this file as it stands, so it's no longer flagged. If its content changes it's flagged again.{% endif %}{% if f.rule_id.is_some() %} It matched a malware rule: only trust it if you've read it.{% endif %}"
+        data-confirm-body="{% if f.symlink %}Accepts this symlink as long as it points where it does now. The target's content isn't scanned.{% else if f.never_read() %}This file was never read: it's too large, so nothing is known about what's in it. Accepts it as long as its size stays the same and nothing touches it.{% else if f.read_in_part() %}This file was never read to the end: it's too large for the rules, so what's past that point is unknown. Accepts it as it stands; if its content changes it's flagged again.{% else %}Accepts this file as it stands, so it's no longer flagged. If its content changes it's flagged again.{% endif %}{% if f.rule_id.is_some() && !f.read_in_part() %} It matched a malware rule: only trust it if you've read it.{% endif %}"
         data-confirm-confirm-label="Trust file">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="selector" value="{{ selector }}">
@@ -61,6 +61,7 @@
   {% if let Some(r) = f.rule_id %} · rule <code>{{ r|tenant_text }}</code>{% if f.line > 0 %}, line {{ f.line }}{% endif %}{% endif %}
   {% if !f.domains.is_empty() %} · mentions {% for d in f.domains %}{% if loop.index0 < 5 %}<code>{{ d|tenant_text }}</code> {% endif %}{% endfor %}{% endif %}
   {% if !f.snippet.is_empty() %} · <code>{{ f.snippet|tenant_text }}</code>{% endif %}
+  {% if f.is_hard_linked() %} · it has other hard links, so nothing here can move it; remove it over SFTP{% endif %}
 </span>{% call file_actions(f) %}</li>
 {% endmacro %}
 {% let v = scan.verdict().as_str() %}
@@ -89,6 +90,7 @@
       {% else %}Files verified — malware not scanned{% endif %}
       {% if scan.scanned_at != 0 %}· {{ crate::handlers::stats::fmt_ago(scan.scanned_at) }}{% endif %}
       {% if scan.scan_queued %}· <span class="tone-warn">scan queued</span>{% endif %}
+      {% if scan.awaiting_rescan %}· <span class="tone-warn">re-checking after your change</span>{% endif %}
     </span>
     <div class="chk-actions">
       {% if scan.scan_queued %}<span class="text-soft small"><span class="spinner-inline"></span> scanning in the background</span>{% endif %}
