@@ -626,12 +626,21 @@ pub fn parse_system_df(bytes: &[u8]) -> Result<DockerDisk, DockerError> {
 pub struct LocalImage {
     /// The reference the container names, as it was asked for.
     pub image_ref: String,
-    /// `name@sha256:...` entries. Empty for an image that was built here.
+    /// `name@sha256:...` entries. Empty for an image that was built here on
+    /// the classic store. On the containerd store (Docker 29's default) every
+    /// local name gets an entry, whether or not a registry holds that digest,
+    /// so `built_here` and `pulled_from` decide what they are worth.
     pub repo_digests: Vec<String>,
     /// `Id`: what a container created from this image reports as its image.
     pub image_id: String,
     /// The reference names a digest itself, so there is no tag to move.
     pub pinned: bool,
+    /// `Identity` says this image was built on this node and never pulled.
+    /// `false` when the daemon prints no `Identity`.
+    pub built_here: bool,
+    /// The repositories `Identity` says this image was pulled from. Empty when
+    /// the daemon prints no `Identity`, which says nothing either way.
+    pub pulled_from: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -639,21 +648,50 @@ pub struct LocalImage {
 struct ImageInspectRow {
     id: String,
     repo_digests: Option<Vec<String>>,
+    identity: Option<ImageIdentity>,
+}
+
+/// Where an image came from (Docker 29). Only whether it was built and which
+/// repositories it was pulled from are kept.
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "PascalCase")]
+struct ImageIdentity {
+    build: Option<Vec<serde::de::IgnoredAny>>,
+    pull: Option<Vec<ImagePull>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "PascalCase")]
+struct ImagePull {
+    repository: String,
 }
 
 /// Facts from `docker image inspect <image_ref>`. `None` when the node has no
-/// such image (docker prints `[]`). Only the image id and its repo digests are
-/// read, so `Config.Env` and every label stay where they were.
+/// such image (docker prints `[]`). Only the image id, its repo digests and
+/// where it came from are read, so `Config.Env` and every label stay where they
+/// were.
 pub fn parse_image_inspect(
     bytes: &[u8],
     image_ref: &str,
 ) -> Result<Option<LocalImage>, DockerError> {
     let rows: Vec<ImageInspectRow> = serde_json::from_slice(bytes).map_err(jerr)?;
-    Ok(rows.into_iter().next().map(|r| LocalImage {
-        image_ref: image_ref.to_string(),
-        repo_digests: r.repo_digests.unwrap_or_default(),
-        image_id: r.id,
-        pinned: image_ref.contains("@sha256:"),
+    Ok(rows.into_iter().next().map(|r| {
+        let identity = r.identity.unwrap_or_default();
+        let pulled_from: Vec<String> = identity
+            .pull
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| p.repository)
+            .filter(|p| !p.is_empty())
+            .collect();
+        LocalImage {
+            image_ref: image_ref.to_string(),
+            repo_digests: r.repo_digests.unwrap_or_default(),
+            image_id: r.id,
+            pinned: image_ref.contains("@sha256:"),
+            built_here: pulled_from.is_empty() && identity.build.is_some_and(|b| !b.is_empty()),
+            pulled_from,
+        }
     }))
 }
 
@@ -903,8 +941,12 @@ mod tests {
             repo_digests,
             image_id,
             pinned,
+            built_here,
+            pulled_from,
         } = &img;
-        let everything = format!("{image_ref} {repo_digests:?} {image_id} {pinned} {img:?}");
+        let everything = format!(
+            "{image_ref} {repo_digests:?} {image_id} {pinned} {built_here} {pulled_from:?} {img:?}"
+        );
         assert!(!everything.contains("do-not-leak-7f3a"), "{everything}");
         assert!(!everything.contains("DB_PASSWORD"), "{everything}");
     }
@@ -927,6 +969,53 @@ mod tests {
             parse_image_inspect(b"nope", "x:1"),
             Err(DockerError::Parse(_))
         ));
+    }
+
+    /// Docker 29 on the containerd image store, as printed on a node. A built
+    /// image has a `RepoDigests` entry of its own name, so only `Identity`
+    /// tells it from a pulled one; a re-tagged image keeps where it came from.
+    #[test]
+    fn identity_tells_a_built_image_from_a_pulled_one() {
+        let built = br#"[{
+            "Id": "sha256:19",
+            "RepoTags": ["app:1"],
+            "RepoDigests": ["app@sha256:19"],
+            "Identity": {"Build": [{"Ref": "vadol9", "CreatedAt": "2026-11-05T08:00:35Z"}]}
+        }]"#;
+        let img = parse_image_inspect(built, "app:1").unwrap().expect("image");
+        assert!(img.built_here);
+        assert!(img.pulled_from.is_empty());
+
+        let pulled = br#"[{
+            "Id": "sha256:65",
+            "RepoDigests": ["nginx@sha256:65", "other/copy@sha256:65"],
+            "Identity": {"Pull": [{"Repository": "docker.io/library/nginx"}]}
+        }]"#;
+        let img = parse_image_inspect(pulled, "other/copy:1")
+            .unwrap()
+            .expect("image");
+        assert!(!img.built_here);
+        assert_eq!(img.pulled_from, ["docker.io/library/nginx"]);
+
+        // Built here and pulled too: there is a registry to compare with.
+        let both = br#"[{
+            "Id": "sha256:77",
+            "RepoDigests": ["reg.example/app@sha256:77"],
+            "Identity": {
+                "Build": [{"Ref": "x"}],
+                "Pull": [{"Repository": "reg.example/app"}]
+            }
+        }]"#;
+        let img = parse_image_inspect(both, "reg.example/app:1")
+            .unwrap()
+            .expect("image");
+        assert!(!img.built_here);
+
+        // Older daemons print no `Identity` at all.
+        let old = br#"[{"Id":"sha256:aa","RepoDigests":["x@sha256:aa"]}]"#;
+        let img = parse_image_inspect(old, "x:1").unwrap().expect("image");
+        assert!(!img.built_here);
+        assert!(img.pulled_from.is_empty());
     }
 
     #[test]

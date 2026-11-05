@@ -339,6 +339,8 @@ struct World {
     /// What `docker image inspect <ref>` finds locally: the image id and its
     /// repo digests. A reference that is not here is not on the node.
     locals: std::collections::HashMap<String, (String, Vec<String>)>,
+    /// `Identity` of a local image, as Docker 29 prints it.
+    identities: std::collections::HashMap<String, serde_json::Value>,
     /// What the registry answers for a reference.
     remote: std::collections::HashMap<String, Result<String, RemoteDigestError>>,
     /// The references the registry was asked about, in order.
@@ -479,6 +481,7 @@ fn world_mock(world: &Shared) -> MockAdapterPort {
                     "Id": id,
                     "RepoTags": [r.as_str()],
                     "RepoDigests": digests,
+                    "Identity": w.identities.get(r.as_str()),
                     "Config": {
                         "Env": ["SECRET_VALUE=do-not-leak-7f3a"],
                         "Labels": {"secret.label": "do-not-leak-7f3a"},
@@ -2701,6 +2704,8 @@ fn local_of(image_ref: &str, repo_digests: &[&str], id: &str) -> LocalImage {
         repo_digests: repo_digests.iter().map(|s| s.to_string()).collect(),
         image_id: id.into(),
         pinned: image_ref.contains("@sha256:"),
+        built_here: false,
+        pulled_from: Vec::new(),
     }
 }
 
@@ -2904,6 +2909,61 @@ fn failed_check_keeps_last_answer() {
     ));
 }
 
+/// Docker 29's containerd store gives a built image a `RepoDigests` entry of
+/// its own name, so "no digests" no longer means "built here".
+#[test]
+fn an_image_built_here_is_told_by_its_identity_too() {
+    let mut l = local_of("app:1", &[&format!("app@{OLD_D}")], OLD_D);
+    l.built_here = true;
+    for remote in [Ok(OLD_D), Err(&RemoteDigestError::Unauthorized)] {
+        let s = image_state(&l, OLD_D, remote, None);
+        assert!(cannot(&s).contains("built on this node"), "{s:?}");
+    }
+}
+
+/// `docker tag busybox reg/x:1` makes Docker 29 report a digest under
+/// `reg/x`. The image came from elsewhere, and what the registry holds under
+/// that name is no comparison for it: a push of a multi-arch image's one
+/// local platform gets another digest there.
+#[test]
+fn an_image_pulled_under_another_name_cannot_be_compared() {
+    let mut l = local_of(
+        "127.0.0.1:15000/priv/bb:1",
+        &[
+            &format!("127.0.0.1:15000/priv/bb@{OLD_D}"),
+            &format!("busybox@{OLD_D}"),
+        ],
+        OLD_D,
+    );
+    l.pulled_from = vec!["docker.io/library/busybox".into()];
+    let s = image_state(&l, OLD_D, Ok(NEW_D), None);
+    assert!(cannot(&s).contains("another repository"), "{s:?}");
+
+    // Pulled from that repository after all: compared. Docker 29 leaves the
+    // registry's port out of `Identity` (seen on a node: `127.0.0.1/priv/bb`
+    // for an image pulled from `127.0.0.1:15000/priv/bb`).
+    l.pulled_from.push("127.0.0.1/priv/bb".into());
+    assert_eq!(
+        image_state(&l, OLD_D, Ok(NEW_D), None),
+        ImageUpdateState::UpdateAvailable
+    );
+    l.pulled_from = vec!["127.0.0.1:15000/priv/bb".into()];
+    assert_eq!(
+        image_state(&l, OLD_D, Ok(NEW_D), None),
+        ImageUpdateState::UpdateAvailable
+    );
+    // The same path on another host is another repository.
+    l.pulled_from = vec!["ghcr.io/priv/bb".into()];
+    let s = image_state(&l, OLD_D, Ok(NEW_D), None);
+    assert!(cannot(&s).contains("another repository"), "{s:?}");
+    let mut hub = nginx_local(OLD_D);
+    hub.pulled_from = vec!["docker.io/library/nginx".into()];
+    assert_eq!(
+        image_state(&hub, OLD_D, Ok(OLD_D), None),
+        ImageUpdateState::UpToDate
+    );
+}
+
 #[test]
 fn pulled_not_recreated_is_told_before_anything_else() {
     let l = nginx_local(NEW_D);
@@ -2980,6 +3040,28 @@ async fn updates_tick_does_nothing_when_not_installed() {
     s.docker_updates_tick()
         .await
         .expect("an off module is a no-op");
+}
+
+/// The name of an image built on this node says nothing to a registry, and
+/// must not be sent to one.
+#[tokio::test]
+async fn an_image_built_here_is_not_asked_about_at_any_registry() {
+    let w = world(vec![ct(1, "shop", "web").on_image("app:1", OLD_D)]);
+    {
+        let mut g = w.lock().expect("world");
+        g.locals
+            .insert("app:1".into(), (OLD_D.into(), vec![format!("app@{OLD_D}")]));
+        g.identities.insert(
+            "app:1".into(),
+            serde_json::json!({"Build": [{"Ref": "abc", "CreatedAt": "2026-11-05T08:00:35Z"}]}),
+        );
+    }
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    assert!(lookups(&w).is_empty(), "{:?}", lookups(&w));
+    let got = container_updates(&s).await;
+    let state = got[0].as_ref().expect("an answer");
+    assert!(cannot(state).contains("built on this node"), "{state:?}");
 }
 
 #[tokio::test]

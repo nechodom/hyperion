@@ -88,13 +88,44 @@ fn own_digests(local: &LocalImage) -> Vec<&str> {
         .collect()
 }
 
+/// A repository name without the port of its registry.
+fn without_port(repo: &str) -> String {
+    match repo.split_once('/') {
+        Some((host, rest)) => {
+            let host = host.split_once(':').map_or(host, |(h, _)| h);
+            format!("{host}/{rest}")
+        }
+        None => repo.to_string(),
+    }
+}
+
+/// Whether the image came from the repository the reference names. Docker 29
+/// lists a digest under every local name, re-tagged ones too, so where it was
+/// pulled from is what counts (a push that kept the digest counts as well). A
+/// daemon that does not say leaves only the digests to go by. `Identity` leaves
+/// the registry's port out, so the port is not compared.
+fn pulled_from_its_own_repo(local: &LocalImage) -> bool {
+    if local.pulled_from.is_empty() {
+        return true;
+    }
+    let Some(repo) = repo_name_of(&local.image_ref).map(|r| without_port(&r)) else {
+        return false;
+    };
+    local
+        .pulled_from
+        .iter()
+        .filter_map(|p| repo_name_of(p))
+        .any(|p| without_port(&p) == repo)
+}
+
 /// A reason the registry need not be asked at all, from the local copy alone.
+/// The name of an image built here also stays off any registry this way.
 fn unverifiable_locally(local: &LocalImage) -> Option<&'static str> {
     if local.pinned {
         Some(REASON_PINNED)
-    } else if local.repo_digests.is_empty() {
+    } else if local.repo_digests.is_empty() || local.built_here {
         Some(REASON_BUILT)
-    } else if own_digests(local).is_empty() {
+    } else if own_digests(local).is_empty() || !pulled_from_its_own_repo(local) {
         Some(REASON_OTHER_REPO)
     } else {
         None
