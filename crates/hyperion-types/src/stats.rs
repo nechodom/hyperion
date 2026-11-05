@@ -3145,6 +3145,7 @@ mod notification_topic_tests {
             ("protection.package:a.cz", "protection"),
             ("wp.update.major:id:x", "wordpress"),
             ("wp.integrity:id", "wordpress"),
+            ("wp.integrity.review:a.cz", "wordpress"),
             ("wp.signup_flood:a.cz", "wordpress"),
             ("wp_mail_override", "mail"),
             ("wp_mail_failing", "mail"),

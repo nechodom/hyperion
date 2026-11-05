@@ -492,12 +492,39 @@ pub(super) fn assemble_integrity_result(
 
 /// Stable identity for every finding in a scan, so the sweep can alert on
 /// what is NEW instead of re-sending the same list nightly. The prefixes
-/// keep the three core buckets apart: the same path moving from "missing"
-/// to "modified" is a different event, not the same one.
+/// keep the buckets apart: the same path moving from "missing" to "modified"
+/// is a different event, not the same one.
 ///
-/// Today's signals only: core, plugins and ClamAV. What the new layers find
-/// (rule hits, changes to review, themes) stays out through the silent pilot.
+/// Every signal, whether or not it alerts yet: a record from the silent pilot
+/// holds the same keys a live one would, which is what lets the first live
+/// scan treat what already stood as known. A failed comparison is one key
+/// however many buckets list it (`core:`, `plugin:`, `theme:` carry it), so
+/// `find:` is for what a rule objected to.
 pub(super) fn integrity_finding_keys(
+    r: &hyperion_types::WpIntegrityScanResult,
+) -> std::collections::HashSet<String> {
+    let mut keys = legacy_finding_keys(r);
+    for t in &r.themes_failed {
+        for i in &t.issues {
+            keys.insert(format!("theme:{}:{}", t.slug, i.path));
+        }
+    }
+    keys.extend(r.listed_findings().map(find_key));
+    keys.extend(r.review.iter().map(review_key));
+    keys
+}
+
+fn find_key(f: &hyperion_types::SiteFileFinding) -> String {
+    format!("find:{}:{}", f.rel, f.rule_id.as_deref().unwrap_or("-"))
+}
+
+fn review_key(f: &hyperion_types::SiteFileFinding) -> String {
+    format!("review:{}", f.rel)
+}
+
+/// Today's signals: core, plugins and ClamAV. They alert whether or not the new
+/// layers are live.
+pub(super) fn legacy_finding_keys(
     r: &hyperion_types::WpIntegrityScanResult,
 ) -> std::collections::HashSet<String> {
     let mut keys = std::collections::HashSet::new();
@@ -519,6 +546,71 @@ pub(super) fn integrity_finding_keys(
         keys.insert(format!("malware:{}:{}", hit.path, hit.signature));
     }
     keys
+}
+
+/// What a scan has to say that the last one didn't.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct IntegrityAlertPlan {
+    /// New failed comparisons, rule hits and failed themes.
+    pub(super) findings: usize,
+    /// New changes to review: one batched message per site per sweep.
+    pub(super) review: usize,
+    /// The findings include something that isn't just a missing core file.
+    pub(super) error: bool,
+}
+
+impl IntegrityAlertPlan {
+    pub(super) fn is_empty(&self) -> bool {
+        self.findings == 0 && self.review == 0
+    }
+}
+
+/// Which new keys a scan alerts, against the record it replaces (ClamAV's are
+/// its own sweep's to tell and never count here).
+///
+/// Through the silent pilot only today's signals count; the rest are stored
+/// and stay quiet. Live, rule hits, changes to review and failed themes count
+/// too, and on a first scan only the high-severity ones: a site with no
+/// baseline would otherwise report its whole tree. A pilot record's keys are
+/// known, so turning the switch on alerts what appears after it.
+pub(super) fn plan_integrity_alert(
+    prior: Option<&hyperion_types::WpIntegrityScanResult>,
+    scan: &hyperion_types::WpIntegrityScanResult,
+) -> IntegrityAlertPlan {
+    let known = prior.map(integrity_finding_keys).unwrap_or_default();
+    let mut new: std::collections::HashSet<String> = integrity_finding_keys(scan)
+        .into_iter()
+        .filter(|k| !k.starts_with("malware:") && !known.contains(k))
+        .collect();
+    if !scan.is_live() {
+        let legacy = legacy_finding_keys(scan);
+        new.retain(|k| legacy.contains(k));
+    } else if prior.map_or(true, |p| !p.native_scan_ran) {
+        let high: std::collections::HashSet<String> = scan
+            .listed_findings()
+            .filter(|f| f.severity == "high")
+            .map(find_key)
+            .chain(
+                scan.review
+                    .iter()
+                    .filter(|f| f.severity == "high")
+                    .map(review_key),
+            )
+            .collect();
+        new.retain(|k| !(k.starts_with("find:") || k.starts_with("review:")) || high.contains(k));
+    }
+    let review = new.iter().filter(|k| k.starts_with("review:")).count();
+    let findings = new.len() - review;
+    // A missing core file is usually a botched update; anything else a finding
+    // names is a suspected compromise.
+    let error = new
+        .iter()
+        .any(|k| !k.starts_with("core:gone:") && !k.starts_with("review:"));
+    IntegrityAlertPlan {
+        findings,
+        review,
+        error,
+    }
 }
 
 /// How much of a failed pass's message goes to the log.

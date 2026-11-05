@@ -123,9 +123,11 @@ A, and each result is labelled with its source, because they aren't equally stro
    from the database without running PHP (take `DB_NAME` and the prefix from
    `wp-config.php` by parsing, extract values without unserializing). Download in the
    agent, build the manifest, keep no ZIP. Label: "matches the vendor's package".
-   - **Any site fills the cache for all of them.** A manifest is keyed by slug + version
-     and shared across the cluster, so one site with a working licence and URL verifies
-     every site running that version. Try each site holding the plugin until one works.
+   - **Any site on a node fills the cache for the others on it.** A manifest is keyed by
+     slug + version and shared across the sites of one node, so one site with a working
+     licence and URL verifies every site on that node running that version. Try each site
+     holding the plugin until one works. Sharing manifests across the cluster was deferred
+     by the owner to a later PR; each node builds its own for now.
    - A `no_update` entry can verify the version installed today. A `response` entry only
      prepares the next version, so that site verifies after it updates. Which vendors
      expose which is unknown until tried on real sites; coverage is reported, not assumed.
@@ -139,7 +141,8 @@ A, and each result is labelled with its source, because they aren't equally stro
    - These URLs often carry a licence key, so treat them as secrets: never on argv, never
      logged or stored, per the repo's existing rule. Failed requests are backed off per
      slug + version so a vendor never sees repeated attempts from a licence.
-2. **Comparison across the operator's own sites.** With the same slug and version on at
+2. **Comparison across the operator's own sites.** *Deferred by the owner to a later
+   PR; not built.* With the same slug and version on at
    least 3 sites, and one differing from a strict majority, the differing files become
    changes to review, or findings on a rule hit. Nodes send hashes only, never content.
    Customers never see other sites' names. Label: "same as N of your other sites", and
@@ -376,6 +379,8 @@ Each part ships on its own and leaves the product working.
 3. New verdict states and coverage line in the panel. Pilot on a real node starts here.
 4. Quarantine, restore, trust, Reinstall theme.
 5. Premium references: automatic package download, then cross-site comparison.
+   Cross-site comparison (Layer A+ item 2) and cluster-wide sharing of manifests were
+   deferred by the owner to a later PR. Manifests are shared per node for now.
 6. Reports, letters, `hctl`, then alerts switched on after pilot review.
 7. ClamAV rework.
 

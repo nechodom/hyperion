@@ -276,6 +276,138 @@ fn integrity_finding_keys_separate_buckets_and_drive_the_new_diff() {
     );
 }
 
+/// A scan's finding in the bucket `kind` names, at `severity`.
+fn file_finding(
+    rel: &str,
+    kind: hyperion_types::FindingKind,
+    severity: &str,
+) -> hyperion_types::SiteFileFinding {
+    hyperion_types::SiteFileFinding {
+        rel: rel.into(),
+        kind,
+        severity: severity.into(),
+        rule_id: matches!(kind, hyperion_types::FindingKind::RuleHit).then(|| "php.eval".into()),
+        ..Default::default()
+    }
+}
+
+fn native_result(report_only: bool) -> hyperion_types::WpIntegrityScanResult {
+    hyperion_types::WpIntegrityScanResult {
+        native_scan_ran: true,
+        report_only,
+        scanned_at: 100,
+        coverage: hyperion_types::ScanCoverage {
+            upstream_ran: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Keys come from the record itself, pilot or not, so a pilot's stored record
+/// already knows everything that stood when the switch is flipped.
+#[test]
+fn keys_cover_the_new_buckets_without_counting_a_comparison_twice() {
+    use hyperion_types::FindingKind::*;
+    let mut r = native_result(true);
+    r.core_modified = vec!["wp-includes/load.php".into()];
+    r.findings = vec![
+        file_finding("wp-includes/load.php", CoreModified, "high"),
+        file_finding("wp-content/uploads/a.php", RuleHit, "high"),
+    ];
+    r.review = vec![file_finding(
+        "wp-content/themes/x/f.php",
+        BaselineChange,
+        "medium",
+    )];
+    r.themes_failed = vec![hyperion_types::WpIntegrityPluginResult {
+        slug: "twenty".into(),
+        issues: vec![hyperion_types::WpIntegrityFileIssue {
+            path: "style.css".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let keys = integrity_finding_keys(&r);
+    assert_eq!(keys.len(), 4, "{keys:?}");
+    assert!(keys.contains("core:mod:wp-includes/load.php"));
+    assert_eq!(keys.iter().filter(|k| k.starts_with("review:")).count(), 1);
+    assert_eq!(keys.iter().filter(|k| k.starts_with("theme:")).count(), 1);
+    assert_eq!(legacy_finding_keys(&r).len(), 1);
+}
+
+#[test]
+fn pilot_scan_alerts_what_it_always_did_and_nothing_more() {
+    use hyperion_types::FindingKind::*;
+    let prior = native_result(true);
+    let mut scan = native_result(true);
+    scan.core_modified = vec!["wp-includes/load.php".into()];
+    scan.findings = vec![file_finding("wp-content/uploads/a.php", RuleHit, "high")];
+    scan.review = vec![file_finding("wp-content/x.php", BaselineChange, "medium")];
+    let plan = plan_integrity_alert(Some(&prior), &scan);
+    assert_eq!((plan.findings, plan.review), (1, 0));
+}
+
+#[test]
+fn first_scan_alerts_high_only() {
+    use hyperion_types::FindingKind::*;
+    let mut scan = native_result(false);
+    scan.findings = vec![
+        file_finding("wp-content/uploads/a.php", RuleHit, "high"),
+        file_finding("wp-content/uploads/b.php", RuleHit, "medium"),
+    ];
+    scan.review = vec![
+        file_finding("wp-content/c.php", BaselineChange, "medium"),
+        file_finding("wp-content/d.php", TooLargeToInspect, "high"),
+    ];
+    // Nothing stored at all, or only a record from before the native scan.
+    for prior in [None, Some(hyperion_types::WpIntegrityScanResult::default())] {
+        let plan = plan_integrity_alert(prior.as_ref(), &scan);
+        assert_eq!((plan.findings, plan.review), (1, 1), "{prior:?}");
+        assert!(plan.error);
+    }
+    // The second scan has a baseline: everything new counts, whatever its level.
+    let prior = native_result(false);
+    let plan = plan_integrity_alert(Some(&prior), &scan);
+    assert_eq!((plan.findings, plan.review), (2, 2));
+}
+
+/// Going live: what the pilot already showed is known, only what appears after is new.
+#[test]
+fn flipping_live_does_not_alert_what_stood_during_the_pilot() {
+    use hyperion_types::FindingKind::*;
+    let mut pilot = native_result(true);
+    pilot.findings = vec![file_finding("wp-content/uploads/a.php", RuleHit, "high")];
+    pilot.review = vec![file_finding("wp-content/c.php", BaselineChange, "medium")];
+    let mut live = native_result(false);
+    live.findings = pilot.findings.clone();
+    live.review = pilot.review.clone();
+    let plan = plan_integrity_alert(Some(&pilot), &live);
+    assert_eq!((plan.findings, plan.review), (0, 0));
+    live.review
+        .push(file_finding("wp-content/e.php", BaselineChange, "medium"));
+    let plan = plan_integrity_alert(Some(&pilot), &live);
+    assert_eq!((plan.findings, plan.review), (0, 1));
+    assert!(!plan.error, "a review alone is a warning");
+}
+
+#[test]
+fn a_failed_theme_alerts_once_live() {
+    let prior = native_result(false);
+    let mut scan = native_result(false);
+    scan.themes_failed = vec![hyperion_types::WpIntegrityPluginResult {
+        slug: "twenty".into(),
+        issues: vec![hyperion_types::WpIntegrityFileIssue::default()],
+        ..Default::default()
+    }];
+    let plan = plan_integrity_alert(Some(&prior), &scan);
+    assert_eq!((plan.findings, plan.review), (1, 0));
+    // In the pilot themes stay out, as they always did.
+    scan.report_only = true;
+    let plan = plan_integrity_alert(Some(&prior), &scan);
+    assert_eq!((plan.findings, plan.review), (0, 0));
+}
+
 /// A trashed site keeps its stored scan — un-trashing restores the
 /// history — but must not appear on the cluster dashboards.
 ///
@@ -742,6 +874,119 @@ mod site_scan {
         );
         // Failed just ahead of a sweep's clock: still held off.
         assert_eq!(site_scan_due(Some(&failed), now - 90, &tz, id), None);
+    }
+
+    /// Config that arms the new layers' alerts.
+    fn live_config() -> (std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("agent.toml");
+        std::fs::write(&path, "[integrity]\nnew_layers_live = true\n").expect("write");
+        (path, dir)
+    }
+
+    fn review_item(rel: &str) -> hyperion_types::SiteFileFinding {
+        file_finding(rel, hyperion_types::FindingKind::BaselineChange, "medium")
+    }
+
+    /// Three changes to review on one site are ONE warning, and a standing
+    /// review is not told again.
+    #[tokio::test]
+    async fn alert_batches_review_per_site() {
+        use hyperion_state::web_users::WebRole;
+        let pool = open_memory().await.expect("open");
+        let (cfg, _dir) = live_config();
+        let mut outcome = upstream_verified(0);
+        outcome.review = ["a.php", "b.php", "c.php"].map(review_item).to_vec();
+        let s = svc(pool.clone(), answering(happy_mocks(), outcome)).with_agent_config_path(cfg);
+        let admin = seed_web_user(&s, "boss", WebRole::Admin).await;
+        let site = site_named(&s, "kos.cz").await;
+        let t0 = monday_at(0, 12, 0);
+        // A baseline already stands, so this is not the first scan.
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(t0 - 8 * DAY, t0 - 8 * DAY))
+            .await;
+        assert_eq!(
+            s.site_scan_tick_at(&chrono::Utc, t0).await.expect("tick"),
+            1
+        );
+        let feed = s.notifications_feed(admin, 10).await.expect("feed");
+        assert_eq!(feed.items.len(), 1, "{:?}", feed.items);
+        assert_eq!(feed.items[0].severity, "warn");
+        assert!(feed.items[0].body.contains('3'), "{}", feed.items[0].body);
+        assert!(feed.items[0].kind.starts_with("wp.integrity.review:"));
+
+        assert_eq!(
+            s.site_scan_tick_at(&chrono::Utc, t0 + 8 * DAY)
+                .await
+                .expect("tick"),
+            0,
+            "the same three are known now"
+        );
+        assert_eq!(
+            s.notifications_feed(admin, 10)
+                .await
+                .expect("feed")
+                .items
+                .len(),
+            1
+        );
+    }
+
+    /// Through the pilot nothing the new layers find is sent, but it is all
+    /// stored, so turning the switch on later alerts only on what comes after.
+    #[tokio::test]
+    async fn the_pilot_stores_what_going_live_will_treat_as_known() {
+        use hyperion_state::web_users::WebRole;
+        let pool = open_memory().await.expect("open");
+        let mut outcome = upstream_verified(0);
+        outcome.review = ["a.php", "b.php"].map(review_item).to_vec();
+        outcome.findings = vec![file_finding(
+            "wp-content/uploads/x.php",
+            hyperion_types::FindingKind::RuleHit,
+            "high",
+        )];
+        let t0 = monday_at(0, 12, 0);
+        let s = svc(pool.clone(), answering(happy_mocks(), outcome.clone()));
+        let admin = seed_web_user(&s, "boss", WebRole::Admin).await;
+        let site = site_named(&s, "kos.cz").await;
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(t0 - 8 * DAY, t0 - 8 * DAY))
+            .await;
+        assert_eq!(
+            s.site_scan_tick_at(&chrono::Utc, t0).await.expect("tick"),
+            0
+        );
+        assert!(s
+            .notifications_feed(admin, 10)
+            .await
+            .expect("feed")
+            .items
+            .is_empty());
+        let rec = s
+            .stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record");
+        assert!(rec.result.report_only);
+        assert_eq!((rec.result.review.len(), rec.result.findings.len()), (2, 1));
+
+        // The owner flips the switch. The same things stand: no flood.
+        let (cfg, _dir) = live_config();
+        let live = svc(pool.clone(), answering(happy_mocks(), outcome)).with_agent_config_path(cfg);
+        assert_eq!(
+            live.site_scan_tick_at(&chrono::Utc, t0 + 8 * DAY)
+                .await
+                .expect("tick"),
+            0
+        );
+        assert!(s
+            .notifications_feed(admin, 10)
+            .await
+            .expect("feed")
+            .items
+            .is_empty());
+        let rec = live
+            .stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record");
+        assert!(!rec.result.report_only);
     }
 
     // ---- the tick ----
@@ -3490,12 +3735,18 @@ mod site_scan {
         assert!(o.review.iter().all(|f| f.severity == "medium"));
         assert!(o.review.iter().all(|f| f.held_vendor_note().is_some()));
         let r = assemble_integrity_result(o, vec![], true, true);
-        let keys = integrity_finding_keys(&r);
+        let keys = legacy_finding_keys(&r);
         assert!(
             !keys
                 .iter()
                 .any(|k| k.contains("pro") || k.contains("split")),
             "{keys:?}"
+        );
+        let prior = hyperion_types::WpIntegrityScanResult::default();
+        assert_eq!(
+            plan_integrity_alert(Some(&prior), &r).findings,
+            1,
+            "wordpress.org's plugin alerts, the held ones do not"
         );
         assert_eq!(r.verdict(), hyperion_types::ScanVerdict::Findings);
     }

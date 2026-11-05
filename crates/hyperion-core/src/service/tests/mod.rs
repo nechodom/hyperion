@@ -646,6 +646,7 @@ fn mk_care_report() -> CareReport {
         core_issues: 0,
         plugin_issues: 0,
         malware_hits: 0,
+        ..Default::default()
     });
     // A readable checklist with everything ticked — the ordinary case.
     // `None` here would mean the record could not be READ, which puts

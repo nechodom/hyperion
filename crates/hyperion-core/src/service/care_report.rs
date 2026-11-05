@@ -1560,7 +1560,19 @@ pub(super) fn care_section_integrity(
     let when = report_date(cat, i.scanned_at);
     let findings = i.total_findings();
     let mut out = if i.is_clean() {
-        cat.render("care.integrity.clean", &[("when", &when)])
+        // A site with no WordPress has no release to name.
+        let id = if i.no_upstream {
+            "care.integrity.clean_no_upstream"
+        } else {
+            "care.integrity.clean"
+        };
+        cat.render(id, &[("when", &when)])
+    } else if findings == 0 && i.review_pending > 0 && i.checksums_ran && i.malware_scan_ran {
+        // The check ran; what is left is for us to confirm.
+        cat.render(
+            "care.integrity.review",
+            &[("when", &when), ("count", &cat.group_int(i.review_pending))],
+        )
     } else if findings == 0 {
         cat.render("care.integrity.partial", &[("when", &when)])
     } else {
@@ -1581,6 +1593,12 @@ pub(super) fn care_section_integrity(
             what.push(cat.render(
                 "care.integrity.what_malware",
                 &[("count", &cat.group_int(i.malware_hits))],
+            ));
+        }
+        if i.rule_hits > 0 {
+            what.push(cat.render(
+                "care.integrity.what_rule",
+                &[("count", &cat.group_int(i.rule_hits))],
             ));
         }
         cat.render(

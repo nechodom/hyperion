@@ -873,6 +873,39 @@ pub static STRINGS: &[LetterString] = &[
              napsat „čisté\".",
     },
     LetterString {
+        id: "care.integrity.clean_no_upstream",
+        group: "Care report — file integrity",
+        note: "A live scan of a site with no CMS release to compare with: clean on the scan alone. Must never name where WordPress files come from. Token: {when}.",
+        en: "FILE INTEGRITY AND MALWARE: nothing found\n  \
+             Check on {when}: the site's files were scanned for suspicious code and\n  \
+             for unexpected changes, and nothing was found. The database is not\n  \
+             part of this check.",
+        cs: "INTEGRITA SOUBORŮ A MALWARE: nic nenalezeno\n  \
+             Kontrola {when}: soubory webu byly prohledány kvůli podezřelému kódu\n  \
+             a neočekávaným změnám a nic se nenašlo. Databáze součástí této kontroly\n  \
+             není.",
+    },
+    LetterString {
+        id: "care.integrity.review",
+        group: "Care report — file integrity",
+        note: "The check ran in full and found nothing wrong, but some changes still wait for us to confirm them. Not \"partly checked\": the check did run. Tokens: {when} {count}.",
+        en: "FILE INTEGRITY AND MALWARE: changes awaiting confirmation\n  \
+             The check on {when} ran in full and found nothing suspicious. Changed\n  \
+             files that we still have to confirm as expected: {count}. Until we\n  \
+             have, we do not write \"clean\".",
+        cs: "INTEGRITA SOUBORŮ A MALWARE: změny čekají na potvrzení\n  \
+             Kontrola {when} proběhla celá a nenašla nic podezřelého. Změněné\n  \
+             soubory, které ještě musíme potvrdit jako očekávané: {count}. Dokud to\n  \
+             neuděláme, nepíšeme „čisté\".",
+    },
+    LetterString {
+        id: "care.integrity.what_rule",
+        group: "Care report — file integrity",
+        note: "One item in the findings list: files the scan's rules objected to. Token: {count}.",
+        en: "suspicious or unexpected files ({count})",
+        cs: "podezřelé nebo neočekávané soubory ({count})",
+    },
+    LetterString {
         id: "care.integrity.findings",
         group: "Care report — file integrity",
         note: "The check flagged something. Tokens: {count} {unit} {when} {what}.",
@@ -1485,11 +1518,30 @@ pub static STRINGS: &[LetterString] = &[
     LetterString {
         id: "ops.integrity.body",
         group: "Operator alerts — WordPress",
-        note: "Tokens: {domain} {core} {plugins} {malware} {new}.",
-        en: "{domain} — {core} core file(s), {plugins} plugin file(s) and {malware} malware \
-             hit(s) differ from what should be there ({new} new since the last check).",
-        cs: "{domain} — {core} souborů jádra, {plugins} souborů pluginů a {malware} nálezů \
-             malwaru se liší od toho, co tam má být ({new} nových od poslední kontroly).",
+        note: "Tokens: {domain} {core} {plugins} {malware} {rules} {new}. {plugins} counts plugin and theme files; {rules} the files the scan's rules objected to.",
+        en: "{domain} — {core} core file(s), {plugins} plugin or theme file(s), {malware} malware \
+             hit(s) and {rules} other suspicious file(s) differ from what should be there \
+             ({new} new since the last check).",
+        cs: "{domain} — {core} souborů jádra, {plugins} souborů pluginů či šablon, {malware} \
+             nálezů malwaru a {rules} dalších podezřelých souborů se liší od toho, co tam má být \
+             ({new} nových od poslední kontroly).",
+    },
+    LetterString {
+        id: "ops.integrity_review.title",
+        group: "Operator alerts — WordPress",
+        note: "The file check left changes that need a person to say whether they are expected.",
+        en: "Site integrity check: changes to review",
+        cs: "Kontrola integrity webu: změny k posouzení",
+    },
+    LetterString {
+        id: "ops.integrity_review.body",
+        group: "Operator alerts — WordPress",
+        note: "One message per site per sweep. Tokens: {domain} {review} {new}.",
+        en: "{domain} — {review} changed file(s) wait for review, {new} of them new since the \
+             last check. Nothing matched a rule; trust the expected ones or look at the rest.",
+        cs: "{domain} — k posouzení čeká změněných souborů: {review}, z toho nových od poslední \
+             kontroly: {new}. Nic neodpovídá žádnému pravidlu; očekávané potvrďte, ostatní \
+             prověřte.",
     },
     LetterString {
         id: "ops.cert_failed.title",
@@ -1993,6 +2045,21 @@ mod tests {
             "ops.acme_dns_zone_broken.title",
             "ops.acme_dns_zone_broken.body",
             "ops.cert_wildcard_delegated_skip",
+        ] {
+            let s = lookup(id).unwrap_or_else(|| panic!("{id} missing"));
+            assert!(!s.en.is_empty() && !s.cs.is_empty(), "{id}");
+            assert_ne!(s.en, s.cs, "{id} cs looks untranslated");
+        }
+    }
+
+    #[test]
+    fn letters_exist_in_en_and_cs() {
+        for id in [
+            "care.integrity.review",
+            "care.integrity.clean_no_upstream",
+            "care.integrity.what_rule",
+            "ops.integrity_review.title",
+            "ops.integrity_review.body",
         ] {
             let s = lookup(id).unwrap_or_else(|| panic!("{id} missing"));
             assert!(!s.en.is_empty() && !s.cs.is_empty(), "{id}");

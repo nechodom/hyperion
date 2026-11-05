@@ -393,6 +393,10 @@ async fn audit_covers(pool: &SqlitePool, from_ts: i64) -> Result<bool, StateErro
 /// false` means "not looked for" (no scanner on the node — a normal
 /// state), never "none found". [`CareIntegrity::is_clean`] is the only
 /// sanctioned way to a green verdict and requires both.
+///
+/// A record counts as the native scan's only when it is live; the silent pilot
+/// and records from before it are read the way they always were, which keeps
+/// ClamAV in the verdict.
 pub async fn integrity(
     pool: &SqlitePool,
     hosting_id: &str,
@@ -414,20 +418,40 @@ pub async fn integrity(
         return Ok(None);
     }
     let r = &stored.result;
-    // The native scan reaches sites with no WordPress. A report has no words for
-    // those yet and says what it said before such a record could exist.
-    if r.native_scan_ran && r.coverage.no_upstream {
-        return Ok(None);
+    if !r.is_live() {
+        // The pilot's results are for the panel, and a record from before the
+        // scan is what it always was. A pilot scan of a site with no WordPress
+        // has no wording yet and says what a report said before it could exist.
+        if r.native_scan_ran && r.coverage.no_upstream {
+            return Ok(None);
+        }
+        return Ok(Some(CareIntegrity {
+            scanned_at,
+            // An action edited the record since the scan: this isn't its result
+            // yet, so the report says what it says for a scan that didn't cover
+            // the site.
+            checksums_ran: r.wp_cli_ok && !r.scan_partial() && !r.awaiting_rescan,
+            malware_scan_ran: r.clamav_available,
+            core_issues: r.core_issue_count() as i64,
+            plugin_issues: r.plugin_issue_count() as i64,
+            malware_hits: r.malware.len() as i64,
+            ..Default::default()
+        }));
     }
+    // A live scan: it is its own malware check, and what it couldn't judge is
+    // counted apart from what it found.
     Ok(Some(CareIntegrity {
         scanned_at,
-        // An action edited the record since the scan: this isn't its result yet, so
-        // the report says what it says for a scan that didn't cover the site.
-        checksums_ran: r.wp_cli_ok && !r.scan_partial() && !r.awaiting_rescan,
-        malware_scan_ran: r.clamav_available,
+        checksums_ran: (r.coverage.upstream_ran || r.coverage.no_upstream)
+            && !r.scan_partial()
+            && !r.awaiting_rescan,
+        malware_scan_ran: true,
         core_issues: r.core_issue_count() as i64,
-        plugin_issues: r.plugin_issue_count() as i64,
+        plugin_issues: (r.plugin_issue_count() + r.theme_issue_count()) as i64,
         malware_hits: r.malware.len() as i64,
+        rule_hits: r.listed_findings().count() as i64,
+        review_pending: r.review.len() as i64,
+        no_upstream: r.coverage.no_upstream,
     }))
 }
 
@@ -1071,17 +1095,17 @@ mod tests {
         assert!(!i.is_clean());
     }
 
-    /// The native scan reaches sites with no WordPress. Until the verdict for
-    /// those exists, the report says what it said before the record did.
+    /// The pilot's results are for the panel: a report says what it said before
+    /// the record could exist, whatever the scan found.
     #[tokio::test]
-    async fn integrity_ignores_a_native_scan_with_no_upstream() {
+    async fn integrity_ignores_a_pilot_scan_with_no_upstream() {
         let (pool, a, _b) = fresh().await;
         put_scan(
             &pool,
             a.as_str(),
             &format!(
-                r#"{{"scanned_at":{},"result":{{"native_scan_ran":true,"clamav_available":true,
-                     "coverage":{{"no_upstream":true}}}}}}"#,
+                r#"{{"scanned_at":{},"result":{{"native_scan_ran":true,"report_only":true,
+                     "clamav_available":true,"coverage":{{"no_upstream":true}}}}}}"#,
                 FROM + 1
             ),
         )
@@ -1090,6 +1114,102 @@ mod tests {
             integrity(&pool, a.as_str(), FROM, TO).await.expect("q"),
             None
         );
+    }
+
+    /// A live scan of a site with no WordPress is clean on the scan alone: no
+    /// release to compare with, no ClamAV needed.
+    #[tokio::test]
+    async fn live_scan_with_no_upstream_reports_clean_on_its_own() {
+        let (pool, a, _b) = fresh().await;
+        put_scan(
+            &pool,
+            a.as_str(),
+            &format!(
+                r#"{{"scanned_at":{},"result":{{"native_scan_ran":true,
+                     "coverage":{{"no_upstream":true}}}}}}"#,
+                FROM + 1
+            ),
+        )
+        .await;
+        let i = integrity(&pool, a.as_str(), FROM, TO)
+            .await
+            .expect("q")
+            .expect("scanned");
+        assert!(i.no_upstream && i.checksums_ran && i.malware_scan_ran);
+        assert!(i.is_clean());
+    }
+
+    /// Rule hits count as findings, changes to review block "clean" without
+    /// being findings, and a failed theme counts with the plugins.
+    #[tokio::test]
+    async fn live_scan_reports_its_buckets() {
+        let (pool, a, _b) = fresh().await;
+        put_scan(
+            &pool,
+            a.as_str(),
+            &format!(
+                r#"{{"scanned_at":{},"result":{{"native_scan_ran":true,
+                     "coverage":{{"upstream_ran":true}},
+                     "review":[{{"rel":"a.php"}},{{"rel":"b.php"}}]}}}}"#,
+                FROM + 1
+            ),
+        )
+        .await;
+        let i = integrity(&pool, a.as_str(), FROM, TO)
+            .await
+            .expect("q")
+            .expect("scanned");
+        assert!(i.checksums_ran && i.malware_scan_ran);
+        assert_eq!(
+            (i.review_pending, i.rule_hits, i.total_findings()),
+            (2, 0, 0)
+        );
+        assert!(!i.is_clean());
+
+        put_scan(
+            &pool,
+            a.as_str(),
+            &format!(
+                r#"{{"scanned_at":{},"result":{{"native_scan_ran":true,
+                     "coverage":{{"upstream_ran":true}},
+                     "findings":[{{"rel":"x.php","kind":"rule_hit","rule_id":"php.eval"}}],
+                     "themes_failed":[{{"slug":"t","issues":[{{"path":"style.css","message":"x"}}]}}]}}}}"#,
+                FROM + 1
+            ),
+        )
+        .await;
+        let i = integrity(&pool, a.as_str(), FROM, TO)
+            .await
+            .expect("q")
+            .expect("scanned");
+        assert_eq!((i.rule_hits, i.plugin_issues, i.review_pending), (1, 1, 0));
+        assert!(!i.is_clean());
+    }
+
+    /// In the pilot the new buckets don't reach a report, and ClamAV is still
+    /// what makes "malware looked for" true.
+    #[tokio::test]
+    async fn pilot_scan_reports_by_the_old_rule() {
+        let (pool, a, _b) = fresh().await;
+        put_scan(
+            &pool,
+            a.as_str(),
+            &format!(
+                r#"{{"scanned_at":{},"result":{{"native_scan_ran":true,"report_only":true,
+                     "wp_cli_ok":true,"clamav_available":false,
+                     "findings":[{{"rel":"x.php","kind":"rule_hit"}}],
+                     "review":[{{"rel":"a.php"}}]}}}}"#,
+                FROM + 1
+            ),
+        )
+        .await;
+        let i = integrity(&pool, a.as_str(), FROM, TO)
+            .await
+            .expect("q")
+            .expect("scanned");
+        assert!(!i.malware_scan_ran);
+        assert_eq!((i.rule_hits, i.review_pending), (0, 0));
+        assert!(!i.is_clean());
     }
 
     /// Quarantine or Trust edited the record: not a scan's answer until a scan gives

@@ -2026,94 +2026,22 @@ pub fn print_pretty(resp: &Response) {
             }
             println!("{} file(s) in quarantine", l.total);
         }
-        Response::WpIntegrityScan(r) => {
-            if let Some(err) = &r.error {
-                println!("integrity scan: {err}");
-            }
-            // "Couldn't check" is printed as loudly as a finding — a
-            // missing signal must never read as a pass.
-            println!(
-                "  core       : {}",
-                if !r.wp_cli_ok {
-                    "not checked".to_string()
-                } else if r.core_ok {
-                    "verified against wordpress.org".to_string()
-                } else {
-                    format!("{} file(s) differ", r.core_issue_count())
-                }
-            );
-            for p in &r.core_modified {
-                println!("    modified : {p}");
-            }
-            for p in &r.core_unexpected {
-                println!("    extra    : {p}");
-            }
-            for p in &r.core_missing {
-                println!("    missing  : {p}");
-            }
-            println!(
-                "  plugins    : {} of {} verified, {} failed, {} unverifiable",
-                r.plugins_checked,
-                r.plugins_total,
-                r.plugins_failed.len(),
-                r.plugins_unknown.len()
-            );
-            for v in &r.coverage.vendor_packages {
-                println!(
-                    "    vendor   : {} {} from {} by {}{}",
-                    v.slug,
-                    v.version,
-                    v.final_host,
-                    v.hostings.join(", "),
-                    if v.disputed {
-                        " (packages for this version disagree)"
-                    } else {
-                        ""
-                    }
-                );
-            }
-            for p in &r.plugins_failed {
-                for i in &p.issues {
-                    println!("    {} — {} ({})", p.slug, i.path, i.message);
-                }
-            }
-            if !r.plugins_unknown.is_empty() {
-                // Premium plugins publish no checksums; say so, so nobody
-                // reads it as a finding.
-                println!(
-                    "    no published checksums: {}",
-                    r.plugins_unknown.join(", ")
-                );
-            }
-            println!(
-                "  malware    : {}",
-                if !r.clamav_available && r.clamav_installed {
-                    "not scanned yet (clamav installed; see error)".to_string()
-                } else if !r.clamav_available {
-                    "not scanned (clamav not installed)".to_string()
-                } else if r.malware.is_empty() {
-                    "no signatures matched".to_string()
-                } else {
-                    format!("{} hit(s)", r.malware.len())
-                }
-            );
-            for h in &r.malware {
-                println!("    {} — {}", h.path, h.signature);
-            }
-        }
+        Response::WpIntegrityScan(r) => print!("{}", integrity_scan_text(r)),
         Response::IntegrityFindingsList(list) => {
             if list.is_empty() {
                 println!("no stored integrity scans");
             } else {
                 for h in list {
-                    let state = if h.result.is_clean() {
-                        "clean".to_string()
-                    } else if !h.result.wp_cli_ok {
-                        "COULD NOT CHECK".to_string()
-                    } else {
-                        format!("{} finding(s)", h.result.total_findings())
+                    use hyperion_types::ScanVerdict::*;
+                    let state = match h.result.verdict() {
+                        Clean => "clean".to_string(),
+                        Findings => format!("{} finding(s)", h.result.headline_count()),
+                        Review => format!("{} change(s) to review", h.result.review.len()),
+                        Partial => "NOT FULLY CHECKED".to_string(),
+                        Running => "scan running".to_string(),
+                        Never => "never scanned".to_string(),
                     };
-                    println!("{} — {state} (unix:{})", h.domain, h.scanned_at);
+                    println!("{} — {state} (unix:{})", plain(&h.domain), h.scanned_at);
                 }
             }
         }
@@ -2446,6 +2374,192 @@ pub fn print_pretty(resp: &Response) {
 
 /// Pretty-print one job — same fields as the live progress card
 /// shows in the web UI, but for the CLI / SSH operator.
+/// Text from a tenant's site, safe to print: a control character in a file
+/// name or a message must not move the cursor, recolour the terminal or start a
+/// line of its own.
+fn plain(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+/// What `hctl wp integrity-scan` prints: the verdict the panel shows, what the
+/// scan could and couldn't speak for, then the lists.
+fn integrity_scan_text(r: &hyperion_types::WpIntegrityScanResult) -> String {
+    use std::fmt::Write;
+    let mut o = String::new();
+    // Writing to a String can't fail.
+    let mut line = |t: String| {
+        let _ = writeln!(o, "{t}");
+    };
+    if let Some(err) = &r.error {
+        line(format!("integrity scan: {}", plain(err)));
+    }
+    line(format!("  verdict    : {}", r.verdict().as_str()));
+    let c = &r.coverage;
+    if r.native_scan_ran {
+        line(format!(
+            "  coverage   : {}",
+            if c.no_upstream {
+                "not WordPress, so no release to compare with".to_string()
+            } else if c.upstream_ran {
+                "core compared with its release".to_string()
+            } else {
+                "core NOT compared with its release".to_string()
+            }
+        ));
+        line(format!(
+            "               {} file(s) watched{}, {} partly inspected, {} symlink(s) skipped",
+            c.files_watched,
+            if c.watching_since > 0 {
+                format!(" since unix:{}", c.watching_since)
+            } else {
+                String::new()
+            },
+            c.files_partly_inspected,
+            c.symlinks_skipped
+        ));
+        line(format!(
+            "               {} of {} plugins, {} of {} themes compared with a reference copy",
+            c.plugins_verified, c.plugins_total, c.themes_verified, c.themes_total
+        ));
+        for why in &c.partial_reasons {
+            line(format!("    not covered: {}", plain(why)));
+        }
+        if let Some(note) = &c.vendor_note {
+            line(format!("    vendor note: {}", plain(note)));
+        }
+        if r.report_only {
+            line(
+                "               pilot: results are shown here only; no alerts, reports unchanged"
+                    .into(),
+            );
+        }
+        line("               the database is not scanned".into());
+    }
+    // "Couldn't check" is printed as loudly as a finding — a
+    // missing signal must never read as a pass.
+    line(format!(
+        "  core       : {}",
+        if r.native_scan_ran && c.no_upstream {
+            "not applicable".to_string()
+        } else if !r.wp_cli_ok {
+            "not checked".to_string()
+        } else if r.core_ok {
+            "verified against wordpress.org".to_string()
+        } else {
+            format!("{} file(s) differ", r.core_issue_count())
+        }
+    ));
+    for p in &r.core_modified {
+        line(format!("    modified : {}", plain(p)));
+    }
+    for p in &r.core_unexpected {
+        line(format!("    extra    : {}", plain(p)));
+    }
+    for p in &r.core_missing {
+        line(format!("    missing  : {}", plain(p)));
+    }
+    line(format!(
+        "  plugins    : {} of {} verified, {} failed, {} unverifiable",
+        r.plugins_checked,
+        r.plugins_total,
+        r.plugins_failed.len(),
+        r.plugins_unknown.len()
+    ));
+    for v in &c.vendor_packages {
+        line(format!(
+            "    vendor   : {} {} from {} by {}{}",
+            plain(&v.slug),
+            plain(&v.version),
+            plain(&v.final_host),
+            plain(&v.hostings.join(", ")),
+            if v.disputed {
+                " (packages for this version disagree)"
+            } else {
+                ""
+            }
+        ));
+    }
+    for p in &r.plugins_failed {
+        for i in &p.issues {
+            line(format!(
+                "    {} — {} ({})",
+                plain(&p.slug),
+                plain(&i.path),
+                plain(&i.message)
+            ));
+        }
+    }
+    if !r.plugins_unknown.is_empty() {
+        // Premium plugins publish no checksums; say so, so nobody
+        // reads it as a finding.
+        line(format!(
+            "    no published checksums: {}",
+            plain(&r.plugins_unknown.join(", "))
+        ));
+    }
+    if !r.themes_failed.is_empty() {
+        line(format!("  themes     : {} failed", r.themes_failed.len()));
+        for t in &r.themes_failed {
+            for i in &t.issues {
+                line(format!(
+                    "    {} — {} ({})",
+                    plain(&t.slug),
+                    plain(&i.path),
+                    plain(&i.message)
+                ));
+            }
+        }
+    }
+    if r.native_scan_ran {
+        line(format!("  findings   : {}", r.listed_findings().count()));
+        for f in r.listed_findings() {
+            line(format!(
+                "    [{}] {} — {}{}",
+                plain(&f.severity),
+                plain(&f.rel),
+                f.kind.label(),
+                f.rule_id
+                    .as_deref()
+                    .map(|id| format!(" ({}, line {})", plain(id), f.line))
+                    .unwrap_or_default()
+            ));
+        }
+        line(format!(
+            "  review     : {} change(s) to review",
+            r.review.len()
+        ));
+        for f in &r.review {
+            line(format!("    {} — {}", plain(&f.rel), f.kind.label()));
+        }
+    }
+    line(format!(
+        "  malware    : {}",
+        if !r.clamav_available && r.native_scan_ran {
+            "ClamAV did not run (optional); the scan above looks for malware itself".to_string()
+        } else if !r.clamav_available && r.clamav_installed {
+            "not scanned yet (clamav installed; see error)".to_string()
+        } else if !r.clamav_available {
+            "not scanned (clamav not installed)".to_string()
+        } else if r.malware.is_empty() {
+            "no signatures matched".to_string()
+        } else {
+            format!("{} hit(s)", r.malware.len())
+        }
+    ));
+    for h in &r.malware {
+        line(format!("    {} — {}", plain(&h.path), plain(&h.signature)));
+    }
+    o
+}
+
 pub fn print_job(j: &hyperion_types::JobView) {
     println!("job {}:", j.id);
     println!("  kind        : {}", j.kind);
@@ -2474,5 +2588,86 @@ pub fn print_job(j: &hyperion_types::JobView) {
         if !j.log_tail.ends_with('\n') {
             println!();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyperion_types::{
+        FindingKind, ScanCoverage, SiteFileFinding, WpIntegrityFileIssue, WpIntegrityPluginResult,
+        WpIntegrityScanResult,
+    };
+
+    fn native() -> WpIntegrityScanResult {
+        WpIntegrityScanResult {
+            native_scan_ran: true,
+            scanned_at: 100,
+            coverage: ScanCoverage {
+                upstream_ran: true,
+                plugins_verified: 3,
+                plugins_total: 4,
+                themes_verified: 1,
+                themes_total: 1,
+                files_watched: 1234,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The verdict the panel shows, then what the scan could and couldn't speak
+    /// for, and a tenant's file name can't drive the terminal.
+    #[test]
+    fn hctl_prints_verdict_and_coverage() {
+        let clean = integrity_scan_text(&native());
+        assert!(clean.contains("verdict    : clean"), "{clean}");
+        assert!(clean.contains("1234 file(s) watched"), "{clean}");
+        assert!(clean.contains("3 of 4 plugins"), "{clean}");
+        assert!(clean.contains("database is not scanned"), "{clean}");
+
+        let mut r = native();
+        r.coverage.upstream_ran = false;
+        r.coverage.no_upstream = true;
+        r.coverage.partial_reasons = vec!["stopped\u{1b}[2J early".into()];
+        r.findings = vec![SiteFileFinding {
+            rel: "wp-content/\u{1b}]0;pwn\u{7}.php\nfake line".into(),
+            kind: FindingKind::RuleHit,
+            severity: "high".into(),
+            rule_id: Some("php.eval".into()),
+            line: 7,
+            ..Default::default()
+        }];
+        r.review = vec![SiteFileFinding {
+            rel: "a.php".into(),
+            ..Default::default()
+        }];
+        r.themes_failed = vec![WpIntegrityPluginResult {
+            slug: "twenty\u{8}".into(),
+            issues: vec![WpIntegrityFileIssue {
+                path: "style.css".into(),
+                message: "differs\r".into(),
+            }],
+            ..Default::default()
+        }];
+        let out = integrity_scan_text(&r);
+        assert!(out.contains("verdict    : findings"), "{out}");
+        assert!(out.contains("not WordPress"), "{out}");
+        assert!(out.contains("php.eval"), "{out}");
+        assert!(out.contains("1 change(s) to review"), "{out}");
+        assert!(out.contains("not covered"), "{out}");
+        assert!(
+            !out.chars().any(|c| c.is_control() && c != '\n'),
+            "raw control characters: {out:?}"
+        );
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with("fake line")).count(),
+            0,
+            "a newline in a name can't start a line of its own: {out}"
+        );
+
+        let mut partial = native();
+        partial.coverage.partial_reasons = vec!["stopped early".into()];
+        assert!(integrity_scan_text(&partial).contains("verdict    : partial"));
     }
 }

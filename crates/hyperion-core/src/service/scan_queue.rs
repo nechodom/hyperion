@@ -528,10 +528,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 return SiteScanTurn::NotRun;
             }
         };
-        let prior_keys = prior
-            .as_ref()
-            .map(|p| upstream_finding_keys(&p.result))
-            .unwrap_or_default();
         let scan = match self
             .site_scan_locked(&detail, mode, prior.as_ref(), now)
             .await
@@ -560,43 +556,80 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
         drop(gate);
 
-        // Upstream's keys only: the new layers stay silent through the pilot, and
-        // ClamAV's hits are its own sweep's to tell.
-        let new_keys = upstream_finding_keys(&scan).difference(&prior_keys).count();
-        if new_keys == 0 {
+        // ClamAV's hits are its own sweep's to tell. The new layers speak only
+        // once they are live; until then their keys are stored and stay quiet.
+        let plan = plan_integrity_alert(prior.as_ref().map(|p| &p.result), &scan);
+        if plan.is_empty() {
             return SiteScanTurn::NothingNew;
         }
-        self.notify_integrity_findings(&detail.domain, &scan, new_keys)
-            .await;
+        if plan.findings > 0 {
+            self.notify_integrity_findings(&detail.domain, &scan, plan.findings, plan.error)
+                .await;
+        }
+        if plan.review > 0 {
+            self.notify_integrity_review(&detail.domain, &scan, plan.review)
+                .await;
+        }
         SiteScanTurn::NewFindings
     }
 
+    /// `error`: the new findings include something worse than a missing core file.
     async fn notify_integrity_findings(
         &self,
         domain: &str,
         scan: &hyperion_types::WpIntegrityScanResult,
         new_keys: usize,
+        error: bool,
     ) {
         // A modified core file, a tampered plugin or a signature hit is a
         // suspected compromise. A merely *missing* core file is usually a
         // botched update: still worth saying, not worth waking someone up
         // for.
-        let compromised = !scan.malware.is_empty()
+        let compromised = error
+            || !scan.malware.is_empty()
             || !scan.core_modified.is_empty()
             || !scan.core_unexpected.is_empty()
             || !scan.plugins_failed.is_empty();
+        // The new layers are counted only once they count for anything.
+        let (themes, rules) = if scan.is_live() {
+            (scan.theme_issue_count(), scan.listed_findings().count())
+        } else {
+            (0, 0)
+        };
         self.notify_admins_say(
             if compromised { "error" } else { "warn" },
             "ops.integrity",
             &[
                 ("domain", domain),
                 ("core", &scan.core_issue_count().to_string()),
-                ("plugins", &scan.plugin_issue_count().to_string()),
+                ("plugins", &(scan.plugin_issue_count() + themes).to_string()),
                 ("malware", &scan.malware.len().to_string()),
+                ("rules", &rules.to_string()),
                 ("new", &new_keys.to_string()),
             ],
             &format!("/hostings/{domain}#wordpress"),
             &format!("wp.integrity:{domain}"),
+        )
+        .await;
+    }
+
+    /// Changes to review, batched: one warning for the site, however many.
+    async fn notify_integrity_review(
+        &self,
+        domain: &str,
+        scan: &hyperion_types::WpIntegrityScanResult,
+        new_keys: usize,
+    ) {
+        self.notify_admins_say(
+            "warn",
+            "ops.integrity_review",
+            &[
+                ("domain", domain),
+                ("review", &scan.review.len().to_string()),
+                ("new", &new_keys.to_string()),
+            ],
+            &format!("/hostings/{domain}#wordpress"),
+            &format!("wp.integrity.review:{domain}"),
         )
         .await;
     }
@@ -651,7 +684,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let new_keys = malware_finding_keys(&after).difference(&before).count();
             if new_keys > 0 {
                 newly_flagged += 1;
-                self.notify_integrity_findings(&detail.domain, &after, new_keys)
+                self.notify_integrity_findings(&detail.domain, &after, new_keys, false)
                     .await;
             }
         }
@@ -1562,20 +1595,11 @@ fn stored_after_failure(
     }
 }
 
-/// [`integrity_finding_keys`] without ClamAV's.
-fn upstream_finding_keys(
-    r: &hyperion_types::WpIntegrityScanResult,
-) -> std::collections::HashSet<String> {
-    let mut keys = integrity_finding_keys(r);
-    keys.retain(|k| !k.starts_with("malware:"));
-    keys
-}
-
 /// [`integrity_finding_keys`] with ClamAV's alone.
 fn malware_finding_keys(
     r: &hyperion_types::WpIntegrityScanResult,
 ) -> std::collections::HashSet<String> {
-    let mut keys = integrity_finding_keys(r);
+    let mut keys = legacy_finding_keys(r);
     keys.retain(|k| k.starts_with("malware:"));
     keys
 }

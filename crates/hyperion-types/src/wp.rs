@@ -974,11 +974,31 @@ impl WpIntegrityScanResult {
         self.native_scan_ran && !self.coverage.partial_reasons.is_empty()
     }
 
-    /// True only when BOTH signals ran over the whole site and both came back
-    /// empty. A scan where upstream couldn't be compared, ClamAV is absent or the
-    /// native scan was partial is "unknown", never clean — the UI must not print
-    /// a green tick for it.
+    /// The native scan ran and its results count: not the silent pilot, and not
+    /// a record from before the scan existed.
+    pub fn is_live(&self) -> bool {
+        self.native_scan_ran && !self.report_only
+    }
+
+    /// A scan that covered the whole site and found nothing. A scan where
+    /// upstream couldn't be compared, or that was partial, is "unknown", never
+    /// clean — the UI must not print a green tick for it.
+    ///
+    /// A live native scan needs no ClamAV: it is its own malware check. It reads
+    /// the new buckets too, and a site with no upstream to compare (not
+    /// WordPress) is clean on the scan alone. The silent pilot and records from
+    /// before the scan keep the older rule: wp-cli's comparison AND ClamAV, both
+    /// ran and both came back empty.
     pub fn is_clean(&self) -> bool {
+        if self.is_live() {
+            return (self.coverage.upstream_ran || self.coverage.no_upstream)
+                && !self.scan_partial()
+                && !self.awaiting_rescan
+                && self.total_findings() == 0
+                && self.theme_issue_count() == 0
+                && self.findings.is_empty()
+                && self.review.is_empty();
+        }
         self.wp_cli_ok
             && self.clamav_available
             && !self.scan_partial()
@@ -1185,6 +1205,10 @@ mod tests {
             wp_cli_ok: true,
             clamav_available: true,
             native_scan_ran: true,
+            coverage: ScanCoverage {
+                upstream_ran: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert!(r.is_clean());
@@ -1310,6 +1334,80 @@ mod tests {
         pilot.report_only = true;
         pilot.findings = vec![finding(FindingKind::RuleHit)];
         assert_eq!(pilot.verdict(), Findings);
+    }
+
+    /// A live scan is its own malware check: ClamAV is optional, and a missing
+    /// one neither blocks nor adds to the verdict.
+    #[test]
+    fn live_clean_needs_no_clamav() {
+        let mut r = native();
+        assert!(!r.clamav_available && !r.wp_cli_ok);
+        assert!(r.is_live() && r.is_clean());
+        // Not WordPress: nothing to compare with, clean on the scan alone.
+        r.coverage.upstream_ran = false;
+        assert!(!r.is_clean(), "WordPress whose release wasn't compared");
+        r.coverage.no_upstream = true;
+        assert!(r.is_clean());
+        // What stands in the way, one at a time.
+        let blocked = |f: fn(&mut WpIntegrityScanResult)| {
+            let mut r = native();
+            f(&mut r);
+            assert!(!r.is_clean());
+        };
+        blocked(|r| r.coverage.partial_reasons = vec!["stopped".into()]);
+        blocked(|r| r.awaiting_rescan = true);
+        blocked(|r| r.malware = vec![WpMalwareHit::default()]);
+        blocked(|r| r.core_modified = vec!["wp-includes/load.php".into()]);
+        blocked(|r| {
+            r.plugins_failed = vec![WpIntegrityPluginResult {
+                slug: "p".into(),
+                issues: vec![WpIntegrityFileIssue::default()],
+                ..Default::default()
+            }]
+        });
+        blocked(|r| {
+            r.themes_failed = vec![WpIntegrityPluginResult {
+                slug: "t".into(),
+                issues: vec![WpIntegrityFileIssue::default()],
+                ..Default::default()
+            }]
+        });
+        blocked(|r| r.findings = vec![finding(FindingKind::RuleHit)]);
+        blocked(|r| r.review = vec![finding(FindingKind::BaselineChange)]);
+    }
+
+    /// The pilot's results are for the panel: whatever they hold, the record
+    /// still reads the way it did before the scan existed.
+    #[test]
+    fn report_only_record_uses_old_logic() {
+        let mut r = native();
+        r.report_only = true;
+        assert!(!r.is_live());
+        assert!(!r.is_clean(), "wp-cli and ClamAV never ran");
+        r.wp_cli_ok = true;
+        r.clamav_available = true;
+        assert!(r.is_clean());
+        // New buckets are not read by the old rule.
+        r.findings = vec![finding(FindingKind::RuleHit)];
+        r.review = vec![finding(FindingKind::BaselineChange)];
+        assert!(r.is_clean());
+        r.clamav_available = false;
+        assert!(!r.is_clean(), "ClamAV is still required in the pilot");
+    }
+
+    /// A record stored before any of this has none of the new fields and keeps
+    /// the meaning it had.
+    #[test]
+    fn old_stored_record_keeps_old_meaning() {
+        let old: WpIntegrityScanResult = serde_json::from_str(
+            r#"{"core_ok":true,"wp_cli_ok":true,"clamav_available":true,"scanned_at":5}"#,
+        )
+        .expect("json");
+        assert!(!old.native_scan_ran && !old.is_live());
+        assert!(old.is_clean());
+        let no_clamav: WpIntegrityScanResult =
+            serde_json::from_str(r#"{"wp_cli_ok":true,"scanned_at":5}"#).expect("json");
+        assert!(!no_clamav.is_clean());
     }
 
     /// A failed comparison is listed under its core, plugin or theme section;

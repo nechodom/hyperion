@@ -729,7 +729,7 @@ hctl wp vuln-scan example.com
 
 ### hctl wp integrity-scan
 
-Verify checksums and scan for malware.
+Scan a site's files for tampering and malware.
 
 **Options:** `SELECTOR`
 
@@ -737,10 +737,26 @@ Verify checksums and scan for malware.
 hctl wp integrity-scan example.com
 ```
 
-Compares core and plugin files with the checksums wordpress.org publishes and
-runs ClamAV over the site. A part that could not be checked (no wp-cli,
-ClamAV not installed, a premium plugin with no published checksums) says so
-rather than passing.
+Prints the verdict the panel shows (`clean`, `findings`, `review`, `partial`,
+`running` or `never`) and what the scan could and could not speak for:
+
+- **Core, plugins and themes** are compared with their release (wordpress.org, or
+  the vendor's package for a premium plugin). A site with no WordPress has nothing
+  to compare with, which is stated and is not a failure. A premium plugin with no
+  reference copy is watched like any other code and counted as not compared.
+- **Every other file** is read for known malware patterns, and changes since the
+  first scan are listed as findings (a rule matched) or changes to review.
+- **Coverage:** files watched and since when, large files only partly read,
+  symlinks not followed, and anything that could not be looked at. A scan that
+  missed part of the site is `partial`, never `clean`.
+- **ClamAV** is optional. When it ran, its hits are listed; when it did not, the
+  line says so.
+- **The database is not scanned.**
+
+While the new scan is in its pilot (`[integrity] new_layers_live` off in
+`agent.toml`), its results show here and in the panel only: no alerts, and care
+reports keep their earlier meaning. File names and messages from the site are
+printed with control characters escaped.
 
 ### hctl wp vendor-forget
 
