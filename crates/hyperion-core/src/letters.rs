@@ -881,9 +881,9 @@ pub static STRINGS: &[LetterString] = &[
              for unexpected changes, and nothing was found. The database is not\n  \
              part of this check.",
         cs: "INTEGRITA SOUBORŮ A MALWARE: nic nenalezeno\n  \
-             Kontrola {when}: soubory webu byly prohledány kvůli podezřelému kódu\n  \
-             a neočekávaným změnám a nic se nenašlo. Databáze součástí této kontroly\n  \
-             není.",
+             Kontrola {when}: soubory webu byly zkontrolovány, zda neobsahují\n  \
+             podezřelý kód ani neočekávané změny, a nic se nenašlo. Databáze součástí\n  \
+             této kontroly není.",
     },
     LetterString {
         id: "care.integrity.review",

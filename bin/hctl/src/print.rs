@@ -2372,21 +2372,39 @@ pub fn print_pretty(resp: &Response) {
     }
 }
 
-/// Pretty-print one job — same fields as the live progress card
-/// shows in the web UI, but for the CLI / SSH operator.
 /// Text from a tenant's site, safe to print: a control character in a file
 /// name or a message must not move the cursor, recolour the terminal or start a
-/// line of its own.
+/// line of its own, and a format or bidi character must not reorder or hide
+/// what is printed around it.
 fn plain(s: &str) -> String {
     s.chars()
         .flat_map(|c| {
-            if c.is_control() {
+            if c.is_control() || is_invisible_format(c) {
                 c.escape_default().collect::<Vec<_>>()
             } else {
                 vec![c]
             }
         })
         .collect()
+}
+
+/// Characters that print as nothing or change how their neighbours print:
+/// soft hyphen, Arabic letter mark, zero-width and directional marks, line and
+/// paragraph separators, bidi embeddings and isolates, word joiner and the
+/// invisible operators, the byte order mark, interlinear annotation and tags.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{AD}'
+            | '\u{61C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
 }
 
 /// What `hctl wp integrity-scan` prints: the verdict the panel shows, what the
@@ -2560,6 +2578,8 @@ fn integrity_scan_text(r: &hyperion_types::WpIntegrityScanResult) -> String {
     o
 }
 
+/// Pretty-print one job — same fields as the live progress card
+/// shows in the web UI, but for the CLI / SSH operator.
 pub fn print_job(j: &hyperion_types::JobView) {
     println!("job {}:", j.id);
     println!("  kind        : {}", j.kind);
@@ -2614,6 +2634,36 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    /// Format and bidi characters are escaped like control ones, so a file name
+    /// can't reorder the line it is printed in.
+    #[test]
+    fn plain_escapes_bidi_and_format_characters() {
+        for c in [
+            '\u{202E}',
+            '\u{202A}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{200B}',
+            '\u{200C}',
+            '\u{200D}',
+            '\u{200E}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{FEFF}',
+            '\u{AD}',
+            '\u{2060}',
+            '\u{E0041}',
+        ] {
+            let out = plain(&format!("a{c}b"));
+            assert!(out.starts_with('a') && out.ends_with('b'), "{out}");
+            assert!(out.contains("\\u{"), "{c:?} not escaped: {out:?}");
+            assert!(out.chars().all(|x| !is_invisible_format(x)), "{out:?}");
+        }
+        assert_eq!(plain("evil\u{202E}gnp.php"), "evil\\u{202e}gnp.php");
+        // Ordinary text, Czech included, is left alone.
+        assert_eq!(plain("příliš žluťoučký.php"), "příliš žluťoučký.php");
     }
 
     /// The verdict the panel shows, then what the scan could and couldn't speak

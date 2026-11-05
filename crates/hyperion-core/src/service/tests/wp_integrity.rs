@@ -402,6 +402,12 @@ fn a_failed_theme_alerts_once_live() {
     }];
     let plan = plan_integrity_alert(Some(&prior), &scan);
     assert_eq!((plan.findings, plan.review), (1, 0));
+    // A theme has no severity and counts as High, like core and plugins: it
+    // alerts on a first scan too.
+    for first in [None, Some(hyperion_types::WpIntegrityScanResult::default())] {
+        let plan = plan_integrity_alert(first.as_ref(), &scan);
+        assert_eq!((plan.findings, plan.review), (1, 0), "{first:?}");
+    }
     // In the pilot themes stay out, as they always did.
     scan.report_only = true;
     let plan = plan_integrity_alert(Some(&prior), &scan);
@@ -3749,6 +3755,15 @@ mod site_scan {
             "wordpress.org's plugin alerts, the held ones do not"
         );
         assert_eq!(r.verdict(), hyperion_types::ScanVerdict::Findings);
+
+        // Live, after a baseline: the held ones still don't reach the review alert.
+        let mut o = vendor_outcome();
+        hold_vendor_differences(&mut o, false);
+        let live = assemble_integrity_result(o, vec![], true, false);
+        assert_eq!(live.review.len(), 2);
+        let plan = plan_integrity_alert(Some(&native_result(false)), &live);
+        assert_eq!(plan.review, 0, "held vendor differences never alert");
+        assert_eq!(plan.findings, 1);
     }
 
     #[test]
@@ -3768,6 +3783,11 @@ mod site_scan {
             .filter_map(|f| f.component.as_deref())
             .collect();
         assert_eq!(review, ["split"]);
+        // A disputed version stays out of the alerts even with the switch on.
+        let live = assemble_integrity_result(o, vec![], true, false);
+        let plan = plan_integrity_alert(Some(&native_result(false)), &live);
+        assert_eq!(plan.review, 0);
+        assert_eq!(plan.findings, 2, "pro and akismet alert as findings");
     }
 
     /// The filter reads the list's own label, so a capped findings list can't let a

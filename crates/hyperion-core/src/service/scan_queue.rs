@@ -625,7 +625,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ops.integrity_review",
             &[
                 ("domain", domain),
-                ("review", &scan.review.len().to_string()),
+                (
+                    "review",
+                    &scan
+                        .review
+                        .iter()
+                        .filter(|f| f.held_vendor_note().is_none())
+                        .count()
+                        .to_string(),
+                ),
                 ("new", &new_keys.to_string()),
             ],
             &format!("/hostings/{domain}#wordpress"),

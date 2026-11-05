@@ -573,6 +573,14 @@ impl IntegrityAlertPlan {
 /// too, and on a first scan only the high-severity ones: a site with no
 /// baseline would otherwise report its whole tree. A pilot record's keys are
 /// known, so turning the switch on alerts what appears after it.
+///
+/// The first-scan filter reads the severity of rule findings and review items
+/// only. A failed theme comparison has none and counts as High, like a failed
+/// core or plugin comparison: it alerts on a first scan too.
+///
+/// A difference from a vendor's package that is held for review (the pilot's, or
+/// a version whose packages disagree, even with `vendor_refs_live` on) never
+/// alerts: nothing has shown the reference is right.
 pub(super) fn plan_integrity_alert(
     prior: Option<&hyperion_types::WpIntegrityScanResult>,
     scan: &hyperion_types::WpIntegrityScanResult,
@@ -582,6 +590,13 @@ pub(super) fn plan_integrity_alert(
         .into_iter()
         .filter(|k| !k.starts_with("malware:") && !known.contains(k))
         .collect();
+    let held: std::collections::HashSet<String> = scan
+        .review
+        .iter()
+        .filter(|f| f.held_vendor_note().is_some())
+        .map(review_key)
+        .collect();
+    new.retain(|k| !held.contains(k));
     if !scan.is_live() {
         let legacy = legacy_finding_keys(scan);
         new.retain(|k| legacy.contains(k));
