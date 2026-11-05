@@ -945,7 +945,7 @@ section_e_busy() {
     local held=no
     kill -0 "$scanning" 2>/dev/null && held=yes
     echo "still waiting after ${waited}s at load $(cut -d' ' -f1 /proc/loadavg): $held" | tee -a "$OUT/e-numbers.txt"
-    ok_if E "the scan holds back while the box is busy" "held=$held after ${waited}s (idle takes about 8 s)" test "$held" = yes
+    ok_if E "the scan holds back while the box is busy" "held=$held after ${waited}s (idle takes about 4 s)" test "$held" = yes
     # The gate lets it go on as soon as the average falls.
     local stopped_at
     stopped_at=$(date +%s)

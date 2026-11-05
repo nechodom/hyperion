@@ -1933,9 +1933,13 @@ mod tests {
             let k = key(ComponentKind::Plugin, slug, ver);
             let got = fetch_with(&mock, &k, t.path(), SystemTime::now()).await;
             assert_eq!(got.expect("not an error"), None, "{slug:?} {ver:?}");
-            assert!(!wporg_slug_known(ComponentKind::Plugin, slug, t.path())
-                .await
-                .expect("not an error"));
+            // Only a slug no URL could hold is answered without asking; `demo` is
+            // a real lookup, and a unit test makes none.
+            if !valid_slug(slug) {
+                assert!(!wporg_slug_known(ComponentKind::Plugin, slug, t.path())
+                    .await
+                    .expect("not an error"));
+            }
         }
         assert_eq!(mock.calls(), 0);
     }
