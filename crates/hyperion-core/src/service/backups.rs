@@ -1887,9 +1887,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if mode.restores_files() {
             tracing::info!(domain = %detail.domain, archive = %canonical.display(),
                 mode = mode.as_str(), "restoring backup files");
+            // The archive can be infected, so the scan still runs its rules over
+            // what it puts back; it only isn't asked to review every file.
+            self.scan_mark_writer(
+                detail.id.as_str(),
+                hyperion_adapters::sitescan::scan::WriterKind::Restore,
+            )
+            .await;
             let restore_result =
                 hyperion_adapters::backup::restore_archive(&canonical, &host_root).await;
             if let Err(e) = restore_result {
+                self.scan_writer_done(detail.id.as_str()).await;
                 return Err(RpcError::ProvisioningFailed {
                     stage: "tar_extract".into(),
                     reason: e.to_string(),
@@ -1908,6 +1916,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "restore: permission repair failed — the site may be unwritable"
                 );
             }
+            self.scan_writer_done(detail.id.as_str()).await;
         }
 
         // 2. Look for sibling .sql dump and restore it if hosting has a DB

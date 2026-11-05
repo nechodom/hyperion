@@ -340,7 +340,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 Err(e) => Err((e.to_string(), String::new())),
                 Ok(auth) => {
                     let home = self.home_dir_for(detail.system_user.as_str());
-                    g::sync(g::SyncParams {
+                    // What the checkout changes is ours to account for: the scan
+                    // runs its rules over it instead of asking anyone to review it.
+                    self.scan_mark_writer(
+                        id,
+                        hyperion_adapters::sitescan::scan::WriterKind::GitDeploy,
+                    )
+                    .await;
+                    let synced = g::sync(g::SyncParams {
                         repo: &config.repo,
                         branch: config.effective_branch(),
                         subdir: &config.subdir,
@@ -350,7 +357,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         site_key: detail.id.as_str(),
                         auth,
                     })
-                    .await
+                    .await;
+                    self.scan_writer_done(id).await;
+                    synced
                 }
             }
         };

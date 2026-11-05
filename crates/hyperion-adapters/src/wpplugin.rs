@@ -140,6 +140,103 @@ if (!defined('DISABLE_WP_CRON')
 unset($hyperion_cron_status);
 "#;
 
+/// The Hyperion plugin module that makes a preview vhost usable.
+///
+/// Keyed on the `HYPERION_PREVIEW_HOST` fastcgi param, which only the
+/// preview server block sets — so on the real vhost this file does
+/// nothing and normal visitors never touch this code path. A request header
+/// cannot forge it: headers reach PHP as `HTTP_*`, never under this name.
+pub const PREVIEW_MODULE: &str = r#"<?php
+/**
+ * Hyperion preview — loaded by mu-plugins/hyperion.php (managed — do not edit).
+ *
+ * When a request arrives through the node's internal preview vhost (which
+ * sets the HYPERION_PREVIEW_HOST fastcgi param), keep WordPress ON that
+ * hostname instead of bouncing to the site's real Site Address. On the
+ * real vhost the param is absent and this whole block is skipped.
+ */
+if (!defined('ABSPATH')) { exit; }
+if (!empty($_SERVER['HYPERION_PREVIEW_HOST']) && !defined('HYPERION_PREVIEW_HOST')) {
+    define('HYPERION_PREVIEW_HOST', strtolower((string) $_SERVER['HYPERION_PREVIEW_HOST']));
+    $hyp_host = HYPERION_PREVIEW_HOST;
+    $hyp_url  = 'https://' . $hyp_host;
+
+    // The site's REAL hostnames, read before the filters below change what
+    // get_option() answers (WP_HOME / WP_SITEURL are already folded in by
+    // core's own option filters, which load before mu-plugins). Only these
+    // are rewritten: a redirect to a payment gateway or an OAuth provider
+    // has to leave the site, and pinning every redirect to the preview host
+    // sent those to a 404 on the preview instead.
+    $hyp_real = array();
+    foreach (array(get_option('home'), get_option('siteurl')) as $hyp_u) {
+        $hyp_h = is_string($hyp_u) ? parse_url($hyp_u, PHP_URL_HOST) : null;
+        if (is_string($hyp_h) && $hyp_h !== '') {
+            $hyp_h = strtolower($hyp_h);
+            $hyp_real[$hyp_h] = true;
+            $hyp_real[strpos($hyp_h, 'www.') === 0 ? substr($hyp_h, 4) : 'www.' . $hyp_h] = true;
+        }
+    }
+    unset($hyp_real[$hyp_host], $hyp_u, $hyp_h);
+    $hyp_real = array_keys($hyp_real);
+
+    // Force home/siteurl to the preview host. Priority 999 so this beats
+    // WordPress's own _config_wp_home/_config_wp_siteurl (priority 10),
+    // which is how a WP_HOME / WP_SITEURL constant in wp-config.php takes
+    // effect — common on imported sites, and the reason the first version
+    // of this shim (plain option filters) did nothing there.
+    add_filter('option_home',    function () use ($hyp_url) { return $hyp_url; }, 999);
+    add_filter('option_siteurl', function () use ($hyp_url) { return $hyp_url; }, 999);
+
+    // Rewrite the host of a URL to the preview host — when it is one of the
+    // site's own. Relative URLs and foreign hosts pass through unchanged.
+    $hyp_rewrite = function ($url) use ($hyp_url, $hyp_real) {
+        if (!is_string($url) || $url === '') { return $url; }
+        return preg_replace_callback('#^(?:https?:)?//([^/:?\#]+)(?::\d+)?#i', function ($m) use ($hyp_url, $hyp_real) {
+            return in_array(strtolower($m[1]), $hyp_real, true) ? $hyp_url : $m[0];
+        }, $url, 1);
+    };
+    add_filter('home_url', $hyp_rewrite, 999);
+    add_filter('site_url', $hyp_rewrite, 999);
+    add_filter('content_url', $hyp_rewrite, 999);
+    add_filter('plugins_url', $hyp_rewrite, 999);
+
+    // The catch-all for redirects: EVERY WordPress redirect goes through
+    // wp_redirect(), so a canonical bounce, a login redirect or an SSL
+    // plugin cannot send the visitor back to the real domain.
+    add_filter('wp_redirect', $hyp_rewrite, 999);
+
+    // And drop the canonical redirect outright (registered before
+    // mu-plugins load, so remove_action here takes effect).
+    remove_action('template_redirect', 'redirect_canonical');
+
+    // Absolute URLs stored in the content itself — every image in every
+    // post, page-builder CSS, menus — still name the real domain, which
+    // before the DNS cutover is the OLD server or nothing at all. Rewrite
+    // them in the response, preview requests only, text responses only.
+    if ($hyp_real) {
+        $hyp_quoted = implode('|', array_map(function ($h) { return preg_quote($h, '#'); }, $hyp_real));
+        ob_start(function ($out) use ($hyp_host, $hyp_quoted) {
+            if (!is_string($out) || $out === '') { return $out; }
+            foreach (headers_list() as $h) {
+                if (stripos($h, 'content-type:') === 0 && !preg_match('#text/|json|xml|javascript#i', $h)) {
+                    return $out;
+                }
+            }
+            // `//host`, `http(s)://host`, and the JSON-escaped `https:\/\/host`,
+            // but not a longer name that merely starts with the host.
+            return preg_replace_callback(
+                '#(?:https?:)?(//|\\\\/\\\\/)(?:' . $hyp_quoted . ')(?::\d+)?(?![a-z0-9-]|\.[a-z0-9])#i',
+                function ($m) use ($hyp_host) {
+                    return $m[1] === '//' ? 'https://' . $hyp_host : 'https:\/\/' . $hyp_host;
+                },
+                $out
+            );
+        });
+    }
+    unset($hyp_host, $hyp_url, $hyp_real, $hyp_rewrite, $hyp_quoted);
+}
+"#;
+
 /// The loader. Static except for `{{VERSION}}`.
 ///
 /// Runs on every request of every site: a handful of `is_file` stats (the
@@ -391,6 +488,35 @@ function hyperion_render_page() {
 /// The loader with its version filled in.
 pub fn render_loader() -> String {
     LOADER_TEMPLATE.replace("{{VERSION}}", &LOADER_VERSION.to_string())
+}
+
+/// One file Hyperion keeps inside a site's `mu-plugins`, for the site scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedFile {
+    /// Relative to the docroot.
+    pub rel: String,
+    /// What this binary writes, byte for byte. `None` when the bytes depend on
+    /// the site or on the minute (the mail module carries the domain and the log
+    /// path, `status.php` the last check), and no digest can be compiled in.
+    pub content: Option<String>,
+}
+
+/// Every file this plugin puts in a site, so the scan can tell ours from a
+/// tenant's. The mail module is rendered in `wpmail` and the status file above;
+/// both vary per site, so they are listed without content.
+pub fn managed_files() -> Vec<ManagedFile> {
+    let file = |rel: String, content: Option<String>| ManagedFile { rel, content };
+    let module = |m: Module, content: Option<String>| {
+        file(format!("{}/{}", module_dir_rel(), m.file()), content)
+    };
+    vec![
+        file(format!("{}/{LOADER_FILE}", mu_rel()), Some(render_loader())),
+        module(Module::Mail, None),
+        module(Module::RegGuard, Some(crate::regguard::render_mu_plugin())),
+        module(Module::Preview, Some(PREVIEW_MODULE.to_string())),
+        module(Module::Cron, Some(CRON_MODULE.to_string())),
+        file(format!("{}/{STATUS_FILE}", module_dir_rel()), None),
+    ]
 }
 
 /// What the agent tells the status page. Every field is optional on the PHP

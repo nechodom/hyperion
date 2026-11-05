@@ -20,7 +20,7 @@ use hyperion_adapters::sitescan::manifest::{
 };
 use hyperion_adapters::sitescan::rules::RULE_PACK_VERSION;
 use hyperion_adapters::sitescan::scan::{
-    metadata_hash, scan_site, ScanInput, ScanMode, SiteScanOutcome,
+    metadata_hash, own_manifest, scan_site, ScanInput, ScanMode, SiteScanOutcome, WriterKind,
 };
 use hyperion_adapters::sitescan::TenantRoot;
 use hyperion_types::{FindingKind, SiteFileFinding};
@@ -56,6 +56,10 @@ struct Site {
     known: Option<BTreeSet<String>>,
     /// What the agent would hand the scan as vouched for.
     trusted: std::cell::RefCell<BTreeMap<String, [u8; 32]>>,
+    /// What the agent would hand the scan when a deploy or a restore just wrote.
+    accept_since: Cell<Option<(WriterKind, i64)>>,
+    /// When the running agent started, for the grace on Hyperion's own files.
+    own_files_since: Cell<i64>,
 }
 
 impl Site {
@@ -70,6 +74,8 @@ impl Site {
             baseline: base.join("baselines").join("7"),
             known: Some(BTreeSet::new()),
             trusted: Default::default(),
+            accept_since: Cell::new(None),
+            own_files_since: Cell::new(0),
             _t: t,
         }
     }
@@ -238,7 +244,8 @@ impl Site {
             mode,
             now: NOW,
             wporg_known_slugs: self.known.clone(),
-            accept_since: None,
+            accept_since: self.accept_since.get(),
+            own_files_since: self.own_files_since.get(),
             trusted: self.trusted.borrow().clone(),
         };
         scan_site(&input, pause).expect("scan")
@@ -1771,6 +1778,7 @@ fn a_root_that_cannot_be_opened_is_an_error_not_a_clean_scan() {
         now: NOW,
         wporg_known_slugs: None,
         accept_since: None,
+        own_files_since: 0,
         trusted: BTreeMap::new(),
     };
     assert!(scan_site(&input, &|| false).is_err());
@@ -2610,4 +2618,344 @@ fn outcome_crosses_the_worker_boundary() {
         serde_json::from_str(r#"{"core_ok":true,"wp_cli_ok":true}"#).expect("old");
     assert!(!old.native_scan_ran);
     assert!(old.findings.is_empty());
+}
+
+// Hyperion's own writes: its plugin files, a git deploy, a restored backup.
+
+const LOADER: &str = "wp-content/mu-plugins/hyperion.php";
+const MAIL_MODULE: &str = "wp-content/mu-plugins/hyperion/mail.php";
+const STATUS_MODULE: &str = "wp-content/mu-plugins/hyperion/status.php";
+
+/// What the install tick leaves in `mu-plugins`: every embedded file as the
+/// running binary renders it, and the two it writes per site.
+fn install_hyperion_plugin(s: &Site) {
+    for f in hyperion_adapters::wpplugin::managed_files() {
+        if let Some(body) = f.content {
+            s.write(&f.rel, body);
+        }
+    }
+    s.write(
+        MAIL_MODULE,
+        hyperion_adapters::wpmail::render_mu_plugin(
+            "example.cz",
+            "wordpress@example.cz",
+            "/home/u/example.cz/logs/wp-mail-failures.log",
+            hyperion_adapters::wpmail::MailPolicy::PinFrom,
+        ),
+    );
+    s.write(
+        STATUS_MODULE,
+        hyperion_adapters::wpplugin::render_status(&Default::default()),
+    );
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64
+}
+
+#[test]
+fn the_manifest_is_built_from_what_the_binary_embeds() {
+    let m = own_manifest();
+    let loader = hyperion_adapters::wpplugin::render_loader();
+    assert_eq!(m[LOADER], Digest::Sha256(sha_of(loader.as_bytes())));
+    // Every embedded module is in it; the two written per site are not.
+    for f in ["regguard.php", "cron.php", "preview.php"] {
+        assert!(
+            m.contains_key(&format!("wp-content/mu-plugins/hyperion/{f}")),
+            "{f}"
+        );
+    }
+    assert!(!m.contains_key(MAIL_MODULE) && !m.contains_key(STATUS_MODULE));
+}
+
+#[test]
+fn own_mu_plugin_matches_after_agent_update_no_review() {
+    let s = Site::new();
+    s.wordpress();
+    s.write("custom.php", "<?php // site's own\n");
+    s.scan();
+    settle();
+
+    // The install tick rewrites every file after an update: new ctime, same
+    // bytes the new binary embeds.
+    install_hyperion_plugin(&s);
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    assert!(out.auto_accepted.is_empty());
+    // Vouched for by the embedded digests, not by the baseline's say-so.
+    let b = s.load();
+    assert!(b.verified.contains_key(LOADER));
+    assert!(b
+        .verified
+        .contains_key("wp-content/mu-plugins/hyperion/regguard.php"));
+
+    // And a rewrite with the same bytes is still nothing.
+    settle();
+    install_hyperion_plugin(&s);
+    let again = s.scan();
+    assert_eq!(rels(&again.review), Vec::<&str>::new());
+    assert_eq!(rels(&again.findings), Vec::<&str>::new());
+}
+
+#[test]
+fn an_older_hyperion_file_is_review_during_the_grace_and_a_finding_after() {
+    let s = Site::new();
+    s.wordpress();
+    install_hyperion_plugin(&s);
+    s.scan();
+    settle();
+    // The previous agent's loader: still on disk right after the update.
+    s.write(
+        LOADER,
+        "<?php\n/** Plugin Name: Hyperion\n * Version: 1 */\n",
+    );
+
+    s.own_files_since.set(NOW - 600);
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    let r = item(&out.review, LOADER);
+    assert_eq!(r.kind, FindingKind::UpstreamModified);
+    assert_eq!(r.source_label.as_deref(), Some("hyperion"));
+
+    // The tick didn't get to it within the hour: now it is the news.
+    s.own_files_since.set(NOW - 3 * 3600);
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    let f = item(&out.findings, LOADER);
+    assert_eq!(f.kind, FindingKind::UpstreamModified);
+    assert_eq!(f.severity, "high");
+    assert_eq!(f.source_label.as_deref(), Some("hyperion"));
+
+    // Rewritten: gone.
+    settle();
+    install_hyperion_plugin(&s);
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+}
+
+#[test]
+fn tampered_own_mu_plugin_is_finding() {
+    let s = Site::new();
+    s.wordpress();
+    install_hyperion_plugin(&s);
+    s.scan();
+    settle();
+    let rel = "wp-content/mu-plugins/hyperion/regguard.php";
+    s.append(rel, &EVAL[5..]);
+    let out = s.scan();
+    let f = item(&out.findings, rel);
+    assert_eq!(f.kind, FindingKind::UpstreamModified);
+    assert_eq!(f.severity, "high");
+    assert_eq!(f.source_label.as_deref(), Some("hyperion"));
+    assert!(f.rule_id.is_some(), "the rules say what is in it");
+    assert!(!s.load().verified.contains_key(rel));
+    // Not remembered as clean: it stays reported.
+    assert_eq!(
+        item(&s.scan().findings, rel).kind,
+        FindingKind::UpstreamModified
+    );
+}
+
+#[test]
+fn a_rule_hit_in_an_own_file_is_a_finding_even_in_the_grace() {
+    let s = Site::new();
+    s.wordpress();
+    install_hyperion_plugin(&s);
+    s.scan();
+    settle();
+    s.append(LOADER, &EVAL[5..]);
+    s.own_files_since.set(NOW - 60);
+    let out = s.scan();
+    assert_eq!(
+        item(&out.findings, LOADER).kind,
+        FindingKind::UpstreamModified
+    );
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+}
+
+#[test]
+fn the_per_site_modules_get_the_rules_and_no_change_detection() {
+    let s = Site::new();
+    s.wordpress();
+    install_hyperion_plugin(&s);
+    s.scan();
+    settle();
+    // A new domain, a new status: the agent rewrites these constantly.
+    s.write(MAIL_MODULE, "<?php // another domain\n");
+    s.write(STATUS_MODULE, "<?php return array();\n");
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+
+    // But what is in them is still inspected.
+    settle();
+    s.append(MAIL_MODULE, &EVAL[5..]);
+    let out = s.scan();
+    assert_eq!(item(&out.findings, MAIL_MODULE).kind, FindingKind::RuleHit);
+}
+
+/// A site that has been scanned once, with a theme of its own and a root file.
+fn deployable_site() -> Site {
+    let s = Site::new();
+    s.wordpress();
+    s.child_theme("kid");
+    s.write("custom.php", "<?php // site's own\n");
+    s.scan();
+    settle();
+    s
+}
+
+#[test]
+fn git_deploy_changes_accepted_when_no_rule_hit() {
+    let s = deployable_site();
+    s.accept_since
+        .set(Some((WriterKind::GitDeploy, unix_now() - 5)));
+    s.write("custom.php", "<?php // deployed\n");
+    s.write("wp-content/themes/kid/new.php", "<?php // new\n");
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    let mut accepted = out.auto_accepted.clone();
+    accepted.sort();
+    assert_eq!(accepted, ["custom.php", "wp-content/themes/kid/new.php"]);
+    // Listed for the card, with who wrote them and what they were.
+    assert_eq!(out.accepted_by_writer.len(), 2);
+    let a = item(&out.accepted_by_writer, "custom.php");
+    assert_eq!(a.source_label.as_deref(), Some("changed by deploy"));
+    assert_eq!(a.sha256, hex::encode(sha_of(b"<?php // deployed\n")));
+
+    // Remembered: with the mark gone nothing is pending.
+    s.accept_since.set(None);
+    let next = s.scan();
+    assert_eq!(rels(&next.review), Vec::<&str>::new());
+    assert!(next.auto_accepted.is_empty());
+}
+
+#[test]
+fn git_deploy_rule_hit_is_finding() {
+    let s = deployable_site();
+    s.accept_since
+        .set(Some((WriterKind::GitDeploy, unix_now() - 5)));
+    s.write("wp-content/themes/kid/shell.php", EVAL);
+    s.write("custom.php", "<?php // deployed\n");
+    let out = s.scan();
+    assert_eq!(
+        item(&out.findings, "wp-content/themes/kid/shell.php").kind,
+        FindingKind::RuleHit
+    );
+    assert_eq!(out.auto_accepted, ["custom.php"]);
+    // Not blessed: it is reported again.
+    assert_eq!(
+        rels(&s.scan().findings),
+        ["wp-content/themes/kid/shell.php"]
+    );
+}
+
+#[test]
+fn restore_of_infected_backup_is_flagged() {
+    let s = deployable_site();
+    s.accept_since
+        .set(Some((WriterKind::Restore, unix_now() - 5)));
+    s.write("wp-content/themes/kid/footer.php", SHELL);
+    s.write("wp-content/themes/kid/functions.php", FOOTER);
+    s.write("custom.php", "<?php // restored\n");
+    let out = s.scan();
+    let flagged = rels(&out.findings);
+    assert!(
+        flagged.contains(&"wp-content/themes/kid/footer.php"),
+        "{flagged:?}"
+    );
+    assert!(
+        flagged.contains(&"wp-content/themes/kid/functions.php")
+            || rels(&out.review).contains(&"wp-content/themes/kid/functions.php"),
+        "the appended footer hook must not be accepted"
+    );
+    assert_eq!(out.auto_accepted, ["custom.php"]);
+    assert_eq!(
+        item(&out.accepted_by_writer, "custom.php")
+            .source_label
+            .as_deref(),
+        Some("changed by restore")
+    );
+}
+
+#[test]
+fn a_file_older_than_the_mark_is_judged_as_usual() {
+    let s = deployable_site();
+    s.write("custom.php", "<?php // edited over FTP\n");
+    settle();
+    // The deploy came after the edit.
+    s.accept_since
+        .set(Some((WriterKind::GitDeploy, unix_now() + 100)));
+    let out = s.scan();
+    assert_eq!(rels(&out.review), ["custom.php"]);
+    assert!(out.auto_accepted.is_empty());
+    assert!(out.accepted_by_writer.is_empty());
+}
+
+#[test]
+fn a_file_changed_in_the_marks_own_second_is_accepted() {
+    let s = deployable_site();
+    s.write("custom.php", "<?php // deployed\n");
+    let ctime = fs::metadata(s.path("custom.php")).expect("stat").ctime();
+    s.accept_since.set(Some((WriterKind::GitDeploy, ctime)));
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert_eq!(out.auto_accepted, ["custom.php"]);
+}
+
+#[test]
+fn a_manifest_mismatch_is_not_overridden_by_a_writer() {
+    let s = Site::new();
+    s.wordpress();
+    s.verified_plugin("elementor", "3.25.0", &[("a.php", b"<?php // a\n")]);
+    s.scan();
+    settle();
+    s.accept_since
+        .set(Some((WriterKind::GitDeploy, unix_now() - 5)));
+    s.write(
+        "wp-content/plugins/elementor/a.php",
+        "<?php // not upstream\n",
+    );
+    s.write("wp-includes/load.php", "<?php // not core\n");
+    let out = s.scan();
+    assert!(out.auto_accepted.is_empty(), "{:?}", out.auto_accepted);
+    item(&out.findings, "wp-content/plugins/elementor/a.php");
+    item(&out.findings, "wp-includes/load.php");
+}
+
+#[test]
+fn file_manager_edit_is_review() {
+    let s = deployable_site();
+    s.write("custom.php", "<?php // edited in the panel\n");
+    let out = s.scan();
+    assert_eq!(rels(&out.review), ["custom.php"]);
+    assert!(out.auto_accepted.is_empty());
+}
+
+#[test]
+fn copied_site_starts_fresh_with_rules() {
+    // The destination of a Move/Copy has no baseline: everything is looked at
+    // by the rules, and the writer's mark doesn't turn the first scan into a
+    // list of accepted files.
+    let s = Site::new();
+    s.wordpress();
+    s.child_theme("kid");
+    s.write("wp-content/themes/kid/footer.php", SHELL);
+    s.write("custom.php", "<?php // copied\n");
+    s.accept_since
+        .set(Some((WriterKind::Restore, unix_now() - 5)));
+    let out = s.scan();
+    assert_eq!(
+        item(&out.findings, "wp-content/themes/kid/footer.php").kind,
+        FindingKind::RuleHit
+    );
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert!(out.auto_accepted.is_empty());
+    assert!(out.accepted_by_writer.is_empty());
 }

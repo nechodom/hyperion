@@ -95,6 +95,15 @@ const UPLOADS_DIR: &str = "wp-content/uploads/";
 const NON_WP_CHURN_NAMES: [&str; 2] = ["vendor", "node_modules"];
 const TOO_LARGE_RULE: &str = "too_large_to_inspect";
 
+/// The `source_label` on a finding about Hyperion's own files.
+const OWN_LABEL: &str = "hyperion";
+/// After an agent starts, an older copy of its files may sit on disk until the
+/// install tick rewrites them. For this long a mismatch is for a person to look
+/// at, not an alarm.
+const OWN_GRACE_SECS: i64 = 3600;
+/// Hyperion's files are small. Anything bigger than this at their path is not one.
+const OWN_READ_MAX: u64 = 1024 * 1024;
+
 const MSG_MODIFIED: &str = "Checksum does not match";
 const MSG_ADDED: &str = "File was added";
 const MSG_MISSING: &str = "File is missing";
@@ -131,10 +140,21 @@ pub enum ScanMode {
     FullRehash,
 }
 
+/// Who wrote into the tree on the site's behalf, as the agent knows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WriterKind {
     GitDeploy,
     Restore,
+}
+
+impl WriterKind {
+    /// What the card says next to a file this writer changed.
+    pub fn label(self) -> &'static str {
+        match self {
+            WriterKind::GitDeploy => "changed by deploy",
+            WriterKind::Restore => "changed by restore",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,9 +170,15 @@ pub struct ScanInput {
     /// the answer wasn't available, and then no slug gets it.
     #[serde(default)]
     pub wporg_known_slugs: Option<BTreeSet<String>>,
-    /// Carried for a later task: a writer whose changes go through the rules only.
+    /// A writer (git deploy, backup restore) wrote into the tree at or after this
+    /// time. What it changed, with no rule hit, is accepted and listed rather than
+    /// sent to review. Rule hits and manifest comparisons are unaffected.
     #[serde(default)]
     pub accept_since: Option<(WriterKind, i64)>,
+    /// When the running agent started. Hyperion's own files from an older version
+    /// are review, not findings, for the hour after. 0 means no grace.
+    #[serde(default)]
+    pub own_files_since: i64,
     /// Files someone vouched for, by path and the hash they vouched for. A
     /// symlink's is the hash of its target, a file too large to read its
     /// [`metadata_hash`]. The agent keeps this list; a worker has no say in it.
@@ -196,6 +222,10 @@ pub struct SiteScanOutcome {
     /// Premium-update files accepted without review, for the audit log.
     #[serde(default)]
     pub auto_accepted: Vec<String>,
+    /// The files a git deploy or a restore changed and nothing objected to, with
+    /// who changed them in `source_label`. Also in `auto_accepted`.
+    #[serde(default)]
+    pub accepted_by_writer: Vec<SiteFileFinding>,
     /// Files whose content was read.
     #[serde(default)]
     pub files_hashed: u64,
@@ -408,8 +438,33 @@ fn short_name(rel: &str) -> String {
     format!("{}…", &rel[..end])
 }
 
+/// Hyperion's own files in a docroot, by path, with the digest the running
+/// binary expects. A file whose bytes depend on the site (the mail module, the
+/// status page) has no digest and is not in here.
+pub fn own_manifest() -> BTreeMap<String, Digest> {
+    crate::wpplugin::managed_files()
+        .into_iter()
+        .filter_map(|f| {
+            let digest = Sha256::digest(f.content?.as_bytes()).into();
+            Some((f.rel, Digest::Sha256(digest)))
+        })
+        .collect()
+}
+
+/// The ones that have no digest: rules inspect them, and nothing watches them
+/// for change, since the agent rewrites them whenever the site's settings do.
+fn own_per_site() -> HashSet<String> {
+    crate::wpplugin::managed_files()
+        .into_iter()
+        .filter(|f| f.content.is_none())
+        .map(|f| f.rel)
+        .collect()
+}
+
 /// Where a file goes.
 enum Route {
+    /// One of Hyperion's own files: compare with the digest it was written from.
+    Own,
     /// Compare with this component's manifest, under this key.
     Manifest(usize, String),
     /// Baseline and rules.
@@ -605,6 +660,15 @@ fn with_hits(mut item: SiteFileFinding, hits: &[RuleHit]) -> SiteFileFinding {
     item
 }
 
+/// What a record says when Hyperion's own digest vouched for the file: another
+/// digest is another id, so a file is compared again after an update changes it.
+fn own_id(d: &Digest) -> String {
+    match d {
+        Digest::Sha256(h) => format!("hyperion/{}", hex::encode(&h[..8])),
+        _ => "hyperion".to_string(),
+    }
+}
+
 fn manifest_id(key: &ComponentKey, m: &Manifest) -> String {
     let mut id = format!("{}/{}@{}", key.kind.as_str(), key.slug, key.version);
     if let Some(l) = &m.served_locale {
@@ -655,6 +719,9 @@ struct Scan<'a> {
     comps: Vec<Comp<'a>>,
     /// Index of core, when it has a manifest.
     core: Option<usize>,
+    /// What Hyperion writes into a docroot.
+    own: BTreeMap<String, Digest>,
+    own_per_site: HashSet<String>,
     by_root: HashMap<&'a str, usize>,
     seen: Seen,
     skip_counts: BTreeMap<SkipReason, (u64, String)>,
@@ -663,6 +730,7 @@ struct Scan<'a> {
     dropped_findings: u64,
     dropped_review: u64,
     auto_accepted: Vec<String>,
+    accepted_by_writer: Vec<SiteFileFinding>,
     files_seen: u64,
     skips_seen: u64,
     files_hashed: u64,
@@ -787,6 +855,8 @@ impl<'a> Scan<'a> {
             rules_bumped,
             comps,
             core,
+            own: own_manifest(),
+            own_per_site: own_per_site(),
             by_root,
             seen: Seen {
                 state: RandomState::new(),
@@ -800,6 +870,7 @@ impl<'a> Scan<'a> {
             dropped_findings: 0,
             dropped_review: 0,
             auto_accepted: Vec::new(),
+            accepted_by_writer: Vec::new(),
             files_seen: 0,
             skips_seen: 0,
             files_hashed: 0,
@@ -1029,6 +1100,9 @@ impl<'a> Scan<'a> {
     }
 
     fn route(&self, rel: &str) -> Route {
+        if self.own.contains_key(rel) {
+            return Route::Own;
+        }
         let owner = self.owner(rel);
         match owner {
             Some(i) if self.comps[i].manifest.is_some() => {
@@ -1061,6 +1135,9 @@ impl<'a> Scan<'a> {
         if !in_scope(rel) {
             return Route::Ignore;
         }
+        if self.own_per_site.contains(rel) {
+            return Route::RulesOnly(owner);
+        }
         if rel == MAINTENANCE {
             return Route::RulesOnly(owner);
         }
@@ -1087,6 +1164,10 @@ impl<'a> Scan<'a> {
             return;
         }
         match self.route(&m.rel) {
+            Route::Own => {
+                self.seen.visit(&m.rel);
+                self.own_file(m);
+            }
             Route::Manifest(i, key) => {
                 self.seen.visit(&m.rel);
                 self.baseline.churn.remove(&m.rel);
@@ -1224,6 +1305,59 @@ impl<'a> Scan<'a> {
         }
         let id = self.comps[i].id.clone();
         self.remember_verified(m, &read, id);
+    }
+
+    /// One of Hyperion's own files: the digest the binary was built with speaks
+    /// for it, and a match needs no rules.
+    fn own_file(&mut self, m: &FileMeta) {
+        let Some(digest) = self.own.get(&m.rel).cloned() else {
+            return;
+        };
+        let id = own_id(&digest);
+        self.baseline.churn.remove(&m.rel);
+        if self.input.mode == ScanMode::Delta
+            && self.baseline.verified.get(&m.rel) == Some(&id)
+            && classify(self.baseline.entries.get(&m.rel), m) == Change::Unchanged
+        {
+            return;
+        }
+        if m.size > OWN_READ_MAX {
+            self.forget(&m.rel);
+            return self.own_mismatch(m, None, &[]);
+        }
+        let Some(read) = self.read(m, false) else {
+            return;
+        };
+        if digest_matches(&digest, &read) {
+            return self.remember_verified(m, &read, id);
+        }
+        self.forget(&m.rel);
+        let hits = rules_for(&m.rel, &read.head);
+        self.own_mismatch(m, Some(&read.sha256), &hits);
+    }
+
+    /// Hyperion's file isn't what this binary writes. Right after an agent
+    /// starts that is most likely the last version, waiting for the install tick,
+    /// unless the rules say otherwise.
+    fn own_mismatch(&mut self, m: &FileMeta, sha: Option<&[u8; 32]>, hits: &[RuleHit]) {
+        let since = self.input.own_files_since;
+        let in_grace =
+            since > 0 && (0..OWN_GRACE_SECS).contains(&self.input.now.saturating_sub(since));
+        let bad = worst(hits).is_some_and(|h| h.severity == Severity::High);
+        let mut item = with_hits(
+            SiteFileFinding {
+                source_label: Some(OWN_LABEL.to_string()),
+                snippet: "differs from what this Hyperion version writes".to_string(),
+                ..self.base_item(&m.rel, FindingKind::UpstreamModified, sha)
+            },
+            hits,
+        );
+        if in_grace && !bad {
+            self.push_review(item);
+        } else {
+            item.severity = severity_str(Severity::High).to_string();
+            self.push_finding(item);
+        }
     }
 
     fn forget(&mut self, rel: &str) {
@@ -1466,6 +1600,20 @@ impl<'a> Scan<'a> {
             }
             return;
         }
+        // Something we did: the rules found nothing, so it is what we meant.
+        if let Some(label) = self.written_by(m) {
+            self.remember_entry(m, &read);
+            if self.auto_accepted.len() < AUTO_ACCEPTED_CAP {
+                self.auto_accepted.push(m.rel.clone());
+                let item = SiteFileFinding {
+                    component: self.component_of(owner),
+                    source_label: Some(label.to_string()),
+                    ..self.base_item(&m.rel, FindingKind::BaselineChange, Some(&read.sha256))
+                };
+                self.accepted_by_writer.push(item);
+            }
+            return;
+        }
         // With the baseline full, "no entry" says nothing about the file: the
         // rules found nothing, and the partial reason covers the rest.
         if !self.baseline.entries.contains_key(&m.rel) && !self.fits(&m.rel) {
@@ -1477,6 +1625,13 @@ impl<'a> Scan<'a> {
             ..self.base_item(&m.rel, FindingKind::BaselineChange, Some(&read.sha256))
         };
         self.push_review(item);
+    }
+
+    /// The writer that changed this file, if one was at work: its change time is
+    /// at or after the mark. A tenant can set a file's mtime but not its ctime.
+    fn written_by(&self, m: &FileMeta) -> Option<&'static str> {
+        let (kind, since) = self.input.accept_since?;
+        (m.ctime >= since).then(|| kind.label())
     }
 
     /// Churn paths: rules on what's new by its metadata, and nothing else. A
@@ -1837,6 +1992,7 @@ impl<'a> Scan<'a> {
             review: self.review,
             coverage,
             auto_accepted: self.auto_accepted,
+            accepted_by_writer: self.accepted_by_writer,
             files_hashed: self.files_hashed,
             stopped: self.stopped,
             capped: stats.capped,
@@ -1885,6 +2041,7 @@ mod tests {
             now: 1,
             wporg_known_slugs: Some(BTreeSet::new()),
             accept_since: None,
+            own_files_since: 0,
             trusted: BTreeMap::new(),
         }
     }

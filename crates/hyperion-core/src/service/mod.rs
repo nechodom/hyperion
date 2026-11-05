@@ -847,8 +847,10 @@ pub struct HostingService<A: AdapterPort + 'static> {
 }
 
 /// What every holder of a [`HostingService`] shares about the site scan.
-#[derive(Default)]
 pub struct SiteScanShared {
+    /// When this agent started, unix seconds. Hyperion's own files from an older
+    /// version get a grace from here, while the install tick catches up.
+    pub(crate) started_at: i64,
     /// One scan worker at a time on this node.
     pub(crate) node: tokio::sync::Mutex<()>,
     /// One `clamscan` at a time on this node. It reads an entire docroot, so two
@@ -861,6 +863,18 @@ pub struct SiteScanShared {
     pub(crate) record: tokio::sync::Mutex<()>,
     /// Someone asked for a scan: the tick needn't wait out its ten minutes.
     pub(crate) wake: tokio::sync::Notify,
+}
+
+impl Default for SiteScanShared {
+    fn default() -> Self {
+        Self {
+            started_at: now_secs(),
+            node: Default::default(),
+            clamav: Default::default(),
+            record: Default::default(),
+            wake: Default::default(),
+        }
+    }
 }
 
 /// Default renewal window — matches Let's Encrypt's recommended

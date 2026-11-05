@@ -1353,3 +1353,242 @@ async fn reinstall_theme_needs_a_version() {
         .expect_err("refused");
     assert!(e.to_string().contains("scan again"), "{e}");
 }
+
+// A writer of ours (git deploy, restore) marks the tree before it writes, and the
+// scan that follows is told.
+
+use hyperion_adapters::sitescan::scan::{ScanInput, WriterKind};
+
+const PENDING_KEY: &str = "scan_pending_accept";
+
+/// A site whose worker logs every scan input it is handed.
+async fn watched_worker(
+    reply: impl Fn() -> WorkerReply + Send + Sync + 'static,
+) -> (
+    HostingService<MockAdapterPort>,
+    SqlitePool,
+    String,
+    Arc<StdMutex<Vec<ScanInput>>>,
+) {
+    let inputs = Arc::new(StdMutex::new(Vec::new()));
+    let log = inputs.clone();
+    let mut a = happy_mocks();
+    a.expect_site_scan_worker().returning(move |job| match job {
+        WorkerJob::Discover { .. } => WorkerReply::Discovery(Default::default()),
+        WorkerJob::Scan(i) => {
+            log.lock().expect("lock").push(i);
+            reply()
+        }
+    });
+    a.expect_site_scan_evict_manifests().returning(|_| ());
+    let (s, pool, _, id) = fixture(a, result(vec![], vec![])).await;
+    (s, pool, id, inputs)
+}
+
+async fn pending(pool: &SqlitePool, id: &str) -> Option<String> {
+    hyperion_state::hosting_kv::get(pool, id, PENDING_KEY)
+        .await
+        .expect("kv")
+}
+
+#[tokio::test]
+async fn the_scan_after_a_writer_is_told_and_clears_the_mark_when_stored() {
+    let (s, pool, id, inputs) =
+        watched_worker(|| WorkerReply::Scan(SiteScanOutcome::default())).await;
+    s.scan_mark_writer(&id, WriterKind::GitDeploy).await;
+    let mark = pending(&pool, &id).await.expect("marked");
+    let (name, since) = mark.split_once(':').expect("kind:ts");
+    assert_eq!(name, "git_deploy");
+    let since: i64 = since.parse().expect("ts");
+    // Marking alone queues nothing: the writer hasn't finished.
+    assert_eq!(s.scan_request_flag(&id).await, None);
+
+    s.scan_writer_done(&id).await;
+    assert!(s.scan_request_flag(&id).await.is_some());
+    s.site_scan_tick_at(&chrono::Utc, 2_000_000)
+        .await
+        .expect("tick");
+
+    {
+        let got = inputs.lock().expect("lock");
+        assert_eq!(got[0].accept_since, Some((WriterKind::GitDeploy, since)));
+        assert_eq!(got[0].own_files_since, s.site_scan.started_at);
+        assert!(got[0].own_files_since > 0);
+        // Any scheduled scan that follows is told nothing.
+        assert!(got[1..].iter().all(|i| i.accept_since.is_none()));
+    }
+    assert_eq!(pending(&pool, &id).await, None, "cleared with the result");
+}
+
+#[tokio::test]
+async fn a_scan_with_no_writer_is_told_nothing() {
+    let (s, _pool, id, inputs) =
+        watched_worker(|| WorkerReply::Scan(SiteScanOutcome::default())).await;
+    s.wp_integrity_scan_request(HostingSelector::Id(
+        s.get(HostingSelector::Id(HostingId(id.clone())))
+            .await
+            .expect("get")
+            .id,
+    ))
+    .await
+    .expect("request");
+    s.site_scan_tick_at(&chrono::Utc, 2_000_000)
+        .await
+        .expect("tick");
+    assert_eq!(inputs.lock().expect("lock")[0].accept_since, None);
+}
+
+#[tokio::test]
+async fn a_scan_that_did_not_run_leaves_the_mark() {
+    let (s, pool, id, inputs) = watched_worker(|| WorkerReply::Failed("boom".into())).await;
+    s.scan_mark_writer(&id, WriterKind::Restore).await;
+    s.scan_writer_done(&id).await;
+    s.site_scan_tick_at(&chrono::Utc, 2_000_000)
+        .await
+        .expect("tick");
+    assert!(!inputs.lock().expect("lock").is_empty());
+    let mark = pending(&pool, &id).await.expect("still marked");
+    assert!(mark.starts_with("restore:"), "{mark}");
+}
+
+/// A deploy that marks again while a scan runs is about files that scan may not
+/// have seen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_newer_mark_made_during_the_scan_stays() {
+    let pool = open_memory().await.expect("open");
+    let id_slot = Arc::new(StdMutex::new(String::new()));
+    let (during, slot) = (pool.clone(), id_slot.clone());
+    // Every scan of the tick finds the writer marking again while it runs.
+    let scans = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let counted = scans.clone();
+    let mut a = happy_mocks();
+    a.expect_site_scan_worker().returning(move |job| match job {
+        WorkerJob::Discover { .. } => WorkerReply::Discovery(Default::default()),
+        WorkerJob::Scan(_) => {
+            let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let id = slot.lock().expect("lock").clone();
+            let pool = during.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let mark = format!("git_deploy:{}", 3_000_000_000 + n);
+                    hyperion_state::hosting_kv::set(&pool, &id, PENDING_KEY, &mark, 1)
+                        .await
+                        .expect("kv")
+                })
+            });
+            WorkerReply::Scan(SiteScanOutcome::default())
+        }
+    });
+    a.expect_site_scan_evict_manifests().returning(|_| ());
+    let s = svc(pool.clone(), a);
+    let site = s.create(req("acts.cz")).await.expect("create");
+    let id = site.id.as_str().to_string();
+    *id_slot.lock().expect("lock") = id.clone();
+    s.set_stored_integrity_scan(
+        &id,
+        &StoredIntegrityScan {
+            scanned_at: 1_000,
+            result: result(vec![], vec![]),
+            ..Default::default()
+        },
+    )
+    .await;
+    hyperion_state::hosting_kv::set(&pool, &id, PENDING_KEY, "git_deploy:3000000000", 1)
+        .await
+        .expect("kv");
+    s.scan_writer_done(&id).await;
+    s.site_scan_tick_at(&chrono::Utc, 2_000_000)
+        .await
+        .expect("tick");
+    let n = scans.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(n >= 1);
+    assert_eq!(
+        pending(&pool, &id).await,
+        Some(format!("git_deploy:{}", 3_000_000_000 + n))
+    );
+}
+
+#[tokio::test]
+async fn a_mark_that_makes_no_sense_marks_nothing() {
+    for junk in [
+        "",
+        "git_deploy",
+        "git_deploy:soon",
+        "git_deploy:0",
+        "ftp:5",
+        "restore:-3",
+    ] {
+        let (s, pool, id, inputs) =
+            watched_worker(|| WorkerReply::Scan(SiteScanOutcome::default())).await;
+        hyperion_state::hosting_kv::set(&pool, &id, PENDING_KEY, junk, 1)
+            .await
+            .expect("kv");
+        s.scan_writer_done(&id).await;
+        s.site_scan_tick_at(&chrono::Utc, 2_000_000)
+            .await
+            .expect("tick");
+        assert_eq!(
+            inputs.lock().expect("lock")[0].accept_since,
+            None,
+            "{junk:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_site_that_is_not_scanned_is_not_marked() {
+    let (s, pool, id, _inputs) =
+        watched_worker(|| WorkerReply::Scan(SiteScanOutcome::default())).await;
+    hyperion_state::hosting_kv::set(&pool, &id, "integrity_scan_enabled", "off", 1)
+        .await
+        .expect("kv");
+    s.scan_mark_writer(&id, WriterKind::GitDeploy).await;
+    s.scan_writer_done(&id).await;
+    assert_eq!(pending(&pool, &id).await, None);
+    assert_eq!(s.scan_request_flag(&id).await, None);
+}
+
+/// A restore marks before it extracts and queues the scan after it. The archive
+/// is a real tar.gz, extracted by the real sandboxed extractor.
+#[tokio::test]
+async fn a_restore_marks_the_site_and_queues_its_scan() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let base = dir.path().canonicalize().expect("canonical");
+    let backups = base.join("backups");
+    let src = base.join("src");
+    std::fs::create_dir_all(&backups).expect("mkdir");
+    std::fs::create_dir_all(src.join("htdocs")).expect("mkdir");
+    std::fs::write(src.join("htdocs/index.php"), "<?php // restored\n").expect("write");
+    let archive = backups.join("a.tar.gz");
+    let tar = std::process::Command::new("tar")
+        .env("COPYFILE_DISABLE", "1")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&src)
+        .arg("htdocs")
+        .status()
+        .expect("tar");
+    assert!(tar.success());
+
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), happy_mocks()).with_paths(HostingPaths {
+        home_root: base.join("home").display().to_string(),
+        backup_root: backups.display().to_string(),
+        ..Default::default()
+    });
+    let site = s.create(req("acts.cz")).await.expect("create");
+    let id = site.id.as_str().to_string();
+
+    s.backup_restore(
+        HostingSelector::Id(site.id.clone()),
+        archive.display().to_string(),
+        hyperion_types::BackupRestoreMode::FilesOnly,
+    )
+    .await
+    .expect("restore");
+
+    let mark = pending(&pool, &id).await.expect("marked");
+    assert!(mark.starts_with("restore:"), "{mark}");
+    assert!(s.scan_request_flag(&id).await.is_some());
+}

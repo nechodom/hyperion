@@ -1692,6 +1692,7 @@ mod site_scan {
         };
         let mut outcome = upstream_verified(0);
         outcome.findings = vec![finding.clone(); 1100];
+        outcome.accepted_by_writer = vec![finding.clone(); 300];
         outcome.review = vec![finding; 1100];
         outcome.upstream.core_modified = vec![long.clone(); 1100];
         outcome.upstream.plugins_unknown = vec!["p".to_string(); 10_100];
@@ -1728,6 +1729,8 @@ mod site_scan {
             .sum();
         assert!(issues <= 1000, "{issues}");
         assert!(outcome.auto_accepted.len() <= 200);
+        assert!(outcome.accepted_by_writer.len() <= 200);
+        assert!(outcome.accepted_by_writer[0].snippet.len() <= 1024);
         assert!(outcome.coverage.partial_reasons.len() <= 24);
         assert!(outcome.coverage.partial_reasons[0].len() <= 512);
         assert!(outcome.upstream.plugins_failed[0].slug.len() <= 256);

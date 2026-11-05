@@ -252,7 +252,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// The action happened whatever comes of this, so a failure is only logged.
-    async fn request_rescan(&self, hosting_id: &str) {
+    pub(super) async fn request_rescan(&self, hosting_id: &str) {
         let now = now_secs();
         if let Err(e) = hyperion_state::hosting_kv::set(
             &self.pool,

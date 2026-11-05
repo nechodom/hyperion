@@ -11,4 +11,5 @@ pub mod runner;
 pub mod scan;
 pub mod walk;
 
+pub use scan::own_manifest;
 pub use walk::{FileMeta, SkipReason, TenantRoot, WalkEvent, WalkOpts, WalkStats};
