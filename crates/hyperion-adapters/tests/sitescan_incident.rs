@@ -1524,6 +1524,70 @@ fn soft_files_are_not_compared() {
     assert_eq!(rels(&s.scan().findings), Vec::<&str>::new());
 }
 
+/// Real WordPress 7.1: the release ships `hello.php` and its default themes with
+/// small differences from their standalone wordpress.org copies, under the same
+/// version. A stock site must not read as tampered, and the release's checksums
+/// say what its own copy holds.
+#[test]
+fn the_copy_a_release_ships_is_not_a_difference() {
+    const BUNDLED: &[u8] = b"<?php\n/*\nPlugin Name: Hello Dolly\nVersion: 1.7.2\n*/\n// bundled\n";
+    const THEME_CSS: &[u8] = b"/*\nTheme Name: T\nVersion: 1.5\nTested up to: 7.1\n*/\n";
+    let s = Site::new();
+    s.wordpress();
+    s.write("wp-content/plugins/hello.php", BUNDLED);
+    s.manifest(
+        ComponentKind::Plugin,
+        "hello-dolly",
+        "1.7.2",
+        ManifestSource::WordPressOrg,
+        &[("hello.php".to_string(), b"<?php // standalone\n".to_vec())],
+    );
+    s.write("wp-content/themes/t/style.css", THEME_CSS);
+    s.manifest(
+        ComponentKind::Theme,
+        "t",
+        "1.5",
+        ManifestSource::WordPressOrg,
+        &[("style.css".to_string(), b"/* standalone */\n".to_vec())],
+    );
+    let core_key = ComponentKey {
+        kind: ComponentKind::Core,
+        slug: "wordpress".into(),
+        version: WP_VERSION.into(),
+        locale: None,
+    };
+    let path = cache_path_for(&s.cache, &core_key, ManifestSource::WordPressOrg).expect("path");
+    let mut core: Manifest = serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+    for (rel, body) in [
+        ("wp-content/plugins/hello.php", BUNDLED),
+        ("wp-content/themes/t/style.css", THEME_CSS),
+    ] {
+        core.files.insert(rel.into(), Digest::Md5(md5_of(body)));
+    }
+    s.put_manifest(&core_key, &core);
+
+    let out = s.scan();
+    assert!(out.findings.is_empty(), "{:#?}", out.findings);
+    assert!(out.review.is_empty(), "{:#?}", out.review);
+    assert_eq!(out.coverage.plugins_verified, 1);
+    assert_eq!(out.coverage.themes_verified, 1);
+    settle();
+    assert_eq!(s.scan().files_hashed, 0, "verified, so not read again");
+
+    // The release's checksum vouches for that content only.
+    s.append("wp-content/plugins/hello.php", b"// edited\n");
+    s.append("wp-content/themes/t/style.css", b"/* edited */\n");
+    let out = s.scan();
+    assert_eq!(
+        item(&out.findings, "wp-content/plugins/hello.php").kind,
+        FindingKind::UpstreamModified
+    );
+    assert_eq!(
+        item(&out.findings, "wp-content/themes/t/style.css").kind,
+        FindingKind::UpstreamModified
+    );
+}
+
 #[test]
 fn single_file_plugin_verifies_and_only_its_file_counts() {
     let s = Site::new();

@@ -1352,12 +1352,23 @@ impl<'a> Scan<'a> {
         if m.size > HASH_MAX_BYTES {
             return self.mismatch(i, m, None, &[]);
         }
-        let want_md5 = matches!(digest, Digest::Md5(_) | Digest::Md5Any(_));
+        // A release ships its default themes and `hello.php` with small differences
+        // from their standalone copies, under the same version. What core's own
+        // checksums list at this path is as good a reference.
+        let bundled = self
+            .core
+            .filter(|c| *c != i)
+            .and_then(|c| self.comps[c].manifest.as_ref())
+            .and_then(|mf| mf.files.get(&m.rel))
+            .cloned();
+        let is_md5 = |d: &Digest| matches!(d, Digest::Md5(_) | Digest::Md5Any(_));
+        let want_md5 = is_md5(&digest) || bundled.as_ref().is_some_and(is_md5);
         let Some(read) = self.read(m, want_md5) else {
             return;
         };
-        let hits = (rules_decide || !digest_matches(&digest, &read))
-            .then(|| rules_for(&m.rel, &read.head));
+        let matched = digest_matches(&digest, &read)
+            || bundled.as_ref().is_some_and(|d| digest_matches(d, &read));
+        let hits = (rules_decide || !matched).then(|| rules_for(&m.rel, &read.head));
         let failed = match &hits {
             None => false,
             // Rules are its only check, so what they couldn't read can't pass.
