@@ -685,6 +685,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 id: custom_role_id.to_string(),
             });
         }
+        // A custom role stores `role = operator`, so this demotes a super_admin.
+        self.guard_last_super_admin(user_id).await?;
         hyperion_state::web_users::set_custom_role(&self.pool, user_id, custom_role_id, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("set custom role: {e}")))?;
