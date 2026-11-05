@@ -290,6 +290,22 @@ fn htmx_endpoints_have_routes() {
 /// The allow-list below is for endpoints that are legitimately not
 /// navigable: health probes, token-scoped flows, and polling endpoints. Add
 /// to it deliberately; the default is that a page needs a way in.
+/// The commands the panel hands out must not put a token on argv: tenants are
+/// local users and /proc/<pid>/cmdline is world-readable. `--token=` and
+/// `--token` remain accepted for old copies, but nothing here may generate them.
+#[test]
+fn generated_commands_keep_tokens_off_argv() {
+    for (file, wanted) in [
+        ("install.html", "HYPERION_INVITE_TOKEN=%s"),
+        ("migration_export_result.html", "--token-stdin"),
+    ] {
+        let src = std::fs::read_to_string(templates_dir().join(file)).expect(file);
+        assert!(src.contains(wanted), "{file} lost {wanted}");
+        assert!(!src.contains("--token="), "{file} puts a token on argv");
+        assert!(!src.contains("--token "), "{file} puts a token on argv");
+    }
+}
+
 #[test]
 fn every_page_is_reachable_from_the_nav() {
     /// Reached by a token in the URL, by a redirect, or by a probe — not by

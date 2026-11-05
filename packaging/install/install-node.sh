@@ -3,8 +3,17 @@
 #
 # Usage (as root, on a fresh box, replacing the token + master URL with
 # the values from your master's /install page):
-#   curl -fsSL https://<master>/install/install-node.sh | sudo bash -s -- \
-#     --token=ABCD-EFGH-IJKL-MNPQ --master=https://master.example.com
+#   { printf 'HYPERION_INVITE_TOKEN=%s\n' 'ABCD-EFGH-IJKL-MNPQ'
+#     curl -fsSL https://<master>/install/install-node.sh; } \
+#     | sudo bash -s -- --master=https://master.example.com
+#
+# The invite token never goes on a command line: /proc/<pid>/cmdline is
+# world-readable while this runs. printf is a shell builtin, so the form above
+# hands it to bash through the pipe, as the script's first line. Also accepted:
+#   --token-file=PATH           first line of a root-readable file
+#   HYPERION_INVITE_TOKEN=...   environment (not `sudo VAR=...`: that is argv)
+#   (nothing)                   asks on the terminal, without echo
+# --token=... still works for commands copied from an older panel.
 #
 # What it does:
 #   - Verifies Debian 12+
@@ -25,7 +34,8 @@
 
 set -euo pipefail
 
-TOKEN=""
+TOKEN="${HYPERION_INVITE_TOKEN:-}"
+unset HYPERION_INVITE_TOKEN
 MASTER=""
 REF="${HYPERION_REF:-main}"
 INSTALL_DIR="${HYPERION_INSTALL_DIR:-/opt/hyperion}"
@@ -39,7 +49,11 @@ SKIP_CLONE="${HYPERION_SKIP_CLONE:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --token=*)  TOKEN="${1#*=}";;
+    --token=*)  TOKEN="${1#*=}"
+                printf 'warning: --token= is visible to every local user while this runs; see the head of this script.\n' >&2;;
+    --token-file=*)
+                IFS= read -r TOKEN < "${1#*=}" || [[ -n "$TOKEN" ]] \
+                  || { printf 'cannot read a token from %s\n' "${1#*=}" >&2; exit 2; };;
     --master=*) MASTER="${1#*=}";;
     --label=*)  LABEL="${1#*=}";;
     *) printf 'unknown arg: %s\n' "$1" >&2; exit 2;;
@@ -189,7 +203,12 @@ ask_port() {
 }
 
 [[ $EUID -eq 0 ]] || fail "Run me as root."
-[[ -n "$TOKEN"  ]] || fail "Missing --token=<invite-token>."
+if [[ -z "$TOKEN" && "${HYPERION_NONINTERACTIVE:-}" != "1" && -r /dev/tty ]]; then
+  printf 'Invite token (from the master'"'"'s Nodes page): ' > /dev/tty
+  IFS= read -rs TOKEN < /dev/tty || TOKEN=""
+  printf '\n' > /dev/tty
+fi
+[[ -n "$TOKEN"  ]] || fail "Missing invite token: use --token-file=<path> or HYPERION_INVITE_TOKEN."
 [[ -n "$MASTER" ]] || fail "Missing --master=<https://your-master>."
 
 #-------- 1. OS check ------------------------------------------------------

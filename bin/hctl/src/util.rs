@@ -136,19 +136,25 @@ pub fn confirm(question: &str, yes: bool) -> Result<()> {
 /// one is generated and the caller shows it once.
 pub fn new_secret(from_stdin: bool) -> Result<(String, bool)> {
     if from_stdin {
-        let mut line = String::new();
-        std::io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .context("read password from stdin")?;
-        let pw = line.trim_end_matches(['\r', '\n']).to_string();
-        if pw.is_empty() {
-            bail!("--password-stdin: stdin was empty");
-        }
-        Ok((pw, false))
+        Ok((secret_from_stdin("--password-stdin")?, false))
     } else {
         Ok((generate_password(), true))
     }
+}
+
+/// One line of stdin, for a secret that must stay off argv. `flag` names the
+/// option in the error.
+pub fn secret_from_stdin(flag: &str) -> Result<String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .with_context(|| format!("{flag}: read stdin"))?;
+    let secret = line.trim_end_matches(['\r', '\n']).to_string();
+    if secret.is_empty() {
+        bail!("{flag}: stdin was empty");
+    }
+    Ok(secret)
 }
 
 /// 24 alphanumeric characters (~143 bits).

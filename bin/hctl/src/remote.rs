@@ -22,7 +22,8 @@ pub struct RemoteConn {
     /// API base URL, e.g. https://panel.example.com (overrides env + config).
     #[arg(long, global = true)]
     pub url: Option<String>,
-    /// API key `hyp_…` (overrides env + config).
+    /// API key `hyp_…` (overrides env + config). Any local user can read it from
+    /// the process list while this runs; prefer $HYPERION_API_KEY.
     #[arg(long, global = true)]
     pub key: Option<String>,
     /// Skip TLS certificate verification (self-signed panels).
@@ -33,7 +34,11 @@ pub struct RemoteConn {
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmd {
     /// Save the API url + key to ~/.config/hyperion/remote.toml.
-    Login,
+    Login {
+        /// Read the key from stdin, one line.
+        #[arg(long)]
+        key_stdin: bool,
+    },
     /// Show the presented key's identity (GET /api/v1/me).
     Me,
     /// List hostings (GET /api/v1/hostings).
@@ -181,11 +186,16 @@ fn seg(s: &str) -> String {
 
 pub async fn run(conn: &RemoteConn, cmd: &RemoteCmd) -> Result<()> {
     // `login` is special: it writes config rather than calling the API.
-    if let RemoteCmd::Login = cmd {
-        let (url, key) = (
-            require(&conn.url, "HYPERION_API_URL", "--url")?,
-            require(&conn.key, "HYPERION_API_KEY", "--key")?,
-        );
+    if let RemoteCmd::Login { key_stdin } = cmd {
+        if *key_stdin && conn.key.is_some() {
+            bail!("--key-stdin and --key cannot be used together");
+        }
+        let url = require(&conn.url, "HYPERION_API_URL", "--url")?;
+        let key = if *key_stdin {
+            crate::util::secret_from_stdin("--key-stdin")?
+        } else {
+            require(&conn.key, "HYPERION_API_KEY", "--key-stdin")?
+        };
         write_config(&url, &key)?;
         println!("Saved {}", config_path()?.display());
         return Ok(());
@@ -193,7 +203,7 @@ pub async fn run(conn: &RemoteConn, cmd: &RemoteCmd) -> Result<()> {
 
     let c = resolve(conn)?;
     match cmd {
-        RemoteCmd::Login => unreachable!("handled above"),
+        RemoteCmd::Login { .. } => unreachable!("handled above"),
         RemoteCmd::Me => get(&c, "/api/v1/me", &[]).await,
         RemoteCmd::List {
             state,

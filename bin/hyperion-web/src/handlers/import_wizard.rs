@@ -359,6 +359,13 @@ pub async fn get_wizard(
     render(&state, &ctx, None, q.flash, q.flash_error).await
 }
 
+/// The command an operator pastes on the source server. The URL holds the token
+/// and the source's tenants are local users who can read /proc/<pid>/cmdline, so
+/// curl takes it as config on stdin. printf is a shell builtin and has no argv.
+fn agent_one_liner(base: &str, token: &str) -> String {
+    format!("printf 'url = \"%s\"\\n' '{base}/import/agent/{token}' | curl -fsSL -K - | sudo bash")
+}
+
 pub async fn post_mint(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -388,7 +395,7 @@ pub async fn post_mint(
         _ => return Err(AppError::Internal("mint returned unexpected result".into())),
     };
     let base = base_url(&state, &headers).await;
-    let one_liner = format!("curl -fsSL \"{base}/import/agent/{token}\" | sudo bash");
+    let one_liner = agent_one_liner(&base, &token);
     render(
         &state,
         &ctx,
@@ -1988,6 +1995,17 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only printf, a shell builtin with no argv of its own, may see the token.
+    #[test]
+    fn the_pasted_command_keeps_the_token_off_argv() {
+        let cmd = agent_one_liner("https://panel.example", "abc123");
+        let parts: Vec<&str> = cmd.split(" | ").collect();
+        assert_eq!(parts.len(), 3, "{cmd}");
+        assert!(parts[0].starts_with("printf ") && parts[0].contains("abc123"));
+        assert_eq!(parts[1], "curl -fsSL -K -");
+        assert_eq!(parts[2], "sudo bash");
+    }
 
     /// A rate and a time left describe a transfer still moving. Next to "failed"
     /// or "finished" they would read as if it were.
