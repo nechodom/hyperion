@@ -902,8 +902,9 @@ fn container_tone(c: &DockerContainer) -> &'static str {
         _ if c.oom_killed || unhealthy => "err",
         "restarting" | "dead" => "err",
         "running" => "ok",
-        "exited" if c.exit_code == 0 && c.restart_policy == "no" => "muted",
+        "exited" if c.finished_job() => "muted",
         "exited" => "err",
+        "created" if c.failed_to_start() => "err",
         _ => "muted",
     }
 }
@@ -1993,6 +1994,28 @@ pub(crate) async fn module_card(state: &SharedState) -> ModuleCard {
 mod tests {
     use super::*;
     use hyperion_rpc_client::remote::RemoteClientError;
+
+    #[test]
+    fn a_finished_job_is_muted_and_a_failed_start_is_red() {
+        let exited = |policy: &str, code: i64| DockerContainer {
+            state: "exited".into(),
+            restart_policy: policy.into(),
+            exit_code: code,
+            ..Default::default()
+        };
+        for policy in ["", "no", "on-failure"] {
+            assert_eq!(container_tone(&exited(policy, 0)), "muted", "{policy}");
+            assert_eq!(container_tone(&exited(policy, 1)), "err", "{policy}");
+        }
+        assert_eq!(container_tone(&exited("always", 0)), "err");
+        let created = |code: i64| DockerContainer {
+            state: "created".into(),
+            exit_code: code,
+            ..Default::default()
+        };
+        assert_eq!(container_tone(&created(0)), "muted", "still starting");
+        assert_eq!(container_tone(&created(128)), "err", "the start failed");
+    }
 
     fn row(label: &str, status: NodeDockerState) -> NodeDockerRow {
         NodeDockerRow {

@@ -55,6 +55,24 @@ pub struct DockerContainer {
     pub update_error: String,
 }
 
+impl DockerContainer {
+    /// Ran to completion and is not meant to come back: it exited 0, was not
+    /// killed for memory, and its restart policy would not start it again
+    /// (none, or `on-failure`, which restarts only a non-zero exit).
+    pub fn finished_job(&self) -> bool {
+        let policy = self.restart_policy.as_str();
+        let stays_down = policy.is_empty() || policy == "no" || policy.starts_with("on-failure");
+        stays_down && self.exit_code == 0 && !self.oom_killed
+    }
+
+    /// Created but never running, with a non-zero exit code: Docker made
+    /// the container and the start failed (a port taken, a bad command). A
+    /// container that is just starting up has code 0.
+    pub fn failed_to_start(&self) -> bool {
+        self.state == "created" && self.exit_code != 0
+    }
+}
+
 /// Whether the tag a container runs has moved on at its registry. Digests of
 /// the same tag are compared; a newer version tag (`1.2` to `1.3`) is never
 /// looked for.

@@ -79,8 +79,9 @@ pub(super) fn container_verdict(c: &DockerContainer, restarts_in_window: u32) ->
         // `OOMKilled` describes the last exit, so it only matters once the
         // container is not running again.
         "exited" | "dead" => {
-            let job = matches!(c.restart_policy.as_str(), "" | "no");
-            if job && c.exit_code == 0 && !c.oom_killed {
+            // `on-failure` restarts only a non-zero exit, so an exit 0 stays
+            // down like a job's and is not a problem.
+            if c.finished_job() {
                 ContainerVerdict::Finished
             } else {
                 ContainerVerdict::Exited {
@@ -89,6 +90,13 @@ pub(super) fn container_verdict(c: &DockerContainer, restarts_in_window: u32) ->
                 }
             }
         }
+        // A container Docker made but could not start stays `created` with
+        // the failure's exit code. One that is still starting has code 0,
+        // and the grace period covers the rest.
+        "created" if c.failed_to_start() => ContainerVerdict::Exited {
+            code: c.exit_code,
+            oom: false,
+        },
         // created, paused, removing: transitions, not failures.
         _ => ContainerVerdict::Ok,
     }
@@ -186,6 +194,21 @@ mod tests {
         }
     }
 
+    fn created(service: &str, code: i64) -> DockerContainer {
+        DockerContainer {
+            state: "created".into(),
+            exit_code: code,
+            ..running(service)
+        }
+    }
+
+    fn paused(service: &str) -> DockerContainer {
+        DockerContainer {
+            state: "paused".into(),
+            ..running(service)
+        }
+    }
+
     fn watch_with(service: &str, rises: &[i64]) -> RestartWatch {
         let mut w = RestartWatch::default();
         w.rises.insert(("p".into(), service.into()), rises.to_vec());
@@ -228,6 +251,42 @@ mod tests {
                     oom: false,
                 },
             ),
+            (
+                "on-failure, exit 0",
+                exited("a", "on-failure", 0),
+                0,
+                Finished,
+            ),
+            (
+                "on-failure, exit 1",
+                exited("a", "on-failure", 1),
+                0,
+                Exited {
+                    code: 1,
+                    oom: false,
+                },
+            ),
+            (
+                "on-failure, exit 0 but out of memory",
+                DockerContainer {
+                    oom_killed: true,
+                    ..exited("a", "on-failure", 0)
+                },
+                0,
+                Exited { code: 0, oom: true },
+            ),
+            ("no policy named, exit 0", exited("a", "", 0), 0, Finished),
+            ("created, still starting", created("a", 0), 0, Ok),
+            (
+                "created, start failed",
+                created("a", 128),
+                0,
+                Exited {
+                    code: 128,
+                    oom: false,
+                },
+            ),
+            ("paused", paused("a"), 0, Ok),
             (
                 "policy always, exit 0",
                 exited("a", "always", 0),

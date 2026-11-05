@@ -260,7 +260,9 @@ off until an administrator turns it on, and while it is off no node runs a
 - Alerts on an unhealthy container, a restart loop, a container that exited
   badly or was OOM-killed, a stack that disappeared, and a Docker daemon that
   stops answering. A state has to last about 3 minutes before it alerts, so a
-  deploy stays quiet. A job that exited 0 and is not set to restart is fine.
+  deploy stays quiet. A job that exited 0 and will not be restarted (restart
+  policy none or `on-failure`) is fine. A container Docker created but could
+  not start (state `created` with a non-zero exit code) is a problem.
 - Shows container and stack logs to people allowed to read them.
 - Checks once a day whether the tag a container runs has moved on at its
   registry.

@@ -118,7 +118,8 @@ before alerting, so `compose up -d` and deploys stay quiet.
 | Running, healthy or no healthcheck | ok |
 | Running, `unhealthy` | problem |
 | Restart count rose repeatedly inside the window, or `restarting` | problem (restart loop) |
-| Exited, restart policy `no`, exit 0 | ok (finished job) |
+| Exited, restart policy `no` or `on-failure`, exit 0, not OOM-killed | ok (finished job) |
+| `created` with a non-zero exit code | problem (the start failed) |
 | Exited otherwise, or `OOMKilled` | problem, with exit code and cause |
 | Known project with no containers left | problem once ("project gone") |
 | Daemon not responding | problem for the whole node |
