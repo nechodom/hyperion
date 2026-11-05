@@ -283,8 +283,9 @@ Docker's own apt repository, for example). The module does not install it.
    The master needs no Docker for this step.
 2. On the **Docker** page, press **Turn on** for each node, the master included.
    It runs as a background job and checks that the Docker daemon answers on
-   that node. If it does not, the job fails and says to install Docker first.
-   A node running an older agent says "update the node first".
+   that node. If Docker is missing, the job fails and says to install Docker
+   first. If it is installed but stopped, the job says "Start Docker and try
+   again". A node running an older agent says "update the node first".
 
 `docker buildx` is optional. Without it, image updates still work for Docker
 Hub but show "cannot verify" for every other registry and for private Hub
@@ -294,12 +295,14 @@ repositories.
 
 Settings → Panel → **Remove the module** asks every node to delete what
 Hyperion kept about Docker (remembered stacks, open alerts, cached disk
-figures) and then turns the module off on the master. The URL checks and their
-history are deleted with it. A node that does not answer stays listed and the
-module stays on until it is removed there. **Remove from this node** on the
-Docker page does the same for one node. Docker, its containers, images and
-volumes are never touched, and reverse-proxy hostings made through the module
-stay, since they are ordinary hostings.
+figures, image-update answers and restart-loop history) and then turns the
+module off on the master. The URL checks and their history are deleted with
+it. A node that does not answer stays listed and the module stays on until it
+is removed there. **Remove from this node** on the Docker page deletes the same
+node data for that one node only. The URL checks stay, and the module stays on
+for the cluster. Docker, its containers, images and volumes are never touched,
+and reverse-proxy hostings made through the module stay, since they are
+ordinary hostings.
 
 ### Logs
 
@@ -309,7 +312,9 @@ can see every hosting, because these rows span all tenants. Customers never see
 the Docker pages. The page shows the last 50 to 2000 lines (200 by
 default), can filter by text and can follow the log. Opening a log writes an
 audit entry (`docker.logs.read`) with who and which container. Following does
-not write one per refresh.
+not write one per refresh. The entry is written on the node that serves the
+logs, so the logs of a stack on a worker are audited in that worker's audit
+log, not the master's.
 
 Log lines appear in the panel only. Alerts by email, Slack or webhook never
 contain them.
@@ -330,7 +335,8 @@ node pulled with the digest the registry holds under the same tag. It does not
 look for a newer version number (`1.2` to `1.3`), and it pulls nothing.
 Results are up to date, update available, or cannot verify (built locally,
 pinned by digest, registry error, rate limit, or no buildx). A failed check
-keeps the last answer and is never shown as "up to date". It also flags a
+keeps the last answer, marked "The latest check failed"; with no earlier answer
+it shows cannot verify. It also flags a
 container running an older image than the tag's local copy.
 
 Docker Hub is asked with an anonymous token and a `HEAD` on the manifest, which
@@ -345,9 +351,9 @@ password. A rate-limited answer waits until the next day.
 URL checks live on the **Monitoring** page, next to the per-hosting uptime
 monitor, which is unchanged. Each check has an address, an interval (30 seconds
 at the shortest), an expected status, how many failures alert, and optional own
-email and webhook addresses (the cluster's Slack and administrator addresses
-otherwise). https addresses also warn at 14 and 3 days before the certificate
-expires. Kuma monitors are entered by hand: there is no import and no history
+email addresses, Slack webhook and generic webhook (the cluster's Slack and
+administrator addresses otherwise). https addresses also warn at 14 and 3 days
+before the certificate expires. Uptime Kuma monitors are entered by hand: there is no import and no history
 carried over.
 
 The checks run **from the master**, so a whole node dying is seen from outside.
@@ -385,8 +391,10 @@ upstream and node filled in, and you type the domain.
 - **"Docker is not answering".** The daemon did not reply within the time
   limit. Check `systemctl status docker` on the node. The stacks shown are what
   it said last.
-- **"Not reachable" or a node missing from the list.** The master could not
-  read the node. Its stacks are not shown, which does not mean they are running.
+- **"Not reachable".** The master could not read the node. Its stacks are not
+  shown, which does not mean they are running. A node that is registered always
+  gets a row. If the master could not verify a node's answer, that node is
+  reported in a warning at the top of the page instead of a row.
 - **An image shows "cannot verify".** The row says why. For a registry other
   than Docker Hub, install `docker-buildx-plugin` and log in with `docker login`
   as root on the node.

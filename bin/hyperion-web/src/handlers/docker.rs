@@ -516,8 +516,10 @@ fn disk_view(st: &DockerNodeStatus) -> Option<DiskView> {
 
 fn remove_body(label: &str) -> String {
     format!(
-        "Deletes what Hyperion kept about Docker on {label}: remembered stacks, open alerts and \
-         the cached disk figures. Docker itself, its containers, images and volumes are left alone."
+        "Deletes what Hyperion kept about Docker on {label}: remembered stacks, open alerts, \
+         the cached disk figures, image-update answers and restart-loop history. URL checks are \
+         kept and the module stays on for the cluster. Docker itself, its containers, images and \
+         volumes are left alone."
     )
 }
 

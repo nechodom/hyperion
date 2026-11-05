@@ -142,7 +142,7 @@
     </p>
     <form method="post" action="/docker/remove-cluster" style="margin-top:0.9rem"
           data-confirm-title="Remove the Docker module"
-          data-confirm-body="Every node is asked to delete what Hyperion kept about Docker: remembered stacks, open alerts and cached disk figures. Docker, its containers, images and volumes are left alone. A node that does not answer stays listed and the module stays on until it is removed there."
+          data-confirm-body="Every node is asked to delete what Hyperion kept about Docker: remembered stacks, open alerts, cached disk figures, image-update answers and restart-loop history. URL checks and their history are deleted too. Docker, its containers, images and volumes are left alone. A node that does not answer stays listed and the module stays on until it is removed there."
           data-confirm-confirm-label="Remove"
           data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
