@@ -89,7 +89,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let gate = self.site_scan.node.lock().await;
         // After the wait, which can be as long as another site's scan.
         let now = now_secs();
-        let prior = self.stored_integrity_scan(detail.id.as_str()).await;
+        // A read that failed is not "never scanned".
+        let prior = self
+            .integrity_record(detail.id.as_str())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("integrity record: {e}")))?;
         let run = self
             .site_scan_locked(&detail, ScanMode::Delta, prior.as_ref(), now)
             .await;
@@ -97,11 +101,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let (result, native_ran) = match run {
             SiteScanRun::Finished { result, native_ran } => (result, native_ran),
             SiteScanRun::Busy => return Ok(scan_busy_result(prior)),
+            SiteScanRun::NotStored => return Ok(scan_not_stored_result(prior)),
         };
         if result.coverage.no_upstream {
             return Ok(result);
         }
-        let (after, clamav_ran) = self.site_scan_clamav_pass(&detail, now_secs()).await;
+        let (after, clamav_ran) = self
+            .site_scan_clamav_pass(&detail, now_secs())
+            .await
+            .unwrap_or((result, false));
         Ok(if native_ran {
             after
         } else {
@@ -516,7 +524,7 @@ pub(super) fn integrity_finding_keys(
 const CLAMAV_LOG_BYTES: usize = 2048;
 
 /// A hosting that is never scanned, and why, or `Err` for one that can't be right
-/// now. A reverse proxy or a redirect has no files of its own.
+/// now. A reverse proxy has no files of its own.
 pub(super) fn scan_refusal(
     detail: &HostingDetail,
 ) -> Result<Option<hyperion_types::WpIntegrityScanResult>, RpcError> {
@@ -526,7 +534,7 @@ pub(super) fn scan_refusal(
         });
     }
     if !kind_has_files(&detail.kind) {
-        // Not stored: these have no place on the integrity dashboard.
+        // Not stored: it has no place on the integrity dashboard.
         return Ok(Some(hyperion_types::WpIntegrityScanResult {
             error: Some(SITE_SCAN_NO_FILES.to_string()),
             scanned_at: now_secs(),

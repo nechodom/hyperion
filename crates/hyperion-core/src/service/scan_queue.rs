@@ -37,6 +37,12 @@ const FULL_REHASH_HOURS: std::ops::Range<u32> = 2..6;
 /// "Scan now" that finished during a sweep, whose clock lags by up to a minute.
 const CLOCK_MOVED_SECS: i64 = 5 * 60;
 
+/// `hosting_kv` key: unix seconds a request for this hosting was last honoured.
+const SCAN_REQUEST_HONOURED_KV_KEY: &str = "scan_request_honoured_at";
+/// A site's requests are honoured this far apart at most. Anyone with `WpManage`
+/// can ask, a customer included, and the node has one worker.
+const SCAN_REQUEST_MIN_GAP_SECS: i64 = 10 * 60;
+
 /// `node_kv` key: unix seconds the manifest cache was last swept.
 const EVICT_LAST_RUN_KV: &str = "site_scan_evict_last_run_at";
 
@@ -68,13 +74,14 @@ const MAX_ID_BYTES: usize = 128;
 /// own message can carry tenant text.
 const SITE_SCAN_FAILED: &str = "the site scan could not finish; this is the last result it stored";
 const SITE_SCAN_BUSY: &str = "another site scan is still running on this node; try again shortly";
-pub(super) const SITE_SCAN_NO_FILES: &str =
-    "a reverse proxy or a redirect has no files of its own to scan";
+pub(super) const SITE_SCAN_NO_FILES: &str = "a reverse proxy has no files of its own to scan";
+const SITE_SCAN_NOT_STORED: &str = "the scan's result could not be stored; try again shortly";
 const SITE_SCAN_CUT_SHORT: &str = "the scan did not finish; part of the site was not looked at";
 
-/// False for the hosting kinds with no files of their own to scan.
+/// False for a hosting with no files of its own to scan. A redirect from the
+/// wizard is a `static` row with a docroot, so it counts as having files.
 pub(super) fn kind_has_files(kind: &str) -> bool {
-    !matches!(kind, "reverse_proxy" | "redirect")
+    kind != "reverse_proxy"
 }
 
 // One of these is alive per site, so the size of the variants costs nothing.
@@ -88,12 +95,16 @@ pub(super) enum SiteScanRun {
     },
     /// A worker that survived an agent restart holds the unit. Nothing happened.
     Busy,
+    /// The record couldn't be read to store into, so nothing was written over it.
+    NotStored,
 }
 
 /// How one site's turn in the tick ended.
 enum SiteScanTurn {
     NewFindings,
     NothingNew,
+    /// Nothing ran: not due after all, gone, or nothing could be stored.
+    NotRun,
     Busy,
 }
 
@@ -180,11 +191,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // database error) can't keep it here.
         let mut answered = HashSet::new();
         let mut newly_flagged = 0i64;
+        // A request goes ahead of the schedule, but never twice running: whoever
+        // is asking, every other site on the node still gets its turn.
+        let mut schedule_owed = false;
         loop {
             // A sweep can outlast the window it started in. To the minute is all
             // a schedule needs.
             let now = now + i64::try_from(started.elapsed().as_secs() / 60 * 60).unwrap_or(0);
-            let (id, requested) = match self.next_scan_request(&mut answered).await {
+            let request = if schedule_owed && !queue.is_empty() {
+                None
+            } else {
+                self.next_scan_request(&mut answered, now).await
+            };
+            let (id, requested) = match request {
                 Some(id) => (id, true),
                 None => match queue.pop_front() {
                     Some(id) => (id, false),
@@ -192,8 +211,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 },
             };
             match self.site_scan_turn(&id, requested, tz, now).await {
-                SiteScanTurn::NewFindings => newly_flagged += 1,
-                SiteScanTurn::NothingNew => {}
+                SiteScanTurn::NewFindings => {
+                    newly_flagged += 1;
+                    schedule_owed = requested;
+                }
+                SiteScanTurn::NothingNew => schedule_owed = requested,
+                SiteScanTurn::NotRun => {}
                 SiteScanTurn::Busy => {
                     tracing::debug!("site scan: another worker is running; next tick");
                     return Ok(newly_flagged);
@@ -236,18 +259,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(due.into_iter().map(|(_, id)| id).collect())
     }
 
-    /// The longest-waiting request this tick hasn't answered yet.
+    /// The longest-waiting request this tick hasn't answered yet, among sites not
+    /// honoured in the last ten minutes. The rest stay queued for a later tick.
     async fn next_scan_request(
         &self,
         answered: &mut HashSet<(String, String)>,
+        now: i64,
     ) -> Option<HostingId> {
-        let requests = hyperion_state::hosting_kv::list_by_key(&self.pool, SCAN_REQUESTED_KV_KEY)
-            .await
-            .map_err(|e| tracing::warn!(error = %e, "site scan: requests unreadable"))
-            .ok()?;
+        let read = |key: &'static str| hyperion_state::hosting_kv::list_by_key(&self.pool, key);
+        let (requests, honoured) = match (
+            read(SCAN_REQUESTED_KV_KEY).await,
+            read(SCAN_REQUEST_HONOURED_KV_KEY).await,
+        ) {
+            (Ok(r), Ok(h)) => (r, h),
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::warn!(error = %e, "site scan: requests unreadable");
+                return None;
+            }
+        };
+        let too_soon = |id: &str| {
+            honoured
+                .iter()
+                .find(|(h, _)| h == id)
+                .and_then(|(_, at)| at.trim().parse::<i64>().ok())
+                .is_some_and(|at| !stamped_ahead(at, now) && now - at < SCAN_REQUEST_MIN_GAP_SECS)
+        };
         let next = requests
             .into_iter()
-            .filter(|r| !answered.contains(r))
+            .filter(|r| !answered.contains(r) && !too_soon(&r.0))
             .min_by_key(|(_, at)| at.trim().parse::<i64>().unwrap_or(0))?;
         let id = HostingId(next.0.clone());
         answered.insert(next);
@@ -284,7 +323,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let request = self.scan_request_flag(id.as_str()).await;
         // Asked again under the lock: "Scan now" may have got here first.
         let Ok(prior) = self.integrity_record(id.as_str()).await else {
-            return SiteScanTurn::NothingNew;
+            return SiteScanTurn::NotRun;
         };
         let mode = if requested {
             Some(ScanMode::Delta)
@@ -292,14 +331,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             site_scan_due(prior.as_ref(), now, tz, id.as_str())
         };
         let Some(mode) = mode else {
-            return SiteScanTurn::NothingNew;
+            return SiteScanTurn::NotRun;
         };
         let detail = match self.get(HostingSelector::Id(id.clone())).await {
             Ok(d) if d.state == HostingState::Active && kind_has_files(&d.kind) => d,
             // Nothing will scan it, so nothing should wait for that.
             _ => {
                 self.clear_scan_request(id.as_str()).await;
-                return SiteScanTurn::NothingNew;
+                return SiteScanTurn::NotRun;
             }
         };
         let prior_keys = prior
@@ -312,7 +351,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         {
             SiteScanRun::Finished { result, .. } => result,
             SiteScanRun::Busy => return SiteScanTurn::Busy,
+            // No alert either: with nothing stored, the next run would send it
+            // again. The request stands.
+            SiteScanRun::NotStored => return SiteScanTurn::NotRun,
         };
+        if requested {
+            if let Err(e) = hyperion_state::hosting_kv::set(
+                &self.pool,
+                id.as_str(),
+                SCAN_REQUEST_HONOURED_KV_KEY,
+                &now.to_string(),
+                now,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "site scan: request stamp not written");
+            }
+        }
         if request.is_some() && self.scan_request_flag(id.as_str()).await == request {
             self.clear_scan_request(id.as_str()).await;
         }
@@ -395,13 +450,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             };
             // Passes take hours, so the clock has to keep up with them.
             let now = now + i64::try_from(started.elapsed().as_secs()).unwrap_or(0);
-            let before = self
-                .stored_integrity_scan(detail.id.as_str())
-                .await
-                .map(|p| integrity_finding_keys(&p.result))
+            let Ok(prior) = self.integrity_record(detail.id.as_str()).await else {
+                continue;
+            };
+            // ClamAV's keys only. A pass can take hours, and a scan storing its
+            // own finding meanwhile has already said so.
+            let before = prior
+                .map(|p| malware_finding_keys(&p.result))
                 .unwrap_or_default();
-            let (after, _) = self.site_scan_clamav_pass(&detail, now).await;
-            let new_keys = integrity_finding_keys(&after).difference(&before).count();
+            let Some((after, _)) = self.site_scan_clamav_pass(&detail, now).await else {
+                continue;
+            };
+            let new_keys = malware_finding_keys(&after).difference(&before).count();
             if new_keys > 0 {
                 newly_flagged += 1;
                 self.notify_integrity_findings(&detail.domain, &after, new_keys)
@@ -413,12 +473,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// One ClamAV pass and its half of the record. Says whether it actually ran
     /// now. A pass held off rewrites nothing, so asking every ten minutes is cheap.
+    ///
+    /// `None` when the record couldn't be read, and then nothing is written: a
+    /// failed read isn't an empty record, and the scan's half would be lost.
     pub(super) async fn site_scan_clamav_pass(
         &self,
         detail: &HostingDetail,
         now: i64,
-    ) -> (hyperion_types::WpIntegrityScanResult, bool) {
-        let prior = self.stored_integrity_scan(detail.id.as_str()).await;
+    ) -> Option<(hyperion_types::WpIntegrityScanResult, bool)> {
+        let prior = match self.integrity_record(detail.id.as_str()).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(domain = %detail.domain, error = %e, "clamav: record unreadable");
+                return None;
+            }
+        };
         let mut errors: Vec<String> = Vec::new();
         let (available, malware, at, failed_at) = self
             .integrity_malware_pass(detail, now, prior.as_ref(), &mut errors)
@@ -427,10 +496,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let error = (!errors.is_empty()).then(|| errors.join("; "));
 
         let _record = self.site_scan.record.lock().await;
-        let mut rec = self
-            .stored_integrity_scan(detail.id.as_str())
-            .await
-            .unwrap_or_default();
+        let mut rec = match self.integrity_record(detail.id.as_str()).await {
+            Ok(r) => r.unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!(domain = %detail.domain, error = %e, "clamav: record unreadable");
+                return None;
+            }
+        };
         let changed = rec.result.clamav_available != available
             || rec.result.malware != malware
             || rec.clamav_at != at
@@ -447,7 +519,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             self.set_stored_integrity_scan(detail.id.as_str(), &rec)
                 .await;
         }
-        (rec.result, ran_now)
+        Some((rec.result, ran_now))
     }
 
     /// Scan one site and store the result. The caller holds the node's lock.
@@ -470,17 +542,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map(|o| o.auto_accepted.clone())
             .unwrap_or_default();
 
-        let record_lock = self.site_scan.record.lock().await;
-        let current = self.stored_integrity_scan(detail.id.as_str()).await;
-        let clamav = ClamavVerdict::of(current.as_ref());
-        let stored = match outcome {
-            Some(outcome) => stored_from_outcome(outcome, prior, clamav, mode, now, report_only),
-            None => stored_after_failure(prior, clamav, now),
-        };
-        self.set_stored_integrity_scan(detail.id.as_str(), &stored)
-            .await;
-        drop(record_lock);
-
+        // Before anything can go wrong below: the worker has accepted these.
         if !auto_accepted.is_empty() {
             self.append_audit(
                 "wp.integrity.auto_accept",
@@ -490,6 +552,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             )
             .await;
         }
+
+        let record_lock = self.site_scan.record.lock().await;
+        let current = match self.integrity_record(detail.id.as_str()).await {
+            Ok(c) => c,
+            // A failed read isn't an empty record: ClamAV's list would be lost.
+            Err(e) => {
+                tracing::warn!(domain = %detail.domain, error = %e, "site scan: record unreadable");
+                return SiteScanRun::NotStored;
+            }
+        };
+        let clamav = ClamavVerdict::of(current.as_ref());
+        let stored = match outcome {
+            Some(outcome) => stored_from_outcome(outcome, prior, clamav, mode, now, report_only),
+            None => stored_after_failure(prior, clamav, now),
+        };
+        self.set_stored_integrity_scan(detail.id.as_str(), &stored)
+            .await;
+        drop(record_lock);
+
         let r = &stored.result;
         self.append_audit(
             "wp.integrity.scan",
@@ -867,6 +948,15 @@ fn upstream_finding_keys(
     keys
 }
 
+/// [`integrity_finding_keys`] with ClamAV's alone.
+fn malware_finding_keys(
+    r: &hyperion_types::WpIntegrityScanResult,
+) -> std::collections::HashSet<String> {
+    let mut keys = integrity_finding_keys(r);
+    keys.retain(|k| k.starts_with("malware:"));
+    keys
+}
+
 /// The stored result as the caller of a scan that didn't run should read it: the
 /// findings are the last run's, nothing was verified just now, and a ClamAV
 /// verdict carried from an earlier pass isn't this scan's.
@@ -881,14 +971,29 @@ pub(super) fn scan_did_not_run(
     result
 }
 
-/// The answer to a blocking scan while another worker holds the unit.
+/// The answer to a blocking scan that has nothing new to say.
+fn scan_unanswered(
+    prior: Option<StoredIntegrityScan>,
+    why: &str,
+) -> hyperion_types::WpIntegrityScanResult {
+    let mut result = scan_did_not_run(prior.map(|p| p.result).unwrap_or_default(), false);
+    result.error = Some(why.to_string());
+    result.clamav_installed = integrity::clamav_available();
+    result
+}
+
+/// Another worker holds the unit.
 pub(super) fn scan_busy_result(
     prior: Option<StoredIntegrityScan>,
 ) -> hyperion_types::WpIntegrityScanResult {
-    let mut result = scan_did_not_run(prior.map(|p| p.result).unwrap_or_default(), false);
-    result.error = Some(SITE_SCAN_BUSY.to_string());
-    result.clamav_installed = integrity::clamav_available();
-    result
+    scan_unanswered(prior, SITE_SCAN_BUSY)
+}
+
+/// The scan ran and there was nowhere safe to put its result.
+pub(super) fn scan_not_stored_result(
+    prior: Option<StoredIntegrityScan>,
+) -> hyperion_types::WpIntegrityScanResult {
+    scan_unanswered(prior, SITE_SCAN_NOT_STORED)
 }
 
 /// A run says nothing about what it couldn't speak for, so what the last run

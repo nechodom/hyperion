@@ -780,22 +780,26 @@ mod site_scan {
         assert_eq!(rec.scanned_at, t0 + 6 * HOUR);
     }
 
-    /// By the kind the rest of the code uses for these. The table's CHECK doesn't
-    /// allow it to be stored today, so there's no row to drive this through.
+    /// A redirect from the wizard is a `static` row with a target set, and has a
+    /// docroot like any other: scanned.
     #[tokio::test]
-    async fn redirect_is_refused_like_a_reverse_proxy() {
+    async fn a_wizard_redirect_is_scanned() {
         let pool = open_memory().await.expect("open");
-        let s = svc(pool.clone(), happy_mocks());
-        let mut detail = site_named(&s, "go.cz").await;
-        assert!(kind_has_files(&detail.kind));
+        let s = svc(pool.clone(), answering(happy_mocks(), upstream_verified(0)));
+        let site = site_named(&s, "go.cz").await;
+        sqlx::query(
+            "UPDATE hostings SET kind = 'static', redirect_url = 'https://x.cz' WHERE id = ?",
+        )
+        .bind(site.id.as_str())
+        .execute(&pool)
+        .await
+        .expect("redirect row");
+        s.site_scan_tick_at(&chrono::Utc, monday_at(0, 12, 0))
+            .await
+            .expect("tick");
+        assert!(s.stored_integrity_scan(site.id.as_str()).await.is_some());
+        assert!(kind_has_files("static"));
         assert!(!kind_has_files("reverse_proxy"));
-        assert!(!kind_has_files("redirect"));
-        detail.kind = "redirect".into();
-        let refused = scan_refusal(&detail)
-            .expect("not an error")
-            .expect("refused");
-        assert!(refused.error.is_some());
-        assert!(!refused.is_clean());
     }
 
     #[tokio::test]
@@ -2407,5 +2411,242 @@ mod site_scan {
         assert!(list[0].result.findings.is_empty());
         assert!(list[0].result.review.is_empty());
         assert_eq!(list[0].result.total_findings(), 1, "the counts stay");
+    }
+
+    // ---- a request can't take the node for itself ----
+
+    /// Which docroots the worker was asked to look at, in order.
+    fn recording_discovers(
+        mut a: MockAdapterPort,
+        order: Arc<StdMutex<Vec<std::path::PathBuf>>>,
+    ) -> MockAdapterPort {
+        a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::Discover { root } => {
+                order.lock().expect("lock").push(root);
+                WorkerReply::Discovery(Discovery::default())
+            }
+            WorkerJob::Scan(_) => WorkerReply::Scan(upstream_verified(0)),
+        });
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        a
+    }
+
+    /// After a requested site, one the schedule says is due goes before the next
+    /// request. A queued site that turns out not to be due any more doesn't count
+    /// as that turn.
+    #[tokio::test]
+    async fn a_scheduled_site_runs_between_requests() {
+        let pool = open_memory().await.expect("open");
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let a = recording_discovers(happy_mocks_many(), order.clone());
+        let s = svc(pool.clone(), a);
+        let now = monday_at(0, 12, 0);
+        let asked_first = site_named(&s, "asked-first.cz").await;
+        let asked_next = site_named(&s, "asked-next.cz").await;
+        let waiting = site_named(&s, "waiting.cz").await;
+        // Oldest of all, so it's first in the queue, and its request satisfies it.
+        s.set_stored_integrity_scan(asked_first.id.as_str(), &scanned(now - 9 * HOUR, now))
+            .await;
+        s.set_stored_integrity_scan(asked_next.id.as_str(), &scanned(now - 60, now))
+            .await;
+        s.set_stored_integrity_scan(waiting.id.as_str(), &scanned(now - 7 * HOUR, now))
+            .await;
+        for (site, at) in [(&asked_first, "100"), (&asked_next, "200")] {
+            hyperion_state::hosting_kv::set(&pool, site.id.as_str(), "scan_requested", at, 1)
+                .await
+                .expect("kv");
+        }
+
+        s.site_scan_tick_at(&chrono::Utc, now).await.expect("tick");
+
+        let root = |d: &HostingDetail| std::path::PathBuf::from(&d.root_dir);
+        assert_eq!(
+            *order.lock().expect("lock"),
+            vec![root(&asked_first), root(&waiting), root(&asked_next)]
+        );
+    }
+
+    /// One tenant clicking can't keep the worker on their site: a request is
+    /// honoured once in ten minutes, and the click stays queued meanwhile.
+    #[tokio::test]
+    async fn a_site_is_honoured_once_every_ten_minutes() {
+        let pool = open_memory().await.expect("open");
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let a = recording_discovers(happy_mocks(), order.clone());
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let sel = HostingSelector::Id(site.id.clone());
+        let t0 = monday_at(0, 12, 0);
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(t0 - 60, t0))
+            .await;
+        let ran = || order.lock().expect("lock").len();
+
+        s.wp_integrity_scan_request(sel.clone())
+            .await
+            .expect("request");
+        s.site_scan_tick_at(&chrono::Utc, t0).await.expect("tick");
+        assert_eq!(ran(), 1);
+
+        s.wp_integrity_scan_request(sel.clone())
+            .await
+            .expect("request");
+        s.site_scan_tick_at(&chrono::Utc, t0 + 599)
+            .await
+            .expect("tick");
+        assert_eq!(ran(), 1, "too soon");
+        assert!(
+            s.wp_integrity_stored(sel.clone())
+                .await
+                .expect("stored")
+                .scan_queued,
+            "still queued, not dropped"
+        );
+
+        s.site_scan_tick_at(&chrono::Utc, t0 + 600)
+            .await
+            .expect("tick");
+        assert_eq!(ran(), 2);
+        assert!(
+            !s.wp_integrity_stored(sel)
+                .await
+                .expect("stored")
+                .scan_queued
+        );
+    }
+
+    // ---- a record that can't be read isn't one that isn't there ----
+
+    /// The next read of this hosting's record fails, while a write would succeed:
+    /// what a passing database error looks like to the code under test.
+    fn make_record_unreadable(pool: &SqlitePool, id: &str) {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                sqlx::query(
+                    "UPDATE hosting_kv SET value = x'7b7d' WHERE hosting_id = ? AND key = ?",
+                )
+                .bind(id)
+                .bind(INTEGRITY_KV_KEY)
+                .execute(pool)
+                .await
+                .expect("poison");
+            })
+        });
+    }
+
+    async fn record_was_left_alone(
+        s: &HostingService<MockAdapterPort>,
+        pool: &SqlitePool,
+        id: &str,
+    ) {
+        assert!(
+            s.integrity_record(id).await.is_err(),
+            "the read really fails"
+        );
+        let (kind,): (String,) =
+            sqlx::query_as("SELECT typeof(value) FROM hosting_kv WHERE hosting_id = ? AND key = ?")
+                .bind(id)
+                .bind(INTEGRITY_KV_KEY)
+                .fetch_one(pool)
+                .await
+                .expect("typeof");
+        assert_eq!(kind, "blob", "nothing was written over it");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_clamav_pass_that_cant_reread_the_record_stores_nothing() {
+        let pool = open_memory().await.expect("open");
+        let id_slot = Arc::new(StdMutex::new(String::new()));
+        let (during, slot) = (pool.clone(), id_slot.clone());
+        let a = with_clamav(happy_mocks(), move || {
+            make_record_unreadable(&during, &slot.lock().expect("lock"));
+            Ok(found(vec![webshell_hit()]))
+        });
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        *id_slot.lock().expect("lock") = site.id.as_str().to_string();
+        let now = monday_at(0, 12, 0);
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(now - 60, now))
+            .await;
+        assert_eq!(s.site_scan_clamav_tick_at(now).await.expect("tick"), 0);
+        record_was_left_alone(&s, &pool, site.id.as_str()).await;
+    }
+
+    /// The scan's store: nothing written, no alert it couldn't remember sending,
+    /// and the request still stands. The blocking scan won't start on such a read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scan_that_cant_reread_the_record_stores_nothing() {
+        let pool = open_memory().await.expect("open");
+        let id_slot = Arc::new(StdMutex::new(String::new()));
+        let (during, slot) = (pool.clone(), id_slot.clone());
+        let mut tampered = upstream_verified(0);
+        tampered.upstream.core_modified = vec!["wp-login.php".into()];
+        let mut a = happy_mocks();
+        a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
+            WorkerJob::Scan(_) => {
+                make_record_unreadable(&during, &slot.lock().expect("lock"));
+                WorkerReply::Scan(tampered.clone())
+            }
+        });
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let id = site.id.as_str();
+        *id_slot.lock().expect("lock") = id.to_string();
+        let now = monday_at(0, 12, 0);
+        s.set_stored_integrity_scan(id, &scanned(now - 7 * HOUR, now))
+            .await;
+        hyperion_state::hosting_kv::set(&pool, id, "scan_requested", "100", 1)
+            .await
+            .expect("kv");
+
+        assert_eq!(
+            s.site_scan_tick_at(&chrono::Utc, now).await.expect("tick"),
+            0
+        );
+        record_was_left_alone(&s, &pool, id).await;
+        assert_eq!(s.scan_request_flag(id).await.as_deref(), Some("100"));
+
+        assert!(s
+            .wp_integrity_scan(HostingSelector::Id(site.id.clone()))
+            .await
+            .is_err());
+    }
+
+    /// A pass can take hours, and a scan can store while it runs. That scan has
+    /// told admins about its own finding; the sweep says only what ClamAV found.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_clamav_sweep_alerts_only_on_its_own_hits() {
+        let pool = open_memory().await.expect("open");
+        let id_slot = Arc::new(StdMutex::new(String::new()));
+        let (during, slot) = (pool.clone(), id_slot.clone());
+        let now = monday_at(0, 12, 0);
+        let a = with_clamav(happy_mocks(), move || {
+            let id = slot.lock().expect("lock").clone();
+            let mut rec = scanned(now, now);
+            rec.result.core_modified = vec!["wp-login.php".into()];
+            let json = serde_json::to_string(&rec).expect("json");
+            let pool = during.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    hyperion_state::hosting_kv::set(&pool, &id, INTEGRITY_KV_KEY, &json, 1)
+                        .await
+                        .expect("kv")
+                })
+            });
+            Ok(found(vec![]))
+        });
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        *id_slot.lock().expect("lock") = site.id.as_str().to_string();
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(now - 60, now))
+            .await;
+        assert_eq!(s.site_scan_clamav_tick_at(now).await.expect("tick"), 0);
+        let rec = s
+            .stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record");
+        assert_eq!(rec.result.core_modified, vec!["wp-login.php"], "kept");
+        assert_eq!(rec.clamav_at, now);
     }
 }
