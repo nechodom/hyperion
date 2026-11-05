@@ -1234,8 +1234,13 @@ fn symlinks_are_named_when_php_and_counted_otherwise() {
     item(&out.review, ".maintenance");
     assert_eq!(out.review.len(), 2, "{:?}", rels(&out.review));
     assert_eq!(out.coverage.symlinks_skipped, 2);
-    // A git-deploy `uploads` link is an ordinary site, not a partial scan.
-    assert_eq!(out.coverage.partial_reasons, Vec::<String>::new());
+    // A git-deploy `uploads` link is an ordinary site, not a partial scan. The
+    // others point at absolute paths, which are never looked at to tell a
+    // directory from a file, so they count as possible directories.
+    let reasons = out.coverage.partial_reasons.join(" ");
+    assert_eq!(out.coverage.partial_reasons.len(), 1, "{reasons}");
+    assert!(!reasons.contains("uploads"), "{reasons}");
+    assert!(reasons.contains("notes.txt"), "{reasons}");
 }
 
 #[test]
@@ -2146,11 +2151,39 @@ fn symlinks_where_nothing_would_be_looked_at_only_count() {
     link("wp-content/uploads");
     link("wp-content/cache");
     link("wp-content/languages/shared");
-    std::os::unix::fs::symlink("/nowhere/at/all", s.path("wp-content/notes.txt")).expect("link");
+    // Links that lead to a file or nowhere, inside the site.
+    s.write("wp-content/real.txt", "x");
+    std::os::unix::fs::symlink("real.txt", s.path("wp-content/notes.txt")).expect("link");
+    std::os::unix::fs::symlink("missing.txt", s.path("wp-content/dangling.txt")).expect("link");
     let out = s.scan();
     assert_eq!(rels(&out.review), Vec::<&str>::new());
-    assert_eq!(out.coverage.symlinks_skipped, 4);
+    assert_eq!(out.coverage.symlinks_skipped, 5);
     assert_eq!(out.coverage.partial_reasons, Vec::<String>::new());
+}
+
+#[test]
+fn a_link_out_of_the_site_is_partial_whatever_is_out_there() {
+    // Root never looks at where the link points, so the card says the same for a
+    // directory, a file and nothing: no answer about anyone else's paths.
+    for (name, target) in [
+        ("a-dir", "their-home"),
+        ("a-file", "their-file"),
+        ("a-nothing", "nothing"),
+    ] {
+        for relative in [false, true] {
+            let s = Site::new();
+            let outside = s.root.parent().expect("parent").to_path_buf();
+            fs::create_dir(outside.join("their-home")).expect("mkdir");
+            fs::write(outside.join("their-file"), "x").expect("write");
+            let target = if relative {
+                Path::new("..").join(target)
+            } else {
+                outside.join(target)
+            };
+            std::os::unix::fs::symlink(&target, s.path(name)).expect("link");
+            assert_names_link(&s.scan(), name);
+        }
+    }
 }
 
 #[track_caller]
@@ -2178,8 +2211,8 @@ fn a_symlinked_directory_outside_ignored_paths_is_never_clean() {
     let out = s.scan();
     assert_eq!(rels(&out.findings), Vec::<&str>::new());
     assert_names_link(&out, "app");
-    let reasons = out.coverage.partial_reasons.join(" ");
-    assert!(!reasons.contains("vendor"), "{reasons}");
+    // `vendor` is nobody's churn here: a link to it hides a tree like any other.
+    assert_names_link(&out, "vendor");
     assert_eq!(out.coverage.symlinks_skipped, 2);
 
     // The same on WordPress, wherever the name is nobody's in particular.

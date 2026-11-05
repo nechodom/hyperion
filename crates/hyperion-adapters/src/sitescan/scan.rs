@@ -641,6 +641,7 @@ struct Scan<'a> {
     dropped_review: u64,
     auto_accepted: Vec<String>,
     files_seen: u64,
+    skips_seen: u64,
     files_hashed: u64,
     hashed_since_flush: u64,
     stopped: bool,
@@ -776,6 +777,7 @@ impl<'a> Scan<'a> {
             dropped_review: 0,
             auto_accepted: Vec::new(),
             files_seen: 0,
+            skips_seen: 0,
             files_hashed: 0,
             hashed_since_flush: 0,
             stopped: false,
@@ -797,7 +799,15 @@ impl<'a> Scan<'a> {
 
     fn on_event(&mut self, ev: WalkEvent<'_>) -> ControlFlow<()> {
         match ev {
-            WalkEvent::Skipped { rel, why } => self.on_skip(rel, why),
+            WalkEvent::Skipped { rel, why } => {
+                self.on_skip(rel, why);
+                // A tree of links or odd files has no `File` events to yield on.
+                self.skips_seen += 1;
+                if self.skips_seen % PAUSE_EVERY_FILES == 0 && (self.pause)() {
+                    self.stopped = true;
+                    return ControlFlow::Break(());
+                }
+            }
             WalkEvent::File(m) => {
                 self.on_file(m);
                 self.files_seen += 1;
@@ -846,7 +856,7 @@ impl<'a> Scan<'a> {
     fn on_symlink(&mut self, rel: &str) {
         // What's behind it stays unscanned, whatever anyone thinks of the link.
         // If it can't be told what it leads to, it may be a directory.
-        if !self.dir_link_is_ignored(rel) && self.root.link_leads_to_dir(rel).unwrap_or(true) {
+        if !self.dir_link_is_ignored(rel) && self.root.link_may_lead_to_dir(rel) {
             self.dir_links += 1;
             if self.dir_links_named.len() < DIR_LINKS_NAMED {
                 self.dir_links_named.push(short_name(rel));
@@ -892,16 +902,15 @@ impl<'a> Scan<'a> {
         (listed && !is_soft_file(&key)).then_some(i)
     }
 
-    /// A deploy's link for `uploads` or `vendor`: what's in there would mostly
-    /// have been ignored anyway.
+    /// A WordPress deploy's link for `uploads` or a cache: what's in there would
+    /// mostly have been ignored anyway. Elsewhere nothing is: a `vendor` link
+    /// can lead anywhere, and the scan doesn't follow it.
     fn dir_link_is_ignored(&self, rel: &str) -> bool {
-        if self.input.discovery.is_wordpress {
-            return CHURN_DIRS
+        self.input.discovery.is_wordpress
+            && CHURN_DIRS
                 .iter()
                 .chain(std::iter::once(&UPLOADS_DIR))
-                .any(|d| rel.starts_with(d) || d.strip_suffix('/') == Some(rel));
-        }
-        rel.split('/').any(|d| NON_WP_CHURN_NAMES.contains(&d))
+                .any(|d| rel.starts_with(d) || d.strip_suffix('/') == Some(rel))
     }
 
     /// A symlink is only harmless where a file of that name wouldn't have been
@@ -2219,6 +2228,36 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert!(out.stopped);
         assert_eq!(out.files_hashed, 0, "that read didn't finish");
+    }
+
+    #[test]
+    fn pause_is_asked_every_256_skipped_events() {
+        let (_t, base, root) = tree();
+        let inp = input(&base, &root);
+        let tenant = TenantRoot::open(&root).expect("open");
+        let calls = std::cell::Cell::new(0);
+        let pause = || {
+            calls.set(calls.get() + 1);
+            calls.get() == 2
+        };
+        let mut scan = Scan::new(&inp, &tenant, Loaded::Missing, &LIMITS, &pause);
+        let skip = || WalkEvent::Skipped {
+            rel: "fifo".to_string(),
+            why: SkipReason::NotRegular,
+        };
+        for _ in 0..255 {
+            assert!(scan.on_event(skip()).is_continue());
+        }
+        assert_eq!(calls.get(), 0);
+        assert!(scan.on_event(skip()).is_continue());
+        assert_eq!(calls.get(), 1);
+        for _ in 0..255 {
+            assert!(scan.on_event(skip()).is_continue());
+        }
+        // The second ask says stop.
+        assert!(scan.on_event(skip()).is_break());
+        assert_eq!(calls.get(), 2);
+        assert!(scan.finish(WalkStats::default()).stopped);
     }
 
     #[test]

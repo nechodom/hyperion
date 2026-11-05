@@ -9,7 +9,9 @@
 //! work only from that fd: `openat(O_DIRECTORY|O_NOFOLLOW)` to descend,
 //! `statat(AT_SYMLINK_NOFOLLOW)` to classify. The root path is never resolved
 //! again, and a file is never opened by the walk itself (a FIFO would hang
-//! the scanner).
+//! the scanner). Nothing here stats through a tenant's symlink either: where a
+//! link leads is worked out from its target text, by name inside the pinned
+//! root, so root never says anything about a path outside it.
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, OsStr, OsString};
@@ -79,6 +81,9 @@ const MAX_DEPTH: usize = 128;
 
 /// Symlinks followed while resolving the root path.
 const MAX_ROOT_LINKS: usize = 8;
+
+/// Components of a link target resolved by name before giving up.
+const MAX_LINK_STEPS: usize = 128;
 
 const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
@@ -335,21 +340,80 @@ impl TenantRoot {
         Ok(target.into_bytes())
     }
 
-    /// Does the symlink `rel` lead to a directory? This is the one call here that
-    /// follows a link, and only to `stat` what it finds: the caller learns one
-    /// bit and opens nothing. A dangling link or a loop leads nowhere. `Err` means
-    /// it couldn't be told.
-    pub fn link_leads_to_dir(&self, rel: &str) -> io::Result<bool> {
+    /// Might the symlink `rel` lead to a directory? Never stats through the
+    /// link: a tenant picks where it points, and what root said about a path
+    /// outside the tree would be an oracle for it (another tenant's home).
+    /// Instead the target is read and resolved by name inside the pinned root,
+    /// one `O_NOFOLLOW` step at a time. A target that is a directory in the
+    /// root is one; a file, or nothing, is not. An absolute target, a `..` out
+    /// of the root, another link on the way, or anything that goes wrong is
+    /// "can't tell", and that is `true`: what is behind it stays unscanned.
+    pub fn link_may_lead_to_dir(&self, rel: &str) -> bool {
+        self.link_target_is_dir(rel).unwrap_or(true)
+    }
+
+    fn link_target_is_dir(&self, rel: &str) -> io::Result<bool> {
         let comps = split_rel(rel, false)?;
         let (leaf, parents) = comps
             .split_last()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty path"))?;
-        let parent = self.descend(parents)?;
-        match statat(&parent, *leaf, AtFlags::empty()) {
-            Ok(st) => Ok(FileType::from_raw_mode(st.st_mode) == FileType::Directory),
-            Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => Ok(false),
-            Err(e) => Err(io::Error::from(e)),
+        // Every directory from the root down to the link, held open so a `..`
+        // steps back to one that was looked at, not to whatever the name is now.
+        let mut stack = vec![open_dir(&self.fd, ".")?];
+        for c in parents {
+            let next = match stack.last() {
+                Some(dir) => open_dir(dir, *c)?,
+                None => return Ok(true),
+            };
+            stack.push(next);
         }
+        let Some(dir) = stack.last() else {
+            return Ok(true);
+        };
+        let target = readlinkat(dir, *leaf, Vec::new()).map_err(io::Error::from)?;
+        let target = Path::new(OsStr::from_bytes(target.to_bytes()));
+        if target.is_absolute() {
+            return Ok(true);
+        }
+        let steps: Vec<Component> = target.components().collect();
+        if steps.len() > MAX_LINK_STEPS {
+            return Ok(true);
+        }
+        let mut steps = steps.into_iter().peekable();
+        while let Some(step) = steps.next() {
+            match step {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if stack.len() == 1 {
+                        return Ok(true);
+                    }
+                    stack.pop();
+                }
+                Component::Normal(name) => {
+                    let Some(dir) = stack.last() else {
+                        return Ok(true);
+                    };
+                    let st = match statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+                        Ok(st) => st,
+                        Err(Errno::NOENT) => return Ok(false),
+                        Err(e) => return Err(io::Error::from(e)),
+                    };
+                    match FileType::from_raw_mode(st.st_mode) {
+                        FileType::Directory if steps.peek().is_none() => return Ok(true),
+                        FileType::Directory => {
+                            let next = open_dir(dir, name)?;
+                            stack.push(next);
+                        }
+                        FileType::Symlink => return Ok(true),
+                        // A file, or a file where a directory had to be.
+                        _ => return Ok(false),
+                    }
+                }
+                _ => return Ok(true),
+            }
+        }
+        // Ended on a directory that was walked into: `.` or `x/..`.
+        Ok(true)
     }
 
     /// The names directly inside the directory `rel` ("" is the root), reached
@@ -1340,24 +1404,60 @@ mod tests {
     }
 
     #[test]
-    fn link_leads_to_dir_tells_the_three_apart() {
+    fn link_may_lead_to_dir_resolves_only_inside_the_root() {
         let t = tempfile::tempdir().expect("tmp");
         let base = t.path().canonicalize().expect("canonical");
         let root = base.join("htdocs");
-        std::fs::create_dir(&root).expect("mkdir");
-        std::fs::create_dir(base.join("d")).expect("mkdir");
-        std::fs::write(base.join("f"), "x").expect("write");
-        let link = |target: &Path, name: &str| {
+        std::fs::create_dir_all(root.join("sub/deeper")).expect("mkdir");
+        std::fs::create_dir(root.join("d")).expect("mkdir");
+        std::fs::write(root.join("f"), "x").expect("write");
+        // Outside the root, a directory, a file and nothing at all.
+        std::fs::create_dir(base.join("other")).expect("mkdir");
+        std::fs::write(base.join("outside-file"), "x").expect("write");
+        let link = |target: &str, name: &str| {
             std::os::unix::fs::symlink(target, root.join(name)).expect("link");
         };
-        link(&base.join("d"), "to-dir");
-        link(&base.join("f"), "to-file");
-        link(&base.join("gone"), "dangling");
-        link(&root.join("loop"), "loop");
+        link("d", "to-dir");
+        link("d/", "to-dir-slash");
+        link("f", "to-file");
+        link("./f", "to-file-dot");
+        link("missing", "dangling");
+        link("loop", "loop");
+        link("sub/deeper/../../f", "dotdot-file");
+        link("sub/deeper/..", "dotdot-dir");
+        link(".", "to-self");
+        link("../f", "sub/up-file");
+        link("../d", "sub/up-dir");
+        link("to-dir", "chain");
+        link("chain/f", "through-link");
+        // Everything that could say something about the outside.
+        link("../other", "escape-dir");
+        link("../outside-file", "escape-file");
+        link("../nothing", "escape-none");
+        link("sub/../../other", "escape-late");
+        link(&base.join("other").to_string_lossy(), "abs-dir");
+        link(&base.join("outside-file").to_string_lossy(), "abs-file");
+        link("/nowhere/at/all", "abs-none");
         let tr = TenantRoot::open(&root).expect("open");
-        assert!(tr.link_leads_to_dir("to-dir").expect("stat"));
-        assert!(!tr.link_leads_to_dir("to-file").expect("stat"));
-        assert!(!tr.link_leads_to_dir("dangling").expect("stat"));
-        assert!(!tr.link_leads_to_dir("loop").expect("stat"));
+        let may = |rel: &str| tr.link_may_lead_to_dir(rel);
+        assert!(may("to-dir") && may("to-dir-slash"));
+        assert!(!may("to-file") && !may("to-file-dot"));
+        assert!(!may("dangling"));
+        // A link whose target is a link is not followed, so it may be a directory.
+        assert!(may("loop"));
+        assert!(!may("dotdot-file"));
+        assert!(may("dotdot-dir") && may("to-self"));
+        assert!(!may("sub/up-file") && may("sub/up-dir"));
+        // A link to a link is not followed: can't tell, so it may be one.
+        assert!(may("chain") && may("through-link"));
+        // The answer is the same whatever is out there.
+        for rel in ["escape-dir", "escape-file", "escape-none", "escape-late"] {
+            assert!(may(rel), "{rel}");
+        }
+        for rel in ["abs-dir", "abs-file", "abs-none"] {
+            assert!(may(rel), "{rel}");
+        }
+        // Not a link, not there, an escape in the name itself: can't tell.
+        assert!(may("f") && may("none") && may("../x"));
     }
 }
