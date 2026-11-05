@@ -1,6 +1,7 @@
 //! Creating, listing, reading and deleting hostings, with LIFO rollback.
 
 use super::*;
+use hyperion_adapters::phpfpm::{FpmApply, PoolLimits};
 
 impl<A: AdapterPort + 'static> HostingService<A> {
     /// Provision a hosting end-to-end with LIFO rollback on partial failure.
@@ -684,6 +685,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// [`Self::fpm_ensure_with_limits`] for the agent's start: the pool file
+    /// only, with the master left to the caller.
+    async fn fpm_sync_with_limits(
+        &self,
+        detail: &HostingDetail,
+        ver: PhpVersion,
+    ) -> Result<FpmApply, AdapterError> {
+        let limits = hyperion_state::limits::get(&self.pool, &detail.id)
+            .await
+            .map_err(|e| AdapterError::Other(format!("limits get: {e}")))?
+            .map(|row| PoolLimits {
+                memory_mb: row.php_memory_mb,
+                max_exec_secs: row.php_max_exec_secs,
+                max_children: row.php_max_children,
+                max_requests: row.php_max_requests,
+            });
+        self.adapters
+            .fpm_sync_pool(&detail.system_user, &detail.domain, ver, limits)
+            .await
+    }
+
     /// A hosting has stopped using this pool. Its state or version must
     /// already say so: remove the pool unless another site still runs on it,
     /// and then write it for those sites, as the one that left may be the
@@ -751,15 +773,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// hard-code an outdated owner (e.g. `www-data` when nginx now
     /// runs as `vito`).
     ///
-    /// IMPORTANT: after the pools are re-written we issue a `systemctl
-    /// restart php<ver>-fpm` for every PHP version that owned at least
-    /// one rewritten pool. `reload` alone is not enough — FPM keeps
-    /// the existing UNIX socket open even when the pool config's
-    /// `listen.owner` changes, and `chown(2)` is not re-applied to an
-    /// already-bound socket. Only a full restart re-creates the
-    /// socket with the new ownership. We accept the (~50ms per
-    /// version) brief PHP availability gap on agent startup as a
-    /// worthy trade — without it 502 persists until manual fix.
+    /// IMPORTANT: the master is told afterwards, once per PHP version, and
+    /// only what its pools need: nothing when all are as they should be, which
+    /// is nearly every start. It restarts only for a socket with the wrong
+    /// owner, as `reload` keeps the existing UNIX socket and `chown(2)` is not
+    /// re-applied to an already-bound one. A restart costs a moment of 502s,
+    /// every in-flight request on the version and its whole OPcache, so it
+    /// must not be the price of every deploy. Never a reload AND a restart:
+    /// see `phpfpm::apply`.
     ///
     /// Errors per-hosting are logged but never propagated — one bad
     /// hosting must not block agent startup. Returns the count of
@@ -773,7 +794,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         };
         let mut ok = 0;
-        let mut touched_versions: std::collections::HashSet<PhpVersion> = Default::default();
+        let mut apply: HashMap<PhpVersion, FpmApply> = Default::default();
         for s in summaries {
             let Some(ver) = s.php_version else {
                 continue;
@@ -803,41 +824,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
                 continue;
             }
-            if let Err(e) = self.fpm_ensure_with_limits(&detail, ver).await {
-                tracing::warn!(
-                    domain = %detail.domain,
-                    error = %e,
-                    "rerender_fpm_pools: pool rewrite failed"
-                );
-                continue;
-            }
-            touched_versions.insert(ver);
+            let needed = match self.fpm_sync_with_limits(&detail, ver).await {
+                Ok(needed) => needed,
+                Err(e) => {
+                    tracing::warn!(
+                        domain = %detail.domain,
+                        error = %e,
+                        "rerender_fpm_pools: pool rewrite failed"
+                    );
+                    continue;
+                }
+            };
+            let strongest = apply.entry(ver).or_default();
+            *strongest = (*strongest).max(needed);
             ok += 1;
         }
 
-        // Full restart per touched version — see doc comment above for
-        // why reload isn't enough. We swallow errors: if FPM can't be
-        // restarted by us, the operator will see the pool config is
-        // correct on disk and can fix manually.
-        for ver in touched_versions {
-            let svc = format!("{}.service", ver.service_name());
-            let res = tokio::process::Command::new("/usr/bin/systemctl")
-                .args(["restart", &svc])
-                .output()
-                .await;
-            match res {
-                Ok(out) if out.status.success() => {
-                    tracing::info!(service = %svc, "boot self-heal: restarted FPM to apply new listen.owner");
-                }
-                Ok(out) => {
-                    tracing::warn!(
-                        service = %svc,
-                        stderr = %String::from_utf8_lossy(&out.stderr),
-                        "boot self-heal: systemctl restart failed"
-                    );
+        // We swallow errors: if FPM can't be reloaded by us, the operator
+        // will see the pool config is correct on disk and can fix manually.
+        for (ver, what) in apply {
+            if what == FpmApply::Nothing {
+                continue;
+            }
+            match self.adapters.fpm_apply(ver, what).await {
+                Ok(()) => {
+                    tracing::info!(version = %ver, action = ?what, "boot self-heal: FPM told about its pools")
                 }
                 Err(e) => {
-                    tracing::warn!(error=%e, service=%svc, "boot self-heal: could not invoke systemctl");
+                    tracing::warn!(version = %ver, action = ?what, error = %e, "boot self-heal: FPM not told about its pools")
                 }
             }
         }

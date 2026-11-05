@@ -367,6 +367,29 @@ pub trait AdapterPort: Send + Sync {
         php_max_requests: i64,
     ) -> Result<(), AdapterError>;
 
+    /// Write one site's pool file with `limits` (the defaults when it never
+    /// had any) WITHOUT touching the running master, and say what the master
+    /// has to do about it. The caller sends that once per version through
+    /// [`Self::fpm_apply`].
+    async fn fpm_sync_pool(
+        &self,
+        _system_user: &str,
+        _domain: &str,
+        _version: PhpVersion,
+        _limits: Option<hyperion_adapters::phpfpm::PoolLimits>,
+    ) -> Result<hyperion_adapters::phpfpm::FpmApply, AdapterError> {
+        Ok(hyperion_adapters::phpfpm::FpmApply::Nothing)
+    }
+
+    /// Reload or restart one version's master, or nothing.
+    async fn fpm_apply(
+        &self,
+        _version: PhpVersion,
+        _what: hyperion_adapters::phpfpm::FpmApply,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
     /// Lock the DB user/role so the hosting cannot reach its database.
     async fn db_lock(&self, engine: DbProvision, db_user: &str) -> Result<(), AdapterError>;
     async fn db_unlock(&self, engine: DbProvision, db_user: &str) -> Result<(), AdapterError>;
