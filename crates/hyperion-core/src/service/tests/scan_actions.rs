@@ -1114,10 +1114,10 @@ async fn quarantine_then_restore_keeps_the_clamav_hit() {
         .await
         .expect("quarantine");
     // Gone with the file, and written down where it went.
-    assert_eq!(after.malware, [other.clone()]);
+    assert_eq!(after.malware, std::slice::from_ref(&other));
     assert_eq!(
         held.lock().expect("lock").as_ref().expect("held").malware,
-        [hit.clone()]
+        std::slice::from_ref(&hit)
     );
 
     let back = s

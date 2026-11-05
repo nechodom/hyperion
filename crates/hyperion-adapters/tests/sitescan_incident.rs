@@ -1566,12 +1566,12 @@ fn the_copy_a_release_ships_is_not_a_difference() {
     }
     s.put_manifest(&core_key, &core);
 
+    settle();
     let out = s.scan();
     assert!(out.findings.is_empty(), "{:#?}", out.findings);
     assert!(out.review.is_empty(), "{:#?}", out.review);
     assert_eq!(out.coverage.plugins_verified, 1);
     assert_eq!(out.coverage.themes_verified, 1);
-    settle();
     assert_eq!(s.scan().files_hashed, 0, "verified, so not read again");
 
     // The release's checksum vouches for that content only.

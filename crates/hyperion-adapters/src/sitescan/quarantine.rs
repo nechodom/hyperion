@@ -821,12 +821,12 @@ mod tests {
         let mut req = s.request("a.php", &sha(b"x"));
         req.malware = vec![hit.clone()];
         let rec = quarantine_with_limits(&req, &roomy()).expect("q");
-        assert_eq!(rec.malware, [hit.clone()]);
+        assert_eq!(rec.malware, std::slice::from_ref(&hit));
         let on_disk: QuarantinedFile = serde_json::from_slice(
             &fs::read(s.held().join(format!("{}.json", rec.id))).expect("record"),
         )
         .expect("json");
-        assert_eq!(on_disk.malware, [hit.clone()]);
+        assert_eq!(on_disk.malware, std::slice::from_ref(&hit));
         assert_eq!(s.restore(&rec.id).expect("restore").malware, [hit]);
     }
 
