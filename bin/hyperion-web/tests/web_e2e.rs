@@ -6608,6 +6608,38 @@ async fn docker_off_redirects_to_settings() {
     );
 }
 
+/// A box with no workers records itself as standalone. The module turns on
+/// and the Docker page works there like on a master.
+#[tokio::test]
+async fn docker_works_on_a_standalone_install() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let state = test_state(sock.clone(), admin, Arc::new(SessionSigner::new_random()));
+    *state.deployment_mode.write().await = "standalone".to_string();
+    let app =
+        hyperion_web::build_router(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:34567".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/docker/install-cluster",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()[header::LOCATION], "/docker");
+    docker_enable_master(&sock, &pool).await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/docker").await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("master"), "{page}");
+    let (_, nav) = acme_dns_get(&app, &cookie, "/api/nav-status").await;
+    let nav: serde_json::Value = serde_json::from_str(&nav).expect("json");
+    assert_eq!(nav["docker_installed"], true, "{nav}");
+}
+
 /// A node that does not answer is named, and the page says the list is
 /// short, rather than reading as a cluster with nothing running.
 #[tokio::test]
