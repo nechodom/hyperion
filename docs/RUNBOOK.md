@@ -318,6 +318,10 @@ not write one per refresh. The entry is written on the node that serves the
 logs, so the logs of a stack on a worker are audited in that worker's audit
 log, not the master's.
 
+A container on the `none` logging driver has no log to show, and the page says
+so. The `journald` and `local` drivers can be read like the default one, but
+keep no file Hyperion can measure, so their log size shows as 0.
+
 Log lines appear in the panel only. Alerts by email, Slack or webhook never
 contain them.
 

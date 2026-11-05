@@ -1776,6 +1776,23 @@ async fn audit_only_when_actor_given() {
     assert_eq!(rows(&s).await.len(), 2);
 }
 
+/// `--log-driver none`: reloading the page will never help, so the answer
+/// must not suggest it.
+#[tokio::test]
+async fn a_log_driver_that_cannot_be_read_says_so() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    w.lock().expect("world").logs_err = Some(DockerError::Failed(
+        "Error response from daemon: configured logging driver does not support reading".into(),
+    ));
+    let err = s
+        .docker_logs(logs_for("shop", Some("shop-web-1")))
+        .await
+        .expect_err("no log to read");
+    let text = err.to_string();
+    assert!(text.contains("logging driver"), "{text}");
+    assert!(!text.contains("reload"), "{text}");
+}
+
 #[tokio::test]
 async fn log_text_stays_out_of_alerts() {
     let (s, w, _d) = shop_with(&["web"]).await;
