@@ -330,6 +330,15 @@ answering for about 3 minutes, and URL check failures go out by email and Slack
 as well as the bell, each with a recovery. Image update notices are bell only,
 one card per node.
 
+Stopping on purpose is not told apart from a failure when Docker would bring
+the container back. A `docker compose stop` of a service whose restart policy
+is `always` or `unless-stopped` alerts after about 3 minutes, and recovers when
+you start it again. A `docker compose down` removes the containers, so the
+stack alerts as gone until you start it again or press **Forget** on it. A
+service with restart policy `no` or `on-failure` that exited 0 counts as a
+finished job and is fine; one that exited non-zero alerts, and a stopped
+container often exits 143 or 137.
+
 ### Image updates
 
 Once a day, per unique image reference, Hyperion compares the digest the
@@ -358,14 +367,15 @@ administrator addresses otherwise). https addresses also warn at 14 and 3 days
 before the certificate expires, and once more when it has expired. Uptime Kuma monitors are entered by hand: there is no import and no history
 carried over.
 
-The checks run **from the master**, so a whole node dying is seen from outside.
+The checks run **from the master** (on a single server with no workers, from
+that server), so a whole node dying is seen from outside.
 The flip side: an app on the master's own server has no outside view, and its
 check only proves the master can reach itself.
 
 Hyperion works out which node an address belongs to from its host name, and an
 administrator can override that. When a check fails it asks that node for the
-stack's state and puts it in the alert (for example "web exited 137,
-OOM-killed"), or says the node does not answer. An address that belongs to no
+stack's state and puts it in the alert (for example "web: exit 137, out of
+memory"), or says the node does not answer. An address that belongs to no
 hosting is fine.
 
 ### Published ports and the firewall
