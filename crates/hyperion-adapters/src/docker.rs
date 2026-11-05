@@ -494,6 +494,7 @@ fn container_of(r: InspectRow) -> DockerContainer {
             .and_then(|m| m.get("max-size").cloned()),
         update: None,
         update_checked_at: 0,
+        update_error: String::new(),
         id: r.id,
     }
 }

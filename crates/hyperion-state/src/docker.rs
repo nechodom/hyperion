@@ -369,9 +369,12 @@ pub struct ImageCheckRow {
     pub notified_digest: String,
     /// Unix seconds; the registry is not asked again before this.
     pub retry_after: i64,
+    /// Why the latest try failed; empty after an answer. A kept answer is
+    /// shown with it, so a week of refusals does not read as "up to date".
+    pub last_error: String,
 }
 
-type ImageCheckTuple = (String, String, String, String, i64, String, i64);
+type ImageCheckTuple = (String, String, String, String, i64, String, i64, String);
 
 fn image_check_of(r: ImageCheckTuple) -> ImageCheckRow {
     ImageCheckRow {
@@ -382,11 +385,12 @@ fn image_check_of(r: ImageCheckTuple) -> ImageCheckRow {
         checked_at: r.4,
         notified_digest: r.5,
         retry_after: r.6,
+        last_error: r.7,
     }
 }
 
 const IMAGE_CHECK_COLS: &str =
-    "image_ref, local_digest, remote_digest, state, checked_at, notified_digest, retry_after";
+    "image_ref, local_digest, remote_digest, state, checked_at, notified_digest, retry_after, last_error";
 
 pub async fn get_image_check(
     pool: &SqlitePool,
@@ -413,12 +417,14 @@ pub async fn list_image_checks(pool: &SqlitePool) -> Result<Vec<ImageCheckRow>, 
 pub async fn put_image_check(pool: &SqlitePool, r: &ImageCheckRow) -> Result<(), StateError> {
     sqlx::query(
         "INSERT INTO docker_image_checks \
-           (image_ref, local_digest, remote_digest, state, checked_at, notified_digest, retry_after) \
-         VALUES (?, ?, ?, ?, ?, ?, ?) \
+           (image_ref, local_digest, remote_digest, state, checked_at, notified_digest, \
+            retry_after, last_error) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(image_ref) DO UPDATE SET \
            local_digest = excluded.local_digest, remote_digest = excluded.remote_digest, \
            state = excluded.state, checked_at = excluded.checked_at, \
-           notified_digest = excluded.notified_digest, retry_after = excluded.retry_after",
+           notified_digest = excluded.notified_digest, retry_after = excluded.retry_after, \
+           last_error = excluded.last_error",
     )
     .bind(&r.image_ref)
     .bind(&r.local_digest)
@@ -427,6 +433,7 @@ pub async fn put_image_check(pool: &SqlitePool, r: &ImageCheckRow) -> Result<(),
     .bind(r.checked_at)
     .bind(&r.notified_digest)
     .bind(r.retry_after)
+    .bind(&r.last_error)
     .execute(pool)
     .await?;
     Ok(())
@@ -592,6 +599,7 @@ mod tests {
         assert_eq!((a.state.as_str(), a.checked_at), ("current", 10));
         a.notified_digest = "sha256:x".into();
         a.retry_after = 99;
+        a.last_error = "unauthorized".into();
         put_image_check(&pool, &a).await.expect("again");
         assert_eq!(list_image_checks(&pool).await.expect("list").len(), 3);
 
@@ -614,5 +622,6 @@ mod tests {
             (a.notified_digest.as_str(), a.retry_after),
             ("sha256:x", 99)
         );
+        assert_eq!(a.last_error, "unauthorized");
     }
 }

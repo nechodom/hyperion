@@ -117,8 +117,10 @@ fn cannot(reason: impl Into<String>) -> ImageUpdateState {
 /// * Otherwise the registry's digest is compared with the digests the local
 ///   copy was pulled with.
 /// * A failed lookup never reads as "up to date". If an earlier lookup
-///   answered, that answer (its remote digest, told against what is local
-///   now) is kept; if not, the reason is shown.
+///   answered AND the local image is still the one it described, that answer
+///   (its remote digest, told against the local digests) is kept. If the node
+///   pulled another image since, the old answer says nothing about this one:
+///   the reason is shown instead of an answer made from an error.
 pub fn image_state(
     local: &LocalImage,
     container_image_id: &str,
@@ -135,9 +137,11 @@ pub fn image_state(
         return cannot(reason);
     }
     let mine = own_digests(local);
+    // An old answer describes the image that was local when it was given.
+    let kept = last.filter(|l| !local.image_id.is_empty() && l.local_digest == local.image_id);
     let digest: Option<&str> = match remote {
         Ok(d) => Some(d),
-        Err(_) => last
+        Err(_) => kept
             .map(|l| l.remote_digest.as_str())
             .filter(|d| !d.is_empty()),
     };
@@ -150,7 +154,7 @@ pub fn image_state(
     }
     // A kept answer without a digest (a row written by hand, or by an older
     // build): its word stands.
-    if let (Err(_), Some(l)) = (remote, last) {
+    if let (Err(_), Some(l)) = (remote, kept) {
         match l.state.as_str() {
             STATE_UPDATE => return ImageUpdateState::UpdateAvailable,
             STATE_CURRENT => return ImageUpdateState::UpToDate,
@@ -188,7 +192,12 @@ fn container_update(row: &ImageCheckRow, c: &DockerContainer) -> Option<ImageUpd
     if let Some(reason) = row.state.strip_prefix(STATE_CANNOT) {
         return Some(cannot(reason));
     }
-    if c.started_at > row.checked_at {
+    // A container started after the check is unchecked only if it runs another
+    // image than the one the row describes. A reboot or a restart keeps the
+    // image, so the stored answer still holds, whatever the registry says now.
+    let same_image =
+        !row.local_digest.is_empty() && !c.image_id.is_empty() && row.local_digest == c.image_id;
+    if c.started_at > row.checked_at && !same_image {
         return None;
     }
     match row.state.as_str() {
@@ -246,6 +255,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             c.update_checked_at = match (&c.update, row) {
                 (Some(_), Some(r)) => r.checked_at,
                 _ => 0,
+            };
+            // Why the latest try failed, beside an answer that is older.
+            c.update_error = match (&c.update, row) {
+                (Some(ImageUpdateState::UpToDate | ImageUpdateState::UpdateAvailable), Some(r)) => {
+                    r.last_error.clone()
+                }
+                _ => String::new(),
             };
         }
     }
@@ -333,6 +349,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             row.state = format!("{STATE_CANNOT}{REASON_NO_TAG}");
             row.checked_at = now;
             row.retry_after = 0;
+            row.last_error.clear();
             put(row).await;
             return Step::Next;
         }
@@ -350,6 +367,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 row.state = format!("{STATE_CANNOT}{REASON_MISSING}");
                 row.checked_at = now;
                 row.retry_after = 0;
+                row.last_error.clear();
                 put(row).await;
                 return Step::Next;
             }
@@ -366,6 +384,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             row.state = format!("{STATE_CANNOT}{reason}");
             row.checked_at = now;
             row.retry_after = 0;
+            row.last_error.clear();
             put(row).await;
             return Step::Next;
         }
@@ -383,14 +402,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 row.state = state_word(&state);
                 row.checked_at = now;
                 row.retry_after = 0;
+                row.last_error.clear();
             }
             Err(e) => {
                 row.retry_after = retry_after(now, e);
                 row.state = state_word(&state);
+                row.last_error = error_reason(e);
                 // A kept answer keeps its age; no answer is stamped with the
                 // time of the try.
                 if matches!(state, ImageUpdateState::CannotVerify { .. }) {
                     row.checked_at = now;
+                    // The old answer was about another image. Left in place
+                    // it would come back as soon as the local id matched the
+                    // row again.
+                    row.remote_digest.clear();
                 }
                 if *e == RemoteDigestError::RateLimited {
                     step = Step::Stop;

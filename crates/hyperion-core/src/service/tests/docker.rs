@@ -229,6 +229,8 @@ struct Ct {
     log_path: String,
     image: String,
     image_id: String,
+    /// `State.StartedAt`, RFC 3339; empty for "never started".
+    started: &'static str,
 }
 
 impl Ct {
@@ -281,6 +283,7 @@ fn ct(n: u32, project: &'static str, service: &'static str) -> Ct {
         log_path: String::new(),
         image: "img".into(),
         image_id: format!("sha256:{n:064x}"),
+        started: "",
     }
 }
 
@@ -344,6 +347,9 @@ fn inspect_json(c: &Ct) -> serde_json::Value {
     let mut state = serde_json::json!({
         "Status": c.state, "ExitCode": c.exit, "OOMKilled": c.oom,
     });
+    if !c.started.is_empty() {
+        state["StartedAt"] = c.started.into();
+    }
     if let Some(h) = c.health {
         state["Health"] = serde_json::json!({"Status": h});
     }
@@ -2525,6 +2531,7 @@ fn failed_check_keeps_last_answer() {
     let l = nginx_local(OLD_D);
     let update = ImageCheckRow {
         image_ref: "nginx:alpine".into(),
+        local_digest: OLD_D.into(),
         remote_digest: NEW_D.into(),
         state: "update".into(),
         checked_at: 5,
@@ -2556,18 +2563,32 @@ fn failed_check_keeps_last_answer() {
         ),
         ImageUpdateState::UpToDate
     );
-    // The last answer is told against what is local NOW: the node has pulled
-    // the digest that was waiting.
+    // The node pulled another image since the answer: the answer was about
+    // the old one and says nothing now. An error never makes a state.
     let pulled = nginx_local(NEW_D);
-    assert_eq!(
-        image_state(
+    for last in [&update, &current] {
+        let s = image_state(
             &pulled,
             NEW_D,
             Err(&RemoteDigestError::RateLimited),
-            Some(&update)
+            Some(last),
+        );
+        assert!(cannot(&s).contains("rate limit"), "{s:?}");
+    }
+    // A row that does not say which image it described is no basis either.
+    let nameless = ImageCheckRow {
+        local_digest: String::new(),
+        ..update.clone()
+    };
+    assert!(matches!(
+        image_state(
+            &l,
+            OLD_D,
+            Err(&RemoteDigestError::RateLimited),
+            Some(&nameless)
         ),
-        ImageUpdateState::UpToDate
-    );
+        ImageUpdateState::CannotVerify { .. }
+    ));
     // A last row that never got an answer is no answer.
     let none = ImageCheckRow {
         state: "cannot:x".into(),
@@ -2811,6 +2832,134 @@ async fn failed_check_keeps_last_answer_across_ticks() {
         vec![Some(ImageUpdateState::UpdateAvailable)],
         "an error does not erase what was learnt"
     );
+}
+
+async fn nginx_row(s: &HostingService<MockAdapterPort>) -> ImageCheckRow {
+    hyperion_state::docker::get_image_check(&s.pool, "nginx:alpine")
+        .await
+        .expect("row")
+        .expect("exists")
+}
+
+/// 1970-01-20, after T0 and after any check made at T0 + 2 days or less.
+const RESTARTED: &str = "1970-01-20T00:00:00Z";
+
+#[tokio::test]
+async fn a_restarted_container_keeps_its_answer_while_the_registry_fails() {
+    let w = nginx_world(2);
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    // Reboot, `docker restart`, restart policy: the containers start again on
+    // the same image, and the registry is down.
+    {
+        let mut g = w.lock().expect("world");
+        g.cts[0].started = RESTARTED;
+        g.cts[1].started = RESTARTED;
+        g.remote
+            .insert("nginx:alpine".into(), Err(RemoteDigestError::Unauthorized));
+    }
+    updates_at(&s, T0 + 2 * DAY).await;
+    tick_at(&s, T0 + 2 * DAY + 30).await;
+    let st = s.docker_overview().await.expect("overview");
+    let cs: Vec<_> = st
+        .projects
+        .iter()
+        .flat_map(|p| p.containers.iter())
+        .collect();
+    assert_eq!(cs.len(), 2);
+    for c in cs {
+        assert!(c.started_at > T0 + 2 * DAY, "restarted after the check");
+        assert_eq!(
+            c.update,
+            Some(ImageUpdateState::UpdateAvailable),
+            "the image did not change, so the answer still holds"
+        );
+        assert!(
+            c.update_error.contains("unauthorized"),
+            "{}",
+            c.update_error
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_container_started_on_another_image_after_the_check_is_unchecked() {
+    let w = nginx_world(1);
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    {
+        let mut g = w.lock().expect("world");
+        g.cts[0].started = RESTARTED;
+        g.cts[0].image_id = "sha256:other".into();
+    }
+    tick_at(&s, T0 + 30).await;
+    assert_eq!(container_updates(&s).await, vec![None]);
+}
+
+#[tokio::test]
+async fn a_failed_check_after_a_pull_is_not_an_answer_and_sends_no_card() {
+    let w = nginx_world(1);
+    // The registry still holds the digest the node has: up to date.
+    w.lock()
+        .expect("world")
+        .remote
+        .insert("nginx:alpine".into(), Ok(OLD_D.into()));
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    assert_eq!(
+        container_updates(&s).await,
+        vec![Some(ImageUpdateState::UpToDate)]
+    );
+    // The owner pulls a newer image and recreates the container on it; the
+    // next check fails.
+    {
+        let mut g = w.lock().expect("world");
+        g.locals.insert(
+            "nginx:alpine".into(),
+            (NEW_D.into(), vec![format!("nginx@{NEW_D}")]),
+        );
+        g.cts[0].image_id = NEW_D.into();
+        g.remote
+            .insert("nginx:alpine".into(), Err(RemoteDigestError::Unauthorized));
+    }
+    for day in [2, 4] {
+        updates_at(&s, T0 + day * DAY).await;
+        tick_at(&s, T0 + day * DAY + 30).await;
+        let st = container_updates(&s).await;
+        assert!(
+            cannot(st[0].as_ref().expect("a state")).contains("unauthorized"),
+            "day {day}: {st:?}"
+        );
+        let row = hyperion_state::docker::get_image_check(&s.pool, "nginx:alpine")
+            .await
+            .expect("row")
+            .expect("exists");
+        assert!(row.state.starts_with("cannot:"), "day {day}: {}", row.state);
+        assert!(row.remote_digest.is_empty(), "the old answer is dropped");
+    }
+    assert!(update_cards(&s).await.is_empty(), "an error is not news");
+}
+
+#[tokio::test]
+async fn the_latest_error_is_kept_beside_an_older_answer_and_cleared_by_an_answer() {
+    let w = nginx_world(1);
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    assert_eq!(nginx_row(&s).await.last_error, "");
+    w.lock()
+        .expect("world")
+        .remote
+        .insert("nginx:alpine".into(), Err(RemoteDigestError::Unauthorized));
+    updates_at(&s, T0 + 2 * DAY).await;
+    let r = nginx_row(&s).await;
+    assert!(r.last_error.contains("unauthorized"), "{}", r.last_error);
+    assert_eq!(r.checked_at, T0, "the answer keeps its age");
+    w.lock()
+        .expect("world")
+        .remote
+        .insert("nginx:alpine".into(), Ok(NEW_D.into()));
+    updates_at(&s, T0 + 4 * DAY).await;
+    assert_eq!(nginx_row(&s).await.last_error, "");
 }
 
 #[tokio::test]

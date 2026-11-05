@@ -768,6 +768,8 @@ struct ContainerView {
     update_reason: String,
     /// "3 hours ago", when there is an answer.
     update_checked: String,
+    /// Why the latest check failed, when the answer shown is an older one.
+    update_error: String,
 }
 
 #[derive(Template)]
@@ -968,6 +970,12 @@ fn container_view(c: &DockerContainer) -> ContainerView {
                 .collect(),
             _ => String::new(),
         },
+        update_error: c
+            .update_error
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(REASON_MAX_CHARS)
+            .collect(),
         update_checked: if c.update.is_some() && c.update_checked_at > 0 {
             crate::handlers::stats::fmt_ago(&c.update_checked_at)
         } else {
@@ -2189,6 +2197,17 @@ mod tests {
         assert!(v.update_reason.is_empty());
         let v = container_view(&container_with(None));
         assert!(v.update.is_none() && v.update_checked.is_empty());
+    }
+
+    #[test]
+    fn an_older_answer_shows_why_the_latest_check_failed() {
+        let mut c = container_with(Some(ImageUpdateState::UpToDate));
+        c.update_error = "unauthorized: the registry wants a login\u{7}".into();
+        let v = container_view(&c);
+        assert_eq!(v.update_error, "unauthorized: the registry wants a login");
+        assert!(container_view(&container_with(None))
+            .update_error
+            .is_empty());
     }
 
     #[test]

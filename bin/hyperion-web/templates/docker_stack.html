@@ -60,6 +60,7 @@
           <td><span class="pill {{ c.tone }}">{{ c.state }}</span>{% if !c.exit.is_empty() %} <span class="text-soft small">{{ c.exit }}</span>{% endif %}</td>
           <td><span class="mono small">{{ c.image }}</span>{% if let Some(u) = c.update %}
             <div class="small"><span class="pill {{ u.tone }}">{{ u.label }}</span>{% if !c.update_checked.is_empty() %} <span class="text-soft">checked {{ c.update_checked }}</span>{% endif %}</div>
+            {% if !c.update_error.is_empty() %}<div class="small" style="color:var(--warn)">The latest check failed: {{ c.update_error }}</div>{% endif %}
             {% if !c.update_reason.is_empty() %}<div class="text-soft small">{{ c.update_reason }}</div>{% endif %}
           {% endif %}</td>
           <td class="right numeric">{{ c.restarts }}</td>

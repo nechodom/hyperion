@@ -51,6 +51,8 @@ pub struct DockerContainer {
     pub update: Option<ImageUpdateState>,
     /// Unix seconds of the check `update` comes from; 0 when there is none.
     pub update_checked_at: i64,
+    /// Why the latest check failed, when `update` is an older answer.
+    pub update_error: String,
 }
 
 /// Whether the tag a container runs has moved on at its registry. Digests of
