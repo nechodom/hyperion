@@ -32,6 +32,20 @@ use std::path::PathBuf;
 const TOKEN_TTL_SECS: i64 = 4 * 60 * 60;
 const MIGRATION_DIR_DEFAULT: &str = "/var/lib/hyperion/migration";
 
+/// `source_kind` of a code made for the WordPress plugin.
+pub(super) const PLUGIN_KIND: &str = "wordpress";
+
+/// The bundle routes take a manifest naming hostings, paths and databases, which
+/// is what the plugin's own routes exist to keep out of a source's hands. Its code
+/// may be pasted into a site its operator does not control, so it must not open
+/// them.
+fn refuse_plugin_code() -> Response {
+    text(
+        StatusCode::FORBIDDEN,
+        "this code only works with the Hyperion WordPress plugin\n".into(),
+    )
+}
+
 /// The panel's own nginx vhost, as the agent writes it.
 const PANEL_VHOST: &str = "/etc/nginx/sites-enabled/hyperion-panel.conf";
 
@@ -49,6 +63,8 @@ const MIN_FREE_BYTES: i64 = 2 * 1024 * 1024 * 1024; // 2 GiB floor before accept
 pub struct TransferRow {
     pub id: i64,
     pub source_kind: String,
+    /// The site being moved, for a source that sends one site. Empty until known.
+    pub site: String,
     pub status: String,
     pub received: String,
     /// Raw byte count behind `received` — the formatted string is for display
@@ -70,6 +86,19 @@ pub struct TransferRow {
     pub rate_bytes_per_sec: i64,
     /// What the source last said while PACKING. Empty until it reports.
     pub packing_note: String,
+}
+
+/// The site a plugin transfer is moving: where it lands, as far as that is known.
+fn plugin_site(selection_json: &str) -> String {
+    serde_json::from_str::<Vec<hyperion_import::SiteImportOverride>>(selection_json)
+        .ok()
+        .and_then(|v| v.into_iter().next())
+        .and_then(|o| {
+            o.target_domain
+                .filter(|d| !d.is_empty())
+                .or_else(|| Some(o.source_domain).filter(|d| !d.is_empty()))
+        })
+        .unwrap_or_default()
 }
 
 /// Shown once after minting: the single interactive command to paste on the
@@ -234,7 +263,7 @@ async fn list_transfers(state: &SharedState) -> Vec<TransferRow> {
                 let packing_note = summarise_source_progress(&i.source_progress_json);
                 let stage = if i.job_id.is_some() || i.status != "pending" {
                     "active"
-                } else if i.source_kind == "wordpress" {
+                } else if i.source_kind == PLUGIN_KIND {
                     "awaiting_plugin"
                 } else if has_selection && !packing_note.is_empty() && i.received_bytes == 0 {
                     "packing"
@@ -246,8 +275,14 @@ async fn list_transfers(state: &SharedState) -> Vec<TransferRow> {
                     "awaiting_report"
                 }
                 .to_string();
+                let site = if i.source_kind == PLUGIN_KIND {
+                    plugin_site(&i.selection_json)
+                } else {
+                    String::new()
+                };
                 TransferRow {
                     id: i.id,
+                    site,
                     source_kind: i.source_kind,
                     status: i.status,
                     received: human_bytes(i.received_bytes),
@@ -588,6 +623,9 @@ pub struct CancelForm {
     #[serde(default)]
     pub _csrf: String,
     pub id: i64,
+    /// `wordpress` when the page to return to is the plugin tab.
+    #[serde(default)]
+    pub back: String,
 }
 
 /// `POST /import/cancel` — revoke a transfer; its waiting source script sees
@@ -602,7 +640,12 @@ pub async fn post_cancel(
     }
     token_rpc(&state, ImportTokenOp::Cancel { id: form.id }).await?;
     super::import_wordpress::discard_run(form.id).await;
-    Ok(Redirect::to("/import?flash=Transfer+cancelled").into_response())
+    let page = if form.back == PLUGIN_KIND {
+        "/import/wordpress"
+    } else {
+        "/import"
+    };
+    Ok(Redirect::to(&format!("{page}?flash=Transfer+cancelled")).into_response())
 }
 
 /// Percent-encode for flash query params.
@@ -826,10 +869,14 @@ pub async fn post_upload_begin(
     // bundle's offset, splicing the tail of one archive onto the head of
     // another; only the commit digest would notice, after the whole remainder
     // had been uploaded.
-    let previous_sha = resolve(&state, &token, false)
-        .await?
-        .map(|i| i.bundle_sha256)
-        .unwrap_or_default();
+    let previous = resolve(&state, &token, false).await?;
+    if previous
+        .as_ref()
+        .is_some_and(|i| i.source_kind == PLUGIN_KIND)
+    {
+        return Ok(refuse_plugin_code());
+    }
+    let previous_sha = previous.map(|i| i.bundle_sha256).unwrap_or_default();
 
     let claimed = match token_rpc(
         &state,
@@ -951,6 +998,9 @@ pub async fn put_upload_chunk(
         // completed transfer lands here. 410 is the runner's stop signal.
         return Ok(text(StatusCode::GONE, "state cancelled\n".into()));
     };
+    if info.source_kind == PLUGIN_KIND {
+        return Ok(refuse_plugin_code());
+    }
     if info.status == "importing" {
         // The precondition stated here rather than left to the query filter:
         // once commit has handed the bundle to a job, no further byte may be
@@ -1073,6 +1123,9 @@ pub async fn post_upload_commit(
     let Some(info) = resolve(&state, &token, false).await? else {
         return Ok(text(StatusCode::GONE, "state cancelled\n".into()));
     };
+    if info.source_kind == PLUGIN_KIND {
+        return Ok(refuse_plugin_code());
+    }
     // Already committed. Retrying a commit whose 200 was lost is normal, and
     // answering "cancelled" for it would be both wrong and alarming; answering
     // with the existing job is right, and re-importing the same bundle would be
@@ -1261,8 +1314,11 @@ pub async fn post_manifest(
     Path(token): Path<String>,
     body: String,
 ) -> Result<Response, AppError> {
-    if resolve(&state, &token, false).await?.is_none() {
+    let Some(info) = resolve(&state, &token, false).await? else {
         return Ok((StatusCode::NOT_FOUND, "invalid or expired import token\n").into_response());
+    };
+    if info.source_kind == PLUGIN_KIND {
+        return Ok(refuse_plugin_code());
     }
     // Cap the manifest size (defensive) and require it to parse as a JSON ARRAY
     // (the site list) — not just any JSON, else a `{}` would advance the row to a
@@ -1425,6 +1481,12 @@ pub async fn post_ingest(
     Path(token): Path<String>,
     body: axum::body::Body,
 ) -> Result<Response, AppError> {
+    // Before the claim, which would spend the code.
+    if let Some(info) = resolve(&state, &token, false).await? {
+        if info.source_kind == PLUGIN_KIND {
+            return Ok(refuse_plugin_code());
+        }
+    }
     // Atomic single-use claim. None = already used / expired / unknown.
     let Some(info) = resolve(&state, &token, true).await? else {
         return Ok((
@@ -1814,9 +1876,15 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
             ),
             _ if r.status == "failed" => (
                 "<span class=\"pill err\">failed</span>".to_string(),
-                "<span class=\"text-soft\">this transfer did not finish — start a new \
-                 one from the command above</span>"
-                    .to_string(),
+                if r.source_kind == PLUGIN_KIND {
+                    "<span class=\"text-soft\">this transfer did not finish — generate a new \
+                     code and start the plugin again</span>"
+                        .to_string()
+                } else {
+                    "<span class=\"text-soft\">this transfer did not finish — start a new \
+                     one from the command above</span>"
+                        .to_string()
+                },
             ),
             _ => (
                 esc(&r.status),
@@ -1835,16 +1903,30 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
                 "<form method=\"post\" action=\"/import/cancel\" style=\"display:inline;margin-left:.4rem\">\
                  <input type=\"hidden\" name=\"_csrf\" value=\"{}\">\
                  <input type=\"hidden\" name=\"id\" value=\"{}\">\
+                 <input type=\"hidden\" name=\"back\" value=\"{}\">\
                  <button class=\"btn small ghost\" type=\"submit\">Cancel</button></form>",
                 esc(csrf),
                 r.id,
+                if r.source_kind == PLUGIN_KIND {
+                    PLUGIN_KIND
+                } else {
+                    ""
+                },
             )
         } else {
             String::new()
         };
         h.push_str(&format!(
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}{}</td></tr>",
-            esc(&r.source_kind),
+            if r.site.is_empty() {
+                esc(&r.source_kind)
+            } else {
+                format!(
+                    "{} <span class=\"text-soft\">· {}</span>",
+                    esc(&r.site),
+                    esc(&r.source_kind)
+                )
+            },
             esc(&r.created_by),
             stage,
             progress_cell(r),

@@ -19,7 +19,7 @@
 
 use super::import_wizard::{
     avail_bytes, bearer, ensure_migration_dir, final_path, migration_dir, resolve, text, token_rpc,
-    update, wire_safe_domain, MAX_CHUNK_BYTES,
+    update, wire_safe_domain, MAX_CHUNK_BYTES, PLUGIN_KIND as SOURCE_KIND,
 };
 use crate::auth::AuthCtx;
 use crate::error::AppError;
@@ -35,14 +35,18 @@ use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_state::capabilities::Capability;
 use hyperion_types::{ImportTokenOp, ImportTokenResult};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-const SOURCE_KIND: &str = "wordpress";
 /// Same life as the one-command wizard's token. Every chunk extends it.
 const TOKEN_TTL_SECS: i64 = 4 * 60 * 60;
 /// What the plugin is told to send per chunk. It sends less when its own memory
 /// limit is lower, and slices are bounded by time as well.
 const PREFERRED_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+/// A chunk is refused below this much free disk. `begin` checks against the size
+/// the source declared, which is the source's word and can be wrong or a lie.
+const CHUNK_FREE_FLOOR: u64 = hyperion_import::bundle::IMPORT_HEADROOM_BYTES;
+/// Where a chunk waits until it is whole and its digest checks out.
+const CHUNK_PART: &str = "chunk.part";
 /// Prefix of the pasted code, so the plugin can say "this is not a code" and a
 /// future format can be told apart.
 const CODE_PREFIX: &str = "HYP1.";
@@ -68,6 +72,15 @@ fn plugin_code(base: &str, token: &str) -> String {
     )
 }
 
+/// The plugin's `Version:` header, so the page cannot disagree with the zip.
+fn plugin_version() -> &'static str {
+    PLUGIN_PHP
+        .lines()
+        .find_map(|l| l.trim_start_matches([' ', '*']).strip_prefix("Version:"))
+        .map(str::trim)
+        .unwrap_or("")
+}
+
 pub struct MintedCode {
     pub code: String,
     pub target_domain: String,
@@ -89,14 +102,19 @@ struct ImportWordpressTpl<'a> {
     htmx_version: &'static str,
     csrf_token: String,
     minted: Option<MintedCode>,
+    flash: Option<String>,
     flash_error: Option<String>,
     profiles: Vec<ProfileOpt>,
+    plugin_version: &'static str,
+    /// The plugin refuses a panel on plain HTTP, so say so before anyone installs it.
+    insecure_panel: bool,
 }
 
 async fn render(
     state: &SharedState,
     ctx: &AuthCtx,
     minted: Option<MintedCode>,
+    flash: Option<String>,
     flash_error: Option<String>,
 ) -> Result<Response, AppError> {
     let profiles = match hyperion_rpc_client::call(&state.agent_socket, Request::ProfileList).await
@@ -119,14 +137,19 @@ async fn render(
         htmx_version: super::htmx_version(),
         csrf_token: super::session_csrf_token(state, ctx),
         minted,
+        flash: flash.filter(|s| !s.is_empty()),
         flash_error: flash_error.filter(|s| !s.is_empty()),
         profiles,
+        plugin_version: plugin_version(),
+        insecure_panel: !state.cfg.web.tls_enabled,
     };
     Ok(Html(tpl.render()?).into_response())
 }
 
 #[derive(Deserialize, Default)]
 pub struct PageQuery {
+    #[serde(default)]
+    pub flash: Option<String>,
     #[serde(default)]
     pub flash_error: Option<String>,
 }
@@ -144,7 +167,7 @@ pub async fn get_page(
     if !ctx.can(Capability::PanelImport) {
         return Ok(refused());
     }
-    render(&state, &ctx, None, q.flash_error).await
+    render(&state, &ctx, None, q.flash, q.flash_error).await
 }
 
 /// `GET /import/wordpress/hyperion-migrate.zip`. Built per request: it is one
@@ -204,7 +227,11 @@ pub async fn post_mint(
         && (!wire_safe_domain(&target) || hyperion_validate::Domain::parse(&target).is_err())
     {
         let msg = format!("\"{}\" is not a valid domain", form.target_domain.trim());
-        return render(&state, &ctx, None, Some(msg)).await;
+        return render(&state, &ctx, None, None, Some(msg)).await;
+    }
+    if is_panel_name(&state, &target).await {
+        let msg = format!("\"{target}\" is this panel's own address");
+        return render(&state, &ctx, None, None, Some(msg)).await;
     }
     let (token, id) = match token_rpc(
         &state,
@@ -245,6 +272,7 @@ pub async fn post_mint(
             target_domain: target,
         }),
         None,
+        None,
     )
     .await
 }
@@ -255,6 +283,56 @@ fn run_dir(id: i64) -> PathBuf {
     // `bundle-*` is what the migration dir's stale-artefact sweep already removes,
     // so an abandoned transfer does not leave a database dump here for ever.
     PathBuf::from(format!("{}/bundle-wp-{id}", migration_dir()))
+}
+
+/// Transfers with a request in progress. A retry can arrive while the request it
+/// gave up on is still running, and two of them appending to one stream, or one
+/// committing twice, would corrupt the site or import it twice. One web process
+/// serves these routes, so this needs no more than a set.
+static BUSY_RUNS: std::sync::Mutex<std::collections::BTreeSet<i64>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+struct RunLock(i64);
+
+impl RunLock {
+    fn take(id: i64) -> Option<Self> {
+        let free = BUSY_RUNS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id);
+        // Not `then_some`: it builds its argument either way, and dropping that one
+        // would hand back the lock its holder still needs.
+        free.then(|| Self(id))
+    }
+}
+
+impl Drop for RunLock {
+    fn drop(&mut self) {
+        BUSY_RUNS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// The plugin waits and retries on this one.
+fn run_is_busy() -> Response {
+    text(
+        StatusCode::LOCKED,
+        "another request for this transfer is still running\n".into(),
+    )
+}
+
+/// Is `name` this panel's own address? A hosting by that name would put a second
+/// nginx server block on the panel's hostname, and a source chooses its own name.
+async fn is_panel_name(state: &SharedState, name: &str) -> bool {
+    same_site_name(&state.panel_hostname.read().await, name)
+}
+
+fn same_site_name(panel: &str, name: &str) -> bool {
+    let panel = panel.trim().to_ascii_lowercase();
+    let bare = |h: &str| h.strip_prefix("www.").unwrap_or(h).to_string();
+    !panel.is_empty() && bare(&panel) == bare(name)
 }
 
 /// Delete whatever a transfer has staged. Called when a transfer is cancelled.
@@ -344,6 +422,9 @@ pub async fn post_begin(
             "this code is not a WordPress plugin code\n".into(),
         ));
     }
+    let Some(_lock) = RunLock::take(info.id) else {
+        return Ok(run_is_busy());
+    };
     if info.status == "importing" {
         return Ok(text(
             StatusCode::OK,
@@ -386,6 +467,16 @@ pub async fn post_begin(
             format!(
                 "\"{}\" cannot be a hosting's domain here. Generate a new code in Hyperion and \
                  fill in \"Import as\".\n",
+                target.domain
+            ),
+        ));
+    }
+    if is_panel_name(&state, &target.domain).await {
+        return Ok(text(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} is this panel's own address. Generate a new code in Hyperion and fill in \
+                 \"Import as\".\n",
                 target.domain
             ),
         ));
@@ -458,8 +549,9 @@ pub async fn post_begin(
         aliases,
         url_rewrites,
     } = target;
+    // `target_domain` stays: a resuming tab calls this again, and without it the site
+    // would quietly go back to its own name. `job_overrides` takes it out.
     choice.source_domain = domain.clone();
-    choice.target_domain = None; // The manifest already names the target.
     choice.wp_url_rewrites = url_rewrites.clone();
     token_rpc(
         &state,
@@ -488,12 +580,41 @@ pub async fn post_begin(
     ))
 }
 
+/// The stored choices as the import job wants them. The bundle's manifest already
+/// names the target, so a rename here would be applied to the wrong name.
+fn job_overrides(selection_json: &str) -> Vec<SiteImportOverride> {
+    let mut overrides: Vec<SiteImportOverride> =
+        serde_json::from_str(selection_json).unwrap_or_default();
+    for o in &mut overrides {
+        o.target_domain = None;
+    }
+    overrides
+}
+
 async fn hosting_exists(state: &SharedState, domain: &str) -> bool {
     match hyperion_rpc_client::call(&state.agent_socket, Request::HostingList).await {
         Ok(RpcResponse::HostingList(v)) => v.iter().any(|h| h.domain.as_str() == domain),
         // The import's own conflict check is still the backstop.
         _ => false,
     }
+}
+
+/// Add a verified chunk to its stream, or leave the stream at `have`.
+async fn append_chunk(part: &Path, stream: &Path, have: u64) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut from = tokio::fs::File::open(part).await?;
+    let mut o = tokio::fs::OpenOptions::new();
+    o.create(true).append(true).mode(0o600);
+    let mut to = o.open(stream).await?;
+    let copied = match tokio::io::copy(&mut from, &mut to).await {
+        Ok(_) => to.flush().await,
+        Err(e) => Err(e),
+    };
+    if copied.is_err() {
+        let _ = to.set_len(have).await;
+    }
+    let _ = tokio::fs::remove_file(part).await;
+    copied
 }
 
 /// `PUT /import/upload/wp/chunk`: append one chunk to one stream.
@@ -515,6 +636,12 @@ pub async fn put_chunk(
     if info.status != "receiving" {
         return Ok(text(StatusCode::GONE, format!("state {}\n", info.status)));
     }
+    if info.source_kind != SOURCE_KIND {
+        return Ok(text(
+            StatusCode::FORBIDDEN,
+            "this code is not a WordPress plugin code\n".into(),
+        ));
+    }
     let header_str = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
     let name = match header_str("x-hyperion-stream") {
         Some("db") => DB_STREAM,
@@ -532,6 +659,9 @@ pub async fn put_chunk(
             "x-hyperion-sha256 is required\n".into(),
         ));
     };
+    let Some(lock) = RunLock::take(info.id) else {
+        return Ok(run_is_busy());
+    };
     if !tokio::fs::try_exists(run_meta_path(info.id))
         .await
         .unwrap_or(false)
@@ -545,19 +675,29 @@ pub async fn put_chunk(
     if want != have {
         return Ok(text(StatusCode::CONFLICT, format!("offset {have}\n")));
     }
-
-    let path = run_dir(info.id).join(name);
-    let mut o = tokio::fs::OpenOptions::new();
-    o.create(true).append(true).mode(0o600);
-    let mut file = o
-        .open(&path)
-        .await
-        .map_err(|e| AppError::Internal(format!("open import stream: {e}")))?;
-    let rollback = || async {
-        if let Ok(f) = tokio::fs::OpenOptions::new().write(true).open(&path).await {
-            let _ = f.set_len(have).await;
+    if let Some(avail) = avail_bytes(&migration_dir()).await {
+        if (avail as u64) < CHUNK_FREE_FLOOR {
+            return Ok(text(
+                StatusCode::INSUFFICIENT_STORAGE,
+                format!(
+                    "not enough free disk in Hyperion: {} free. Free some up and try again.\n",
+                    hyperion_import::progress::human_bytes(avail as u64),
+                ),
+            ));
         }
-    };
+    }
+
+    // Into a side file first, never straight onto the stream. nginx does not buffer
+    // this route and hyper drops a handler whose client went away, so a request
+    // killed mid-body runs no rollback here. Those bytes on the stream would be an
+    // offset the plugin cannot resume from, since it only holds whole slices.
+    let part = run_dir(info.id).join(CHUNK_PART);
+    let mut o = tokio::fs::OpenOptions::new();
+    o.create(true).truncate(true).write(true).mode(0o600);
+    let mut file = o
+        .open(&part)
+        .await
+        .map_err(|e| AppError::Internal(format!("open import chunk: {e}")))?;
 
     let mut hasher = Sha256::new();
     let mut written: u64 = 0;
@@ -566,7 +706,6 @@ pub async fn put_chunk(
         let frame = match frame {
             Ok(f) => f,
             Err(e) => {
-                rollback().await;
                 return Ok(text(
                     StatusCode::BAD_REQUEST,
                     format!("upload error: {e}\noffset {have}\n"),
@@ -578,7 +717,6 @@ pub async fn put_chunk(
         };
         written += data.len() as u64;
         if written > MAX_CHUNK_BYTES {
-            rollback().await;
             return Ok(text(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!("chunk exceeds the {MAX_CHUNK_BYTES} byte limit\n"),
@@ -586,7 +724,6 @@ pub async fn put_chunk(
         }
         hasher.update(&data);
         if let Err(e) = file.write_all(&data).await {
-            rollback().await;
             return Ok(text(
                 StatusCode::INSUFFICIENT_STORAGE,
                 format!("write failed (disk full?): {e}\noffset {have}\n"),
@@ -594,7 +731,6 @@ pub async fn put_chunk(
         }
     }
     if let Err(e) = file.flush().await {
-        rollback().await;
         return Ok(text(
             StatusCode::INSUFFICIENT_STORAGE,
             format!("write failed (disk full?): {e}\noffset {have}\n"),
@@ -602,10 +738,25 @@ pub async fn put_chunk(
     }
     drop(file);
     if hex::encode(hasher.finalize()) != want_sha {
-        rollback().await;
         return Ok(text(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("chunk arrived corrupted\noffset {have}\n"),
+        ));
+    }
+
+    // A task of its own, so that a client leaving now cannot stop this halfway. It
+    // keeps the lock for as long as it runs.
+    let stream = run_dir(info.id).join(name);
+    let appended = tokio::spawn(async move {
+        let _lock = lock;
+        append_chunk(&part, &stream, have).await
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("append import chunk: {e}")))?;
+    if let Err(e) = appended {
+        return Ok(text(
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!("write failed (disk full?): {e}\noffset {have}\n"),
         ));
     }
 
@@ -631,6 +782,10 @@ struct CommitBody {
     db_bytes: u64,
     files_bytes: u64,
     files_members: u64,
+    /// The full list. The one sent to `begin` predates everything noticed while
+    /// the database and the files were being read.
+    #[serde(default)]
+    warnings: Vec<String>,
 }
 
 /// `POST /import/upload/wp/commit`: hand the finished streams to the import job.
@@ -645,6 +800,20 @@ pub async fn post_commit(
     let Some(token) = bearer(&headers) else {
         return Ok(text(StatusCode::UNAUTHORIZED, "no bearer token\n".into()));
     };
+    let Some(info) = resolve(&state, &token, false).await? else {
+        return Ok(text(StatusCode::GONE, "state cancelled\n".into()));
+    };
+    if info.source_kind != SOURCE_KIND {
+        return Ok(text(
+            StatusCode::FORBIDDEN,
+            "this code is not a WordPress plugin code\n".into(),
+        ));
+    }
+    let Some(_lock) = RunLock::take(info.id) else {
+        return Ok(run_is_busy());
+    };
+    // Again, now that nobody else can be committing: a commit that held the lock
+    // until a moment ago has changed the answer.
     let Some(info) = resolve(&state, &token, false).await? else {
         return Ok(text(StatusCode::GONE, "state cancelled\n".into()));
     };
@@ -677,12 +846,14 @@ pub async fn post_commit(
             format!("offset_db {have_db}\noffset_files {have_files}\n"),
         ));
     }
-    let Some(meta) = read_run_meta(info.id).await else {
+    let Some(mut meta) = read_run_meta(info.id).await else {
         return Ok(text(StatusCode::CONFLICT, "call begin first\n".into()));
     };
+    if !commit.warnings.is_empty() {
+        meta.begin.warnings = commit.warnings;
+    }
 
-    let site_overrides: Vec<SiteImportOverride> =
-        serde_json::from_str(&info.selection_json).unwrap_or_default();
+    let site_overrides = job_overrides(&info.selection_json);
     let label = format!("WordPress plugin: {}", meta.target_domain);
     let id = info.id;
     let out = final_path(id);
@@ -719,8 +890,18 @@ pub async fn post_commit(
             let members = commit.files_members;
             let target_out = PathBuf::from(&out);
             let staged = dir.clone();
+            let max_dump = avail_bytes(&migration_dir())
+                .await
+                .map(|a| (a as u64).saturating_sub(CHUNK_FREE_FLOOR));
             let assembled = tokio::task::spawn_blocking(move || {
-                wordpress::assemble_bundle(&staged, &target_out, &source, &target, members)
+                wordpress::assemble_bundle(
+                    &staged,
+                    &target_out,
+                    &source,
+                    &target,
+                    members,
+                    max_dump,
+                )
             })
             .await
             .unwrap_or_else(|e| Err(format!("assemble task: {e}")));
@@ -753,9 +934,74 @@ pub async fn post_commit(
     ))
 }
 
+/// `POST /import/upload/wp/abort`: the plugin's Cancel. The code stays good for
+/// another try, but the site's database does not sit here waiting for one.
+pub async fn post_abort(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(token) = bearer(&headers) else {
+        return Ok(text(StatusCode::UNAUTHORIZED, "no bearer token\n".into()));
+    };
+    let Some(info) = resolve(&state, &token, false).await? else {
+        return Ok(text(StatusCode::GONE, "state cancelled\n".into()));
+    };
+    if info.source_kind != SOURCE_KIND {
+        return Ok(text(
+            StatusCode::FORBIDDEN,
+            "this code is not a WordPress plugin code\n".into(),
+        ));
+    }
+    let Some(_lock) = RunLock::take(info.id) else {
+        return Ok(run_is_busy());
+    };
+    // Past commit, the streams belong to the import job.
+    if info.status == "receiving" {
+        discard_run(info.id).await;
+        update(&state, info.id, None, None, Some(0)).await;
+    }
+    Ok(text(StatusCode::OK, format!("state {}\n", info.status)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_job_gets_no_rename_on_top_of_the_manifest() {
+        let got = job_overrides(
+            r#"[{"source_domain":"new.cz","target_domain":"new.cz","profile_id":2}]"#,
+        );
+        assert_eq!(got[0].source_domain, "new.cz");
+        assert_eq!(got[0].target_domain, None);
+        assert_eq!(got[0].profile_id, Some(2));
+    }
+
+    #[test]
+    fn the_page_states_the_version_the_zip_holds() {
+        assert!(
+            plugin_version().starts_with(|c: char| c.is_ascii_digit()),
+            "got {:?}",
+            plugin_version()
+        );
+    }
+
+    #[test]
+    fn the_panel_own_name_is_recognised_with_or_without_www() {
+        assert!(same_site_name("panel.example.cz", "panel.example.cz"));
+        assert!(same_site_name(" Panel.Example.cz ", "www.panel.example.cz"));
+        assert!(!same_site_name("panel.example.cz", "example.cz"));
+        // No panel hostname set, and no "Import as" typed.
+        assert!(!same_site_name("", ""));
+    }
+
+    #[test]
+    fn a_run_is_locked_until_its_holder_lets_go() {
+        let first = RunLock::take(-1).expect("free");
+        assert!(RunLock::take(-1).is_none());
+        drop(first);
+        assert!(RunLock::take(-1).is_some());
+    }
 
     #[test]
     fn the_plugin_zip_holds_the_plugin_where_wordpress_looks_for_it() {

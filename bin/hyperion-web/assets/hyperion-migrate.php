@@ -2,11 +2,12 @@
 /**
  * Plugin Name: Hyperion Migration
  * Description: Moves this WordPress site to a Hyperion panel. Generate a code in Hyperion (Import → WordPress plugin) and paste it under Tools → Hyperion Migration.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Requires at least: 4.7
  * Requires PHP: 5.6
  * Author: Hyperion
  * License: MIT
+ * Update URI: false
  *
  * The source of a migration is a host we know nothing about, so this assumes the
  * least it can: no shell, a short execution limit, little memory, little spare
@@ -25,7 +26,12 @@ if (!defined('ABSPATH')) {
 
 final class Hyperion_Migrate
 {
+    const VERSION = '1.1.0';
     const OPTION = 'hyperion_migrate_run';
+    const SWEEP_HOOK = 'hyperion_migrate_sweep';
+    /** A run left this long without progress is abandoned. The panel's code lasts two days at most. */
+    const SWEEP_AFTER = 259200;
+    const MAX_ROWS = 2000;
     const NONCE = 'hyperion_migrate';
     const CODE_PREFIX = 'HYP1.';
     const DUMP_END = '-- hyperion-migrate: dump complete';
@@ -39,12 +45,39 @@ final class Hyperion_Migrate
         foreach (array('check', 'start', 'step', 'cancel') as $action) {
             add_action('wp_ajax_hyperion_migrate_' . $action, array(__CLASS__, 'ajax_' . $action));
         }
+        add_action(self::SWEEP_HOOK, array(__CLASS__, 'sweep'));
+        add_filter('plugin_action_links_' . plugin_basename(__FILE__), array(__CLASS__, 'action_links'));
         register_deactivation_hook(__FILE__, array(__CLASS__, 'discard_run'));
+    }
+
+    public static function action_links($links)
+    {
+        array_unshift($links, '<a href="' . esc_url(admin_url('tools.php?page=hyperion-migrate')) . '">Start migration</a>');
+        return $links;
+    }
+
+    /**
+     * A transfer nobody came back to must not leave slices of the database in
+     * wp-content/uploads for ever, nor a finished one its note in the options.
+     */
+    public static function sweep()
+    {
+        $run = get_option(self::OPTION);
+        if (!is_array($run) || empty($run['dir'])) {
+            return;
+        }
+        $age = time() - (int) @filemtime($run['dir'] . '/state.json');
+        if (!empty($run['finished']) || $age > self::SWEEP_AFTER) {
+            self::discard_run();
+            return;
+        }
+        wp_schedule_single_event(time() + self::SWEEP_AFTER, self::SWEEP_HOOK);
     }
 
     public static function menu()
     {
-        add_management_page('Hyperion Migration', 'Hyperion Migration', 'manage_options', 'hyperion-migrate', array(__CLASS__, 'page'));
+        $cap = is_multisite() ? 'manage_network' : 'manage_options';
+        add_management_page('Hyperion Migration', 'Hyperion Migration', $cap, 'hyperion-migrate', array(__CLASS__, 'page'));
     }
 
     /** The export reads the whole database, so on a network only a super admin may run it. */
@@ -118,6 +151,9 @@ final class Hyperion_Migrate
         if ($r['code'] !== 200 || !isset($f['state']) || $f['state'] === 'cancelled') {
             self::reply(array('fatal' => 'Hyperion does not accept this code. It has expired or was cancelled, so generate a new one.'));
         }
+        if ($f['state'] === 'importing') {
+            self::reply(array('fatal' => 'This code has already brought a site across. Generate a new one to transfer again.'));
+        }
         self::reply(array('panel' => (string) wp_parse_url($url, PHP_URL_HOST), 'site' => (string) get_option('home')));
     }
 
@@ -136,12 +172,19 @@ final class Hyperion_Migrate
         // Not autoloaded: holds a credential, and has no business in every request.
         add_option(self::OPTION, array('dir' => $dir, 'url' => $parsed[0], 'token' => $parsed[1]), '', 'no');
         self::save_state($dir, self::initial_state());
+        wp_schedule_single_event(time() + self::SWEEP_AFTER, self::SWEEP_HOOK);
         self::reply(self::progress(self::load_state($dir)));
     }
 
     public static function ajax_cancel()
     {
         self::ajax_guard();
+        // So the part already sent does not sit on the panel. Best effort: the panel
+        // sweeps it anyway, and a cancel must not hang on an unreachable panel.
+        $run = get_option(self::OPTION);
+        if (is_array($run) && !empty($run['token'])) {
+            self::panel_request($run['url'], $run['token'], 'POST', '/import/upload/wp/abort', '', array(), 10);
+        }
         self::discard_run();
         self::reply(array('cancelled' => true));
     }
@@ -158,9 +201,12 @@ final class Hyperion_Migrate
             self::reply(array('phase' => 'done', 'percent' => 100, 'job_url' => $run['job_url'], 'warnings' => $run['warnings']));
         }
         // A retry can arrive while the request it gave up on is still running, and
-        // two of those appending to one stream would corrupt it.
+        // two of those appending to one stream would corrupt it. Only a lock someone
+        // else holds means busy: a folder that is gone is reported below, and a
+        // filesystem without locks should not stall the transfer for ever.
         $lock = @fopen($dir . '/lock', 'c');
-        if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
+        $held = 0;
+        if ($lock && !flock($lock, LOCK_EX | LOCK_NB, $held) && $held) {
             self::reply(array('busy' => true));
         }
         ignore_user_abort(true);
@@ -176,11 +222,14 @@ final class Hyperion_Migrate
         if (!empty($_POST['shrink'])) {
             $state['budget'] = max(2, (int) ($state['budget'] / 2));
             $state['raw'] = max(self::MIN_RAW, (int) ($state['raw'] / 2));
+            $state['row_cap'] = max(1, (int) ($state['row_cap'] / 4));
         }
         $worker = new self($run, $state);
         $reply = $worker->advance();
-        flock($lock, LOCK_UN);
-        fclose($lock);
+        if ($lock) {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
         self::reply($reply);
     }
 
@@ -198,7 +247,18 @@ final class Hyperion_Migrate
         foreach ($parents as $parent) {
             $dir = $parent . '/' . $name;
             if (wp_mkdir_p($dir) && is_writable($dir)) {
-                // nginx ignores .htaccess. The unguessable name is the real protection.
+                // wp_mkdir_p copies the parent's mode, which in the system temp folder
+                // is 1777: any account on a shared server could read the database out
+                // of it. 0700 also stops a web server running as another user from
+                // serving anything here, whatever its configuration.
+                @chmod($dir, 0700);
+                clearstatcache();
+                $uploads_dir = !empty($uploads['basedir']) && $parent === $uploads['basedir'];
+                if (!$uploads_dir && (fileperms($dir) & 0077)) {
+                    @rmdir($dir);
+                    continue;
+                }
+                // nginx ignores .htaccess. The unguessable names are the real protection.
                 @file_put_contents($dir . '/.htaccess', "Require all denied\nDeny from all\n");
                 @file_put_contents($dir . '/index.html', '');
                 return $dir;
@@ -214,6 +274,7 @@ final class Hyperion_Migrate
             self::remove_dir($run['dir']);
         }
         delete_option(self::OPTION);
+        wp_clear_scheduled_hook(self::SWEEP_HOOK);
     }
 
     private static function remove_dir($dir)
@@ -239,6 +300,9 @@ final class Hyperion_Migrate
             'run' => wp_generate_password(32, false, false),
             'budget' => $budget,
             'raw' => 1048576,
+            'row_cap' => self::MAX_ROWS,
+            'pending_file' => 'pending-' . wp_generate_password(32, false, false) . '.bin',
+            'list_len' => 0,
             'warnings' => array(),
             'stack' => array(''),
             'visited' => array(),
@@ -259,14 +323,31 @@ final class Hyperion_Migrate
     private static function load_state($dir)
     {
         $raw = @file_get_contents($dir . '/state.json');
-        return $raw === false ? null : json_decode($raw, true);
+        $state = $raw === false ? null : json_decode($raw, true);
+        if (!is_array($state)) {
+            return null;
+        }
+        $state['stack'] = array_map('base64_decode', $state['stack']);
+        $state['visited'] = array_flip(array_map('base64_decode', $state['visited']));
+        if (is_array($state['cur'])) {
+            $state['cur']['rel'] = base64_decode($state['cur']['rel']);
+        }
+        return $state;
     }
 
     private static function save_state($dir, $state)
     {
+        // Base64: paths are raw bytes, on an old host often not UTF-8, and the JSON
+        // encoder would swap those bytes and send us looking for another file.
+        $state['stack'] = array_map('base64_encode', $state['stack']);
+        $state['visited'] = array_map('base64_encode', array_map('strval', array_keys($state['visited'])));
+        if (is_array($state['cur'])) {
+            $state['cur']['rel'] = base64_encode($state['cur']['rel']);
+        }
+        $json = wp_json_encode($state);
         // Rename so a request killed mid-write cannot leave half a state behind.
         $tmp = $dir . '/state.tmp';
-        if (@file_put_contents($tmp, wp_json_encode($state)) === false || !@rename($tmp, $dir . '/state.json')) {
+        if ($json === false || @file_put_contents($tmp, $json) === false || !@rename($tmp, $dir . '/state.json')) {
             return false;
         }
         return true;
@@ -290,6 +371,7 @@ final class Hyperion_Migrate
             'percent' => $percent,
             'done_bytes' => $done,
             'total_bytes' => $total,
+            'scan_files' => $state['scan_files'],
         );
     }
 
@@ -326,8 +408,12 @@ final class Hyperion_Migrate
 
     private function warn($message)
     {
-        if (count($this->state['warnings']) < self::MAX_WARNINGS) {
-            $this->state['warnings'][] = $message;
+        $count = count($this->state['warnings']);
+        if ($count === self::MAX_WARNINGS) {
+            $this->state['warnings'][] = 'More notes were left out of this list.';
+        } elseif ($count < self::MAX_WARNINGS) {
+            // Names a file, and a file's name may not be UTF-8.
+            $this->state['warnings'][] = wp_check_invalid_utf8(substr($message, 0, 500), true);
         }
     }
 
@@ -364,6 +450,7 @@ final class Hyperion_Migrate
             $this->state['raw'] = max(self::MIN_RAW, (int) ($this->state['raw'] / 2));
         } elseif ($took < $this->state['budget'] / 2) {
             $this->state['raw'] = min(self::MAX_RAW, $this->state['raw'] * 2);
+            $this->state['row_cap'] = min(self::MAX_ROWS, $this->state['row_cap'] * 2);
         }
 
         // Before any save: a finished run has no work folder left to save into.
@@ -425,7 +512,7 @@ final class Hyperion_Migrate
     }
 
     /**
-     * Files that would break the site on the new server.
+     * Files that would break the site on the new server, or have no business there.
      *   object-cache.php, advanced-cache.php, db.php: drop-ins that outlive their
      *     plugin and carry the old server's paths and cache sockets.
      *   .user.ini, php.ini: usually an auto_prepend_file with an absolute path
@@ -443,15 +530,21 @@ final class Hyperion_Migrate
         if ($rel === '.user.ini' || $rel === 'php.ini') {
             return true;
         }
-        return basename($rel) === 'error_log';
+        // Left behind by an update in progress, it would keep the new site in
+        // maintenance mode.
+        return basename($rel) === 'error_log' || basename($rel) === '.maintenance';
     }
 
     private function step_scan()
     {
-        $list = @fopen($this->dir . '/list.txt', 'a');
+        $list = @fopen($this->dir . '/list.txt', 'c');
         if (!$list) {
             return array('fatal' => 'Could not write to the work folder. Is the disk full?');
         }
+        // Back to what the saved state knows about. A request killed mid-slice has
+        // written lines this run is about to find again.
+        ftruncate($list, $this->state['list_len']);
+        fseek($list, $this->state['list_len']);
         if (empty($this->state['config_done'])) {
             $this->state['config_done'] = true;
             if ($this->config_path() !== '') {
@@ -468,7 +561,9 @@ final class Hyperion_Migrate
             }
         }
         $excluded = $this->excluded_dirs();
-        $own = wp_normalize_path(dirname(__FILE__));
+        // Our folder, or just our file if someone installed us without one: its
+        // parent would be the folder holding every other plugin.
+        $own = wp_normalize_path(strpos(plugin_basename(__FILE__), '/') !== false ? dirname(__FILE__) : __FILE__);
         $work = wp_normalize_path($this->dir);
         $config_real = $this->config_path() === '' ? '' : realpath($this->config_path());
 
@@ -490,6 +585,14 @@ final class Hyperion_Migrate
                 if ($norm === $own || $norm === $work || $name === '.git' || $name === '.svn') {
                     continue;
                 }
+                // An earlier run's work folder holds pieces of a database.
+                if (strpos($name, 'hyperion-migrate-') === 0) {
+                    continue;
+                }
+                // Not even through a link: the rewritten copy is already on the list.
+                if ($config_real !== '' && !is_dir($abs) && realpath($abs) === $config_real) {
+                    continue;
+                }
                 if (isset($excluded[$rel])) {
                     $this->warn('Left out ' . $rel . ' (' . $excluded[$rel] . ').');
                     continue;
@@ -501,7 +604,7 @@ final class Hyperion_Migrate
                     $this->state['scan_files']++;
                     $this->state['stack'][] = $rel;
                 } elseif (is_file($abs)) {
-                    if ($this->excluded_file($rel) || ($config_real !== '' && realpath($abs) === $config_real)) {
+                    if ($this->excluded_file($rel)) {
                         continue;
                     }
                     $this->add_file($list, $rel, $abs);
@@ -509,6 +612,8 @@ final class Hyperion_Migrate
             }
             closedir($handle);
         }
+        fflush($list);
+        $this->state['list_len'] = ftell($list);
         fclose($list);
         if (empty($this->state['stack'])) {
             $this->state['phase'] = 'begin';
@@ -586,17 +691,29 @@ final class Hyperion_Migrate
         if ($raw === false) {
             return null;
         }
-        $roots = array_unique(array(untrailingslashit($this->root), untrailingslashit(ABSPATH), dirname(ABSPATH)));
+        $roots = array();
+        foreach (array($this->root, ABSPATH, dirname(ABSPATH)) as $r) {
+            $r = untrailingslashit($r);
+            if ($r !== '') {
+                // As a whole path: /www must not match inside https://www.example.cz.
+                $roots[$r] = '#(?<![\w./:-])' . preg_quote($r, '#') . '(?![\w.-])#';
+            }
+        }
         $out = array();
         foreach (explode("\n", $raw) as $line) {
             $is_define = preg_match('/^\s*define\s*\(\s*[\'"]([A-Z0-9_]+)[\'"]/i', $line, $m);
             $names_path = false;
-            foreach ($roots as $r) {
-                if ($r !== '' && strpos($line, $r) !== false) {
+            foreach ($roots as $pattern) {
+                if (preg_match($pattern, $line)) {
                     $names_path = true;
                 }
             }
-            if ($is_define && $names_path) {
+            // A define spread over lines cannot be commented out one line at a time:
+            // what is left would be a syntax error, and a white screen on the new site.
+            $complete = preg_match('/;\s*((\/\/|#).*)?$/', rtrim($line));
+            if ($is_define && $names_path && !$complete) {
+                $this->warn('wp-config.php: ' . $m[1] . ' names a path on the old server. Change it by hand on the new one.');
+            } elseif ($is_define && $names_path) {
                 $this->warn('wp-config.php: disabled ' . $m[1] . ', which named a path on the old server.');
                 $line = '// Disabled by the Hyperion migration (a path on the old server): ' . $line;
             } elseif (preg_match('/^\s*(require|include)(_once)?[\s(]*[\'"]\//', $line)) {
@@ -612,7 +729,11 @@ final class Hyperion_Migrate
     private function step_begin()
     {
         if (!is_array($this->state['db'])) {
-            $this->state['db'] = $this->plan_db();
+            $db = $this->plan_db();
+            if (isset($db['fatal'])) {
+                return $db;
+            }
+            $this->state['db'] = $db;
         }
         $body = wp_json_encode(array(
             'run' => $this->state['run'],
@@ -624,11 +745,11 @@ final class Hyperion_Migrate
             'warnings' => $this->state['warnings'],
         ));
         $r = $this->panel('POST', '/import/upload/wp/begin', $body, array('Content-Type' => 'application/json'));
-        if ($r['net'] !== '' || $r['code'] >= 500 && $r['code'] !== 507) {
+        if ($r['net'] !== '' || $r['code'] === 423 || ($r['code'] >= 500 && $r['code'] !== 507)) {
             return array('retry' => 'Waiting for Hyperion: ' . ($r['net'] !== '' ? $r['net'] : 'HTTP ' . $r['code']));
         }
         if ($r['code'] !== 200) {
-            return array('fatal' => trim($r['body']));
+            return array('fatal' => self::short($r['body']));
         }
         $f = self::kv($r['body']);
         if (isset($f['state']) && $f['state'] === 'importing') {
@@ -663,8 +784,24 @@ final class Hyperion_Migrate
                 $tables[] = $row[0];
             }
         }
+        if (!$tables) {
+            // Errors are suppressed here, so an empty answer may be a failed query. An
+            // empty dump would restore without complaint as a site with no database.
+            return array('fatal' => 'Could not list this site\'s database tables. ' . $wpdb->last_error);
+        }
         if ($others) {
             $this->warn(count($others) . ' table(s) in this database do not start with "' . $prefix . '" and were left out as not belonging to this site: ' . implode(', ', array_slice($others, 0, 8)) . (count($others) > 8 ? ', …' : '') . '.');
+        }
+        $triggers = 0;
+        foreach ((array) $wpdb->get_results('SHOW TRIGGERS', ARRAY_A) as $row) {
+            if (isset($row['Table']) && in_array($row['Table'], $tables, true)) {
+                $triggers++;
+            }
+        }
+        $routines = count((array) $wpdb->get_results('SHOW PROCEDURE STATUS WHERE Db = DATABASE()', ARRAY_A))
+            + count((array) $wpdb->get_results('SHOW FUNCTION STATUS WHERE Db = DATABASE()', ARRAY_A));
+        if ($triggers > 0 || $routines > 0) {
+            $this->warn('This database has ' . $triggers . ' trigger(s) and ' . $routines . ' stored routine(s), which were not transferred. Recreate them by hand if the site uses them.');
         }
         $estimate = 0;
         foreach ((array) $wpdb->get_results('SHOW TABLE STATUS', ARRAY_A) as $row) {
@@ -850,6 +987,11 @@ final class Hyperion_Migrate
             if ($name_at !== null && $row[$name_at] === self::OPTION) {
                 continue;
             }
+            // The plugin itself is not copied, and left in this list WordPress would
+            // greet the new site's admin with an error about a missing plugin.
+            if ($name_at !== null && $row[$name_at] === 'active_plugins' && isset($positions['option_value'])) {
+                $row[$positions['option_value']] = self::without_this_plugin($row[$positions['option_value']]);
+            }
             $values = array();
             foreach ($row as $i => $v) {
                 $values[] = self::literal($v, $binary[$i]);
@@ -882,13 +1024,23 @@ final class Hyperion_Migrate
         return $out;
     }
 
-    /** How many rows should fit in the room left, going by the table's average row. */
+    private static function without_this_plugin($raw)
+    {
+        $plugins = @unserialize($raw);
+        return is_array($plugins) ? serialize(array_values(array_diff($plugins, array(plugin_basename(__FILE__))))) : $raw;
+    }
+
+    /**
+     * How many rows should fit in the room left, going by the table's average row.
+     * An average hides the few huge rows that kill a request, so each killed request
+     * lowers the cap until those rows come one at a time.
+     */
     private function batch_rows($table, $room)
     {
         global $wpdb;
         $status = $wpdb->get_row($wpdb->prepare('SHOW TABLE STATUS WHERE Name = %s', $table), ARRAY_A);
         $average = !empty($status['Avg_row_length']) ? (int) $status['Avg_row_length'] : 1024;
-        return max(1, min(2000, (int) (max($room, 65536) / max($average, 64))));
+        return max(1, min($this->state['row_cap'], (int) (max($room, 65536) / max($average, 64))));
     }
 
     private static function literal($v, $binary)
@@ -1062,7 +1214,7 @@ final class Hyperion_Migrate
             return null;
         }
         $member = self::gzip_member($buf);
-        if (@file_put_contents($this->dir . '/pending.bin', $member) === false) {
+        if (@file_put_contents($this->dir . '/' . $this->state['pending_file'], $member) === false) {
             return array('fatal' => 'Could not write to the work folder. Is the disk full?');
         }
         $this->state['pending'] = array('stream' => $stream, 'len' => strlen($member), 'sha' => hash('sha256', $member));
@@ -1095,7 +1247,7 @@ final class Hyperion_Migrate
     private function send_pending()
     {
         $p = $this->state['pending'];
-        $body = @file_get_contents($this->dir . '/pending.bin');
+        $body = @file_get_contents($this->dir . '/' . $this->state['pending_file']);
         if ($body === false || strlen($body) !== $p['len']) {
             return array('fatal' => 'A piece of the transfer was lost from the work folder. Generate a new code and start again.');
         }
@@ -1115,7 +1267,7 @@ final class Hyperion_Migrate
             // On the 409, Hyperion already has this slice and the reply to it was lost.
             $this->state['sent'][$p['stream']] = $sent + $p['len'];
             $this->state['pending'] = null;
-            @unlink($this->dir . '/pending.bin');
+            @unlink($this->dir . '/' . $this->state['pending_file']);
             return null;
         }
         if ($r['code'] === 409) {
@@ -1125,12 +1277,13 @@ final class Hyperion_Migrate
             return array('fatal' => 'The transfer was cancelled in Hyperion, or its code expired.');
         }
         if ($r['code'] === 507) {
-            return array('fatal' => trim($r['body']));
+            return array('fatal' => self::short($r['body']));
         }
-        if ($r['code'] === 422 || $r['code'] >= 500) {
+        // 423: Hyperion is still busy with the request this one retries.
+        if ($r['code'] === 422 || $r['code'] === 423 || $r['code'] >= 500) {
             return array('retry' => 'Waiting for Hyperion: HTTP ' . $r['code']);
         }
-        return array('fatal' => 'Hyperion refused the upload (HTTP ' . $r['code'] . '): ' . trim(substr($r['body'], 0, 300)));
+        return array('fatal' => 'Hyperion refused the upload (HTTP ' . $r['code'] . '): ' . self::short($r['body']));
     }
 
     private function step_commit()
@@ -1139,12 +1292,13 @@ final class Hyperion_Migrate
             'db_bytes' => $this->state['sent']['db'],
             'files_bytes' => $this->state['sent']['files'],
             'files_members' => $this->state['members'],
+            'warnings' => $this->state['warnings'],
         )), array('Content-Type' => 'application/json'));
-        if ($r['net'] !== '' || $r['code'] >= 500) {
+        if ($r['net'] !== '' || $r['code'] === 423 || $r['code'] >= 500) {
             return array('retry' => 'Waiting for Hyperion: ' . ($r['net'] !== '' ? $r['net'] : 'HTTP ' . $r['code']));
         }
         if ($r['code'] !== 200) {
-            return array('fatal' => 'Hyperion did not accept the finished transfer: ' . trim(substr($r['body'], 0, 300)));
+            return array('fatal' => 'Hyperion did not accept the finished transfer: ' . self::short($r['body']));
         }
         $f = self::kv($r['body']);
         return $this->finish(isset($f['job']) ? $f['job'] : '-');
@@ -1169,13 +1323,13 @@ final class Hyperion_Migrate
         return self::panel_request($this->run['url'], $this->run['token'], $method, $path, $body, $headers);
     }
 
-    private static function panel_request($url, $token, $method, $path, $body = null, $headers = array())
+    private static function panel_request($url, $token, $method, $path, $body = null, $headers = array(), $timeout = 120)
     {
         $args = array(
             'method' => $method,
-            'timeout' => 120,
+            'timeout' => $timeout,
             'redirection' => 0,
-            'user-agent' => 'Hyperion-Migrate/1.0',
+            'user-agent' => 'Hyperion-Migrate/' . self::VERSION,
             'sslverify' => !self::insecure_allowed(),
             'headers' => array('Authorization' => 'Bearer ' . $token) + $headers,
         );
@@ -1187,6 +1341,12 @@ final class Hyperion_Migrate
             return array('code' => 0, 'body' => '', 'net' => $r->get_error_message());
         }
         return array('code' => (int) wp_remote_retrieve_response_code($r), 'body' => (string) wp_remote_retrieve_body($r), 'net' => '');
+    }
+
+    /** A reply fit to show: a proxy between here and the panel may answer with a whole HTML page. */
+    private static function short($body)
+    {
+        return trim(wp_strip_all_tags(substr((string) $body, 0, 2000)));
     }
 
     /** Hyperion's machine replies are `key value` lines. */
@@ -1211,64 +1371,246 @@ final class Hyperion_Migrate
         }
         $run = get_option(self::OPTION);
         $running = is_array($run) && !empty($run['dir']);
+        $check = '<svg class="hm-tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
         ?>
-        <style>#hm [hidden] { display: none !important; }</style>
+        <style>
+        #hm { --ink: #111113; --ink-2: #3a3a40; --soft: #63636b; --line: #e3e3e6; --tint: #f6f6f7; --ok: #0a7d4f; --ok-tint: #e8f6ef; --warn: #8a5a00; --warn-tint: #fdf4e0; --bad: #b3261e; --bad-tint: #fcecea; max-width: 680px; margin-top: 24px; color: var(--ink); -webkit-font-smoothing: antialiased; }
+        #hm [hidden] { display: none !important; }
+        #hm * { box-sizing: border-box; }
+        #hm a:not(.hm-btn) { color: inherit; }
+        .hm-mark { font-size: 11px; font-weight: 600; letter-spacing: .16em; color: var(--soft); margin-bottom: 10px; }
+        .hm-mark b { color: var(--ink); font-weight: 700; }
+        #hm h1 { font-size: 26px; line-height: 1.2; font-weight: 600; letter-spacing: -.015em; margin: 0; padding: 0; color: var(--ink); text-wrap: balance; }
+        .hm-sub { font-size: 14px; line-height: 1.5; color: var(--soft); margin: 8px 0 0; text-wrap: pretty; }
+        #hm .wp-header-end { margin: 0; border: 0; visibility: hidden; height: 0; }
+
+        .hm-rail { list-style: none; display: flex; align-items: center; gap: 8px; margin: 24px 0 12px; padding: 0; font-size: 13px; color: var(--soft); }
+        .hm-rail li { display: flex; align-items: center; gap: 7px; margin: 0; white-space: nowrap; }
+        .hm-rail li + li::before { content: ""; width: 20px; height: 1px; background: var(--line); margin-right: 1px; }
+        .hm-dot { width: 20px; height: 20px; border-radius: 50%; border: 1px solid #c9c9ce; background: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+        .hm-dot .hm-tick { width: 12px; height: 12px; display: none; }
+        .hm-rail .is-now { color: var(--ink); font-weight: 600; }
+        .hm-rail .is-now .hm-dot { background: var(--ink); border-color: var(--ink); color: #fff; }
+        .hm-rail .is-done .hm-dot { background: var(--ok-tint); border-color: transparent; color: var(--ok); }
+        .hm-rail .is-done .hm-num { display: none; }
+        .hm-rail .is-done .hm-tick { display: block; }
+
+        .hm-card { background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 0 0 1px rgba(17,17,19,.08), 0 1px 2px rgba(17,17,19,.04), 0 8px 24px -12px rgba(17,17,19,.1); }
+        .hm-card h2 { font-size: 16px; font-weight: 600; line-height: 1.35; margin: 0; color: var(--ink); text-wrap: balance; }
+        .hm-card p { font-size: 13px; line-height: 1.55; margin: 8px 0 0; color: var(--soft); text-wrap: pretty; }
+        .hm-card strong { color: var(--ink); font-weight: 600; }
+
+        .hm-label { display: block; font-size: 13px; font-weight: 600; margin: 18px 0 6px; }
+        #hm-code { display: block; width: 100%; min-height: 84px; padding: 10px 12px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--ink); background: var(--tint); border: 1px solid var(--line); border-radius: 8px; box-shadow: none; word-break: break-all; resize: vertical; }
+        #hm-code:focus { border-color: var(--ink); outline: 2px solid transparent; box-shadow: 0 0 0 1px var(--ink); background: #fff; }
+
+        .hm-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+        .hm-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 0 16px; font-size: 13px; font-weight: 600; line-height: 1; text-decoration: none; color: var(--ink); background: #fff; border: 0; border-radius: 8px; cursor: pointer; box-shadow: 0 0 0 1px rgba(17,17,19,.14), 0 1px 1px rgba(17,17,19,.04); transition: background-color .12s ease-out, transform .1s ease-out, opacity .12s ease-out; }
+        .hm-btn:hover { background: var(--tint); color: var(--ink); }
+        .hm-btn:active:not(:disabled) { transform: scale(.96); }
+        .hm-btn:focus-visible, .hm-link:focus-visible, .hm-warnings summary:focus-visible { outline: 2px solid var(--wp-admin-theme-color, #2271b1); outline-offset: 2px; box-shadow: none; }
+        .hm-btn:disabled { opacity: .45; cursor: default; }
+        .hm-btn.is-primary { color: #fff; background: var(--ink); box-shadow: 0 1px 2px rgba(17,17,19,.25); }
+        .hm-btn.is-primary:hover { background: var(--ink-2); color: #fff; }
+        .hm-btn svg { width: 14px; height: 14px; flex: none; }
+        .hm-spin { display: none; width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: hm-spin .7s linear infinite; }
+        .hm-btn.is-busy .hm-spin { display: block; }
+        @keyframes hm-spin { to { transform: rotate(360deg); } }
+        .hm-link { background: none; border: 0; padding: 10px 4px; font-size: 13px; color: var(--soft); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; text-decoration-color: rgba(99,99,107,.4); }
+        .hm-link:hover { color: var(--bad); text-decoration-color: currentColor; }
+
+        .hm-route { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; margin-top: 16px; padding: 14px; background: var(--tint); border-radius: 8px; }
+        .hm-route small { display: block; font-size: 11px; color: var(--soft); margin-bottom: 3px; }
+        .hm-route b { display: block; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+        .hm-route svg { width: 18px; height: 18px; color: var(--soft); }
+        .hm-sends { list-style: none; margin: 14px 0 0; padding: 0; font-size: 13px; color: var(--ink-2); }
+        .hm-sends li { display: flex; gap: 8px; margin: 6px 0 0; line-height: 1.45; }
+        .hm-sends .hm-tick { width: 14px; height: 14px; flex: none; margin-top: 2px; color: var(--soft); }
+
+        .hm-note { display: flex; gap: 10px; font-size: 13px; line-height: 1.5; padding: 11px 13px; border-radius: 8px; margin-top: 16px; }
+        .hm-note svg { width: 16px; height: 16px; flex: none; margin-top: 2px; }
+        .hm-note.is-warn { color: var(--warn); background: var(--warn-tint); }
+        .hm-note.is-bad { color: var(--bad); background: var(--bad-tint); }
+        .hm-note.is-bad p, .hm-note.is-warn p { margin: 0; color: inherit; }
+
+        .hm-now { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+        .hm-pct { font-size: 28px; line-height: 1; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+        .hm-bar { height: 8px; margin-top: 14px; background: #ececee; border-radius: 4px; overflow: hidden; }
+        .hm-fill { display: block; height: 100%; width: 0; min-width: 8px; background: var(--ink); border-radius: 4px; transition: width .4s cubic-bezier(.2,0,0,1); }
+        .hm-bar.is-unknown .hm-fill { width: 30% !important; animation: hm-slide 1.4s ease-in-out infinite alternate; }
+        @keyframes hm-slide { from { transform: translateX(-20%); } to { transform: translateX(260%); } }
+        .hm-meta { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; min-height: 18px; margin-top: 8px; font-size: 12px; color: var(--soft); font-variant-numeric: tabular-nums; }
+        .hm-phases { list-style: none; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 18px 0 0; padding: 14px 0 0; border-top: 1px solid var(--line); font-size: 12px; color: var(--soft); }
+        .hm-phases li { display: flex; align-items: center; gap: 6px; margin: 0; }
+        .hm-phases i { width: 8px; height: 8px; border-radius: 50%; background: #d4d4d8; flex: none; }
+        .hm-phases .is-now { color: var(--ink); font-weight: 600; }
+        .hm-phases .is-now i { background: var(--ink); }
+        .hm-phases .is-done i { background: var(--ok); }
+
+        .hm-win { display: flex; align-items: flex-start; gap: 12px; }
+        .hm-win-icon { width: 32px; height: 32px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; color: var(--ok); background: var(--ok-tint); }
+        .hm-win-icon svg { width: 18px; height: 18px; }
+        .hm-next { margin: 16px 0 0 18px; padding: 0; font-size: 13px; line-height: 1.5; color: var(--ink-2); }
+        .hm-next li { margin: 6px 0 0; padding-left: 2px; }
+
+        .hm-warnings { margin-top: 12px; padding: 0 20px; background: #fff; border-radius: 12px; box-shadow: 0 0 0 1px rgba(17,17,19,.08); }
+        .hm-warnings summary { padding: 14px 0; font-size: 13px; font-weight: 600; cursor: pointer; }
+        .hm-warnings ul { list-style: disc; margin: 0 0 16px 18px; padding: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink-2); max-height: 260px; overflow-y: auto; overflow-wrap: anywhere; }
+        .hm-warnings li { margin: 4px 0 0; }
+
+        @media (max-width: 600px) {
+            #hm { margin-top: 12px; }
+            .hm-card { padding: 18px; }
+            .hm-rail li:not(.is-now) .hm-text { display: none; }
+            .hm-route { grid-template-columns: 1fr; }
+            .hm-route svg { transform: rotate(90deg); }
+            .hm-phases { grid-template-columns: repeat(2, 1fr); }
+            .hm-btn { min-height: 44px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .hm-btn, .hm-fill { transition: none; }
+            .hm-btn:active:not(:disabled) { transform: none; }
+            .hm-bar.is-unknown .hm-fill { animation: none; width: 100% !important; opacity: .35; }
+            .hm-spin { animation-duration: 2s; }
+        }
+        </style>
         <div class="wrap" id="hm">
-            <h1>Hyperion Migration</h1>
-            <p>Copies this site to a Hyperion panel. The site here stays online and unchanged.</p>
+            <div class="hm-mark" aria-hidden="true"><b>HY</b>&middot;PERION</div>
+            <h1>Move this site to Hyperion</h1>
+            <p class="hm-sub">Copies the files and the database to your Hyperion panel. This site stays online and unchanged.</p>
+            <hr class="wp-header-end">
 
-            <div id="hm-paste" <?php echo $running ? 'hidden' : ''; ?>>
-                <p>In Hyperion, open <strong>Import → WordPress plugin</strong>, generate a code and paste it here.</p>
-                <p><textarea id="hm-code" rows="4" class="large-text code" spellcheck="false" autocomplete="off"></textarea></p>
-                <p><button type="button" class="button button-primary" id="hm-check">Continue</button></p>
+            <ol class="hm-rail" id="hm-rail" aria-label="Progress">
+                <li data-step="paste"><span class="hm-dot"><span class="hm-num">1</span><?php echo $check; ?></span><span class="hm-text">Code</span></li>
+                <li data-step="confirm"><span class="hm-dot"><span class="hm-num">2</span><?php echo $check; ?></span><span class="hm-text">Confirm</span></li>
+                <li data-step="progress"><span class="hm-dot"><span class="hm-num">3</span><?php echo $check; ?></span><span class="hm-text">Transfer</span></li>
+                <li data-step="done"><span class="hm-dot"><span class="hm-num">4</span><?php echo $check; ?></span><span class="hm-text">Done</span></li>
+            </ol>
+
+            <div class="hm-card">
+                <div id="hm-paste" <?php echo $running ? 'hidden' : ''; ?>>
+                    <h2>Paste the code from Hyperion</h2>
+                    <p>In Hyperion, open <strong>Import &rarr; WordPress plugin</strong> and generate a code. It is only for this transfer, and nothing leaves this site until you confirm the next step.</p>
+                    <label class="hm-label" for="hm-code">Migration code</label>
+                    <textarea id="hm-code" rows="3" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="HYP1.…"></textarea>
+                    <div class="hm-actions">
+                        <button type="button" class="hm-btn is-primary" id="hm-check" disabled><span class="hm-spin"></span>Continue</button>
+                    </div>
+                </div>
+
+                <div id="hm-confirm" hidden>
+                    <h2>Send this site to this panel?</h2>
+                    <div class="hm-route">
+                        <div><small>From this site</small><b id="hm-from"></b></div>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+                        <div><small>To Hyperion panel</small><b id="hm-to"></b></div>
+                    </div>
+                    <ul class="hm-sends">
+                        <li><?php echo $check; ?>The whole database</li>
+                        <li><?php echo $check; ?>All files, apart from caches and old backups</li>
+                        <li><?php echo $check; ?><span><code>wp-config.php</code>, with its passwords and keys</span></li>
+                    </ul>
+                    <div class="hm-note is-warn">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+                        <p>Only continue if you recognise this panel. Whoever runs it gets a full copy of the site.</p>
+                    </div>
+                    <div class="hm-actions">
+                        <button type="button" class="hm-btn is-primary" id="hm-start"><span class="hm-spin"></span>Start transfer</button>
+                        <button type="button" class="hm-btn" id="hm-back">Back</button>
+                    </div>
+                </div>
+
+                <div id="hm-progress" hidden>
+                    <div class="hm-now">
+                        <h2 id="hm-label">Starting&hellip;</h2>
+                        <span class="hm-pct" id="hm-pct">0&nbsp;%</span>
+                    </div>
+                    <div class="hm-bar is-unknown" id="hm-bar" role="progressbar" aria-label="Transfer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="hm-fill" id="hm-fill"></span></div>
+                    <div class="hm-meta"><span id="hm-numbers"></span><span id="hm-eta"></span></div>
+                    <ul class="hm-phases" id="hm-phases">
+                        <li data-phase="scan"><i></i>Listing files</li>
+                        <li data-phase="db"><i></i>Database</li>
+                        <li data-phase="files"><i></i>Files</li>
+                        <li data-phase="commit"><i></i>Handing over</li>
+                    </ul>
+                    <p>Keep this tab open. If it closes, come back to this page and the transfer carries on where it stopped.</p>
+                    <div class="hm-note is-warn" id="hm-wait-box" role="status" hidden>
+                        <p id="hm-waiting"></p>
+                    </div>
+                    <div class="hm-actions">
+                        <button type="button" class="hm-btn is-primary" id="hm-retry" hidden>Try again</button>
+                        <button type="button" class="hm-link" id="hm-cancel">Cancel transfer</button>
+                    </div>
+                </div>
+
+                <div id="hm-done" hidden>
+                    <div class="hm-win">
+                        <span class="hm-win-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
+                        <div>
+                            <h2>Hyperion has the site</h2>
+                            <p>It is being imported there now. You can close this tab.</p>
+                        </div>
+                    </div>
+                    <ol class="hm-next">
+                        <li>Follow the import in Hyperion and check the new site.</li>
+                        <li>Point the domain's DNS at the new server. Mail and DNS records stay where they are.</li>
+                        <li>Delete this plugin. It has already removed its temporary files and the code.</li>
+                    </ol>
+                    <div class="hm-actions">
+                        <a class="hm-btn is-primary" id="hm-job" target="_blank" rel="noopener">Follow the import<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg></a>
+                        <button type="button" class="hm-btn" id="hm-again">Transfer again</button>
+                    </div>
+                </div>
+
+                <div class="hm-note is-bad" id="hm-error" role="alert" hidden>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+                    <p id="hm-error-text"></p>
+                </div>
             </div>
 
-            <div id="hm-confirm" hidden>
-                <div class="notice notice-info inline"><p id="hm-confirm-text"></p></div>
-                <p><button type="button" class="button button-primary" id="hm-start">Start transfer</button>
-                <button type="button" class="button" id="hm-back">Back</button></p>
-            </div>
-
-            <div id="hm-progress" hidden>
-                <p><strong id="hm-label">Starting…</strong> <span id="hm-numbers"></span></p>
-                <progress id="hm-bar" max="100" value="0" style="width:100%;max-width:640px;height:1.5em"></progress>
-                <p class="description">Keep this tab open. If it closes, come back to this page and the transfer continues where it stopped.</p>
-                <p id="hm-waiting" class="description"></p>
-                <p><button type="button" class="button" id="hm-retry" hidden>Try again</button>
-                <button type="button" class="button-link button-link-delete" id="hm-cancel">Cancel transfer</button></p>
-            </div>
-
-            <div id="hm-done" hidden>
-                <div class="notice notice-success inline"><p><strong>Hyperion has the site.</strong> It is importing now. <a id="hm-job" target="_blank" rel="noopener">Follow the import in Hyperion</a>.</p></div>
-                <p>Once you have checked the new site and pointed DNS at it, you can delete this plugin. It has already removed its temporary files and the code.</p>
-                <p><button type="button" class="button" id="hm-again">Transfer again</button></p>
-            </div>
-
-            <div id="hm-error" class="notice notice-error inline" hidden><p id="hm-error-text"></p></div>
-            <div id="hm-warnings" hidden>
-                <h2>Worth checking on the new server</h2>
-                <ul id="hm-warning-list" style="list-style:disc;padding-left:1.5em"></ul>
-            </div>
+            <details class="hm-warnings" id="hm-warnings" hidden>
+                <summary id="hm-warning-title"></summary>
+                <ul id="hm-warning-list"></ul>
+            </details>
         </div>
         <script>
         (function () {
             var ajax = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
             var nonce = <?php echo wp_json_encode(wp_create_nonce(self::NONCE)); ?>;
             var el = function (id) { return document.getElementById('hm-' + id); };
-            var failures = 0, stopped = false;
+            var failures = 0, stopped = false, mark = null;
+            var pageTitle = document.title;
+            var steps = ['paste', 'confirm', 'progress', 'done'];
+            var phases = ['scan', 'db', 'files', 'commit'];
 
             function show(section) {
-                ['paste', 'confirm', 'progress', 'done'].forEach(function (s) { el(s).hidden = s !== section; });
+                steps.forEach(function (s) { el(s).hidden = s !== section; });
+                var now = steps.indexOf(section);
+                [].forEach.call(el('rail').children, function (li, i) {
+                    li.className = i < now || section === 'done' ? 'is-done' : (i === now ? 'is-now' : '');
+                    if (i === now) { li.setAttribute('aria-current', 'step'); } else { li.removeAttribute('aria-current'); }
+                });
+                if (section !== 'progress') { document.title = pageTitle; }
             }
             function fail(message) {
                 el('error-text').textContent = message;
                 el('error').hidden = false;
+            }
+            function clearFail() { el('error').hidden = true; }
+            function busy(button, on) {
+                button.disabled = on;
+                button.classList.toggle('is-busy', on);
+            }
+            function waiting(message) {
+                el('waiting').textContent = message;
+                el('wait-box').hidden = message === '';
             }
             function warnings(list) {
                 if (!list || !list.length) { return; }
                 var ul = el('warning-list');
                 ul.textContent = '';
                 list.forEach(function (w) { var li = document.createElement('li'); li.textContent = w; ul.appendChild(li); });
+                el('warning-title').textContent = list.length === 1 ? '1 thing worth checking on the new server' : list.length + ' things worth checking on the new server';
                 el('warnings').hidden = false;
             }
             function human(n) {
@@ -1276,17 +1618,47 @@ final class Hyperion_Migrate
                 while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
                 return (i ? n.toFixed(1) : n) + ' ' + units[i];
             }
-            // A reply that is not our JSON means the request died: a memory limit,
-            // an execution limit, a web server timeout. Null asks for a smaller slice.
+            function duration(seconds) {
+                var m = Math.ceil(seconds / 60);
+                if (m < 2) { return 'about a minute left'; }
+                if (m < 60) { return 'about ' + m + ' min left'; }
+                var h = Math.floor(m / 60);
+                return 'about ' + h + ' h ' + (m % 60) + ' min left';
+            }
+            // A rate is only worth stating once it has been measured for a while.
+            function eta(d) {
+                if (d.phase !== 'db' && d.phase !== 'files') { return ''; }
+                var now = Date.now();
+                if (!mark) { mark = { t: now, b: d.done_bytes }; return ''; }
+                var secs = (now - mark.t) / 1000, moved = d.done_bytes - mark.b;
+                if (secs < 20 || moved <= 0) { return ''; }
+                return duration(Math.max(0, d.total_bytes - d.done_bytes) / (moved / secs));
+            }
+            // A reply that is not our JSON means the request died: a memory limit, an
+            // execution limit, a web server timeout. Null asks for a smaller slice.
+            // WordPress answers a bare 0 to someone who is no longer logged in, which
+            // is not a dying request and would not get better by retrying.
             function post(action, fields) {
                 var body = new FormData();
                 body.append('action', 'hyperion_migrate_' + action);
                 body.append('nonce', nonce);
                 Object.keys(fields || {}).forEach(function (k) { body.append(k, fields[k]); });
-                return fetch(ajax, { method: 'POST', body: body, credentials: 'same-origin' })
+                var options = { method: 'POST', body: body, credentials: 'same-origin' };
+                // Longer than any slice may take: a request that never answers would
+                // otherwise leave the page waiting for ever.
+                if (window.AbortController) {
+                    var abort = new AbortController();
+                    options.signal = abort.signal;
+                    window.setTimeout(function () { abort.abort(); }, 300000);
+                }
+                return fetch(ajax, options)
                     .then(function (r) { return r.text(); })
                     .then(function (t) {
+                        if (t.trim() === '0' || t.trim() === '-1') {
+                            return { fatal: 'You are no longer logged in to WordPress. Log in again in another tab, then come back and press Try again. Nothing is lost.' };
+                        }
                         var data = JSON.parse(t);
+                        if (!data || typeof data !== 'object') { return null; }
                         if (data.nonce) { nonce = data.nonce; }
                         return data;
                     })
@@ -1294,6 +1666,28 @@ final class Hyperion_Migrate
             }
             function later(fn, seconds) { window.setTimeout(fn, seconds * 1000); }
             function backoff() { return Math.min(30, Math.pow(2, Math.min(failures, 5))); }
+            function halt() {
+                el('bar').classList.remove('is-unknown');
+                el('retry').hidden = false;
+                document.title = pageTitle;
+            }
+            function paint(d) {
+                var listing = d.phase === 'scan' || d.phase === 'begin';
+                var at = phases.indexOf(listing ? 'scan' : d.phase);
+                el('bar').classList.toggle('is-unknown', listing);
+                el('fill').style.width = d.percent + '%';
+                el('bar').setAttribute('aria-valuenow', d.percent);
+                el('label').textContent = d.label;
+                el('pct').textContent = d.percent + ' %';
+                el('numbers').textContent = listing
+                    ? (d.scan_files ? d.scan_files.toLocaleString() + ' files and folders found' : '')
+                    : human(d.done_bytes) + ' of about ' + human(d.total_bytes);
+                el('eta').textContent = eta(d);
+                [].forEach.call(el('phases').children, function (li, i) {
+                    li.className = i < at ? 'is-done' : (i === at ? 'is-now' : '');
+                });
+                document.title = d.percent + ' % · ' + pageTitle;
+            }
 
             function step(shrink) {
                 if (stopped) { return; }
@@ -1302,16 +1696,16 @@ final class Hyperion_Migrate
                     if (d === null) {
                         failures++;
                         if (failures > 12) {
-                            el('waiting').textContent = '';
+                            waiting('');
                             fail('This server keeps stopping the transfer. Nothing is lost, so you can try again now or later.');
-                            el('retry').hidden = false;
+                            halt();
                             return;
                         }
-                        el('waiting').textContent = 'The server stopped a request. Retrying with a smaller piece…';
+                        waiting('The server stopped a request. Retrying with a smaller piece…');
                         later(function () { step(true); }, backoff());
                         return;
                     }
-                    if (d.fatal) { el('retry').hidden = false; warnings(d.warnings); fail(d.fatal); return; }
+                    if (d.fatal) { waiting(''); warnings(d.warnings); fail(d.fatal); halt(); return; }
                     if (d.idle) { show('paste'); return; }
                     if (d.busy) { later(function () { step(false); }, 3); return; }
                     if (d.phase === 'done') {
@@ -1320,40 +1714,48 @@ final class Hyperion_Migrate
                         show('done');
                         return;
                     }
-                    el('bar').value = d.percent;
-                    el('label').textContent = d.label + ' · ' + d.percent + ' %';
-                    el('numbers').textContent = d.total_bytes > 1 ? human(d.done_bytes) + ' of about ' + human(d.total_bytes) : '';
+                    paint(d);
                     if (d.retry) {
                         failures++;
-                        el('waiting').textContent = d.retry;
+                        waiting(d.retry);
                         later(function () { step(false); }, backoff());
                         return;
                     }
                     failures = 0;
-                    el('waiting').textContent = '';
+                    waiting('');
                     step(false);
                 });
             }
             function run() {
-                failures = 0; stopped = false;
-                el('error').hidden = true;
+                failures = 0; stopped = false; mark = null;
+                clearFail();
                 el('retry').hidden = true;
                 show('progress');
                 step(false);
             }
 
+            el('code').addEventListener('input', function () {
+                el('check').disabled = el('code').value.trim() === '';
+                clearFail();
+            });
             el('check').addEventListener('click', function () {
-                el('error').hidden = true;
+                clearFail();
+                busy(el('check'), true);
                 post('check', { code: el('code').value }).then(function (d) {
+                    busy(el('check'), false);
                     if (d === null) { fail('This server did not answer. Try again.'); return; }
                     if (d.fatal) { fail(d.fatal); return; }
-                    el('confirm-text').textContent = 'This will send ' + d.site + ', including its database and wp-config.php with its passwords, to the Hyperion panel at ' + d.panel + '. Only continue if that is your panel.';
+                    el('from').textContent = d.site.replace(/^https?:\/\//, '');
+                    el('to').textContent = d.panel;
                     show('confirm');
                 });
             });
-            el('back').addEventListener('click', function () { show('paste'); });
+            el('back').addEventListener('click', function () { clearFail(); show('paste'); });
             el('start').addEventListener('click', function () {
+                clearFail();
+                busy(el('start'), true);
                 post('start', { code: el('code').value }).then(function (d) {
+                    busy(el('start'), false);
                     if (d === null) { fail('This server did not answer. Try again.'); return; }
                     if (d.fatal) { fail(d.fatal); return; }
                     run();
@@ -1361,14 +1763,29 @@ final class Hyperion_Migrate
             });
             el('retry').addEventListener('click', run);
             el('cancel').addEventListener('click', function () {
+                if (!window.confirm('Stop this transfer? What has been sent so far is discarded on both sides, and starting again begins from zero.')) { return; }
                 stopped = true;
-                post('cancel').then(function () { el('warnings').hidden = true; el('error').hidden = true; show('paste'); });
+                busy(el('cancel'), true);
+                post('cancel').then(function () {
+                    busy(el('cancel'), false);
+                    el('warnings').hidden = true;
+                    clearFail();
+                    waiting('');
+                    show('paste');
+                });
             });
             el('again').addEventListener('click', function () {
-                post('cancel').then(function () { el('warnings').hidden = true; show('paste'); });
+                post('cancel').then(function () {
+                    el('warnings').hidden = true;
+                    el('code').value = '';
+                    el('check').disabled = true;
+                    show('paste');
+                });
             });
             <?php if ($running) : ?>
             run();
+            <?php else : ?>
+            show('paste');
             <?php endif; ?>
         })();
         </script>
