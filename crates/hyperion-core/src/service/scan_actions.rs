@@ -253,19 +253,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// The action happened whatever comes of this, so a failure is only logged.
     pub(super) async fn request_rescan(&self, hosting_id: &str) {
-        let now = now_secs();
-        if let Err(e) = hyperion_state::hosting_kv::set(
-            &self.pool,
-            hosting_id,
-            SCAN_REQUESTED_KV_KEY,
-            &now.to_string(),
-            now,
-        )
-        .await
-        {
-            tracing::warn!(error = %e, "site scan: re-scan not requested");
-        }
-        self.site_scan.wake.notify_one();
+        request_rescan_in(&self.pool, &self.site_scan, hosting_id).await;
     }
 
     /// Move one reported file to quarantine.
@@ -638,4 +626,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             output_tail: out.output_tail,
         })
     }
+}
+
+/// [`HostingService::request_rescan`] for work that outlives the call.
+pub(super) async fn request_rescan_in(
+    pool: &SqlitePool,
+    shared: &SiteScanShared,
+    hosting_id: &str,
+) {
+    let now = now_secs();
+    if let Err(e) = hyperion_state::hosting_kv::set(
+        pool,
+        hosting_id,
+        SCAN_REQUESTED_KV_KEY,
+        &now.to_string(),
+        now,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "site scan: re-scan not requested");
+    }
+    shared.wake.notify_one();
 }

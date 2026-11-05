@@ -323,9 +323,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// What Hyperion's per-site mail module should be on this site: rendered
     /// from the same inputs the install tick uses, so the scan can compare the
     /// file with it instead of taking it on trust.
-    async fn scan_own_expected(&self, detail: &HostingDetail) -> BTreeMap<String, [u8; 32]> {
+    ///
+    /// Only for a site the install tick looks after: one that is active and has the
+    /// auto-configure switch on. Otherwise its file is whatever an older release
+    /// wrote and nothing will bring it up to date, so a comparison would raise a
+    /// finding that means nothing; the rules still run on it.
+    pub(super) async fn scan_own_expected(
+        &self,
+        detail: &HostingDetail,
+    ) -> BTreeMap<String, [u8; 32]> {
         use hyperion_adapters::{wpmail, wpplugin};
         let id = detail.id.as_str();
+        if detail.state != HostingState::Active || !self.wp_mail_autofix_enabled(id).await {
+            return BTreeMap::new();
+        }
         let from = self.wp_mail_from_address(id, &detail.domain).await;
         let (policy, _) = self.wp_mail_policy(id).await;
         let log = wpmail::failure_log_path(detail.root_dir.trim())
@@ -338,37 +349,60 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )])
     }
 
-    /// A writer of ours has finished changing the site's files: hash what it left,
-    /// in the worker's own unit so it doesn't wait behind a scan, and queue the
-    /// site's scan. If the hash fails nothing is recorded and the scan reviews the
-    /// changes like any others. Call it after the writer's last step, permission
-    /// repair included. A site that isn't scanned is left alone.
+    /// A writer of ours has finished changing the site's files. Call it LAST, after
+    /// whatever else the action does: the hashing is detached, in the worker's own
+    /// unit so it doesn't wait behind a scan, and this returns at once. The handle
+    /// is for tests.
+    ///
+    /// `paths` is what the writer wrote, and only a writer that replaces the whole
+    /// tree may say `All`. `None`, a list with no code in it that fits, a failed
+    /// hash or a site that isn't scanned record no list: the scan then reviews the
+    /// changes like any others. The scan is queued either way, except for a site
+    /// that isn't scanned, which is left alone.
     pub(super) async fn scan_writer_done(
         &self,
         detail: &HostingDetail,
         kind: WriterKind,
-        paths: WriterPaths,
-    ) {
+        paths: Option<WriterPaths>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let id = detail.id.as_str();
         if !kind_has_files(&detail.kind) || !self.integrity_scan_enabled(id).await {
-            return;
+            return None;
         }
+        // Code types only, and a list too big to send is no list.
+        let paths = match paths {
+            Some(WriterPaths::List(names)) => accept::code_names(names).map(WriterPaths::List),
+            other => other,
+        };
+        let Some(paths) = paths else {
+            tracing::debug!(domain = %detail.domain, "site scan: no list for this writer");
+            self.request_rescan(id).await;
+            return None;
+        };
         let job = WorkerJob::WriterHash {
             root: PathBuf::from(&detail.root_dir),
             kind,
             paths,
             out: self.accepted_path(id),
         };
-        match self.adapters.site_scan_worker(job).await {
-            WorkerReply::Hashed { listed, partial } => {
-                tracing::debug!(domain = %detail.domain, listed, partial, "site scan: writer's files hashed");
+        let (adapters, pool, shared) = (
+            self.adapters.clone(),
+            self.pool.clone(),
+            self.site_scan.clone(),
+        );
+        let (id, domain) = (id.to_string(), detail.domain.clone());
+        Some(tokio::spawn(async move {
+            match adapters.site_scan_worker(job).await {
+                WorkerReply::Hashed { listed, partial } => {
+                    tracing::debug!(%domain, listed, partial, "site scan: writer's files hashed");
+                }
+                other => tracing::warn!(
+                    %domain, why = ?other,
+                    "site scan: the writer's files were not hashed; its changes get reviewed"
+                ),
             }
-            other => tracing::warn!(
-                domain = %detail.domain, why = ?other,
-                "site scan: the writer's files were not hashed; its changes get reviewed"
-            ),
-        }
-        self.request_rescan(id).await;
+            super::scan_actions::request_rescan_in(&pool, &shared, &id).await;
+        }))
     }
 
     /// The value of this hosting's request, if one stands.

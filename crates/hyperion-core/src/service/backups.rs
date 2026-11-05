@@ -1886,6 +1886,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let host_root = std::path::PathBuf::from(&self.paths.home_root)
             .join(&detail.system_user)
             .join(&detail.domain);
+        // What the files step wrote, to be hashed once the rest of the restore is
+        // done: `Some(None)` is a restore that can't say what it wrote.
+        let mut restored: Option<Option<WriterPaths>> = None;
         if mode.restores_files() {
             tracing::info!(domain = %detail.domain, archive = %canonical.display(),
                 mode = mode.as_str(), "restoring backup files");
@@ -1895,10 +1898,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let restore_result =
                 hyperion_adapters::backup::restore_archive_listing(&canonical, &host_root).await;
             let listed = match restore_result {
+                // `None` when the archive can't be listed (too many members, a name
+                // that isn't UTF-8): no list, and the scan reviews as usual.
                 Ok((_, names)) => names,
                 Err(e) => {
-                    // Part of the archive may be in the tree.
-                    self.scan_writer_done(&detail, WriterKind::Restore, WriterPaths::All)
+                    // Part of the archive may be in the tree, and nothing says
+                    // which: no list. A tenant can make this fail with any garbage
+                    // upload, so it must never become "everything".
+                    let _ = self
+                        .scan_writer_done(&detail, WriterKind::Restore, None)
                         .await;
                     return Err(RpcError::ProvisioningFailed {
                         stage: "tar_extract".into(),
@@ -1919,47 +1927,58 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "restore: permission repair failed — the site may be unwritable"
                 );
             }
-            let paths = listed.map_or(WriterPaths::All, WriterPaths::List);
-            self.scan_writer_done(&detail, WriterKind::Restore, paths)
-                .await;
+            restored = Some(listed.map(WriterPaths::List));
         }
 
         // 2. Look for sibling .sql dump and restore it if hosting has a DB
         //    (unless files-only). For db-only restores a missing dump is
         //    an error — the operator explicitly asked to put a DB back.
-        if mode.restores_db() {
-            let mut dump_found = false;
-            if let Some(sibling) = sibling_dump.as_ref() {
-                if !sibling.exists() && dump_at_start && detail.database.is_some() {
-                    return Err(RpcError::ProvisioningFailed {
-                        stage: "db_restore".into(),
-                        reason: "the backup's database dump disappeared while the files were \
+        let db_step: Result<(), RpcError> = async {
+            if mode.restores_db() {
+                let mut dump_found = false;
+                if let Some(sibling) = sibling_dump.as_ref() {
+                    if !sibling.exists() && dump_at_start && detail.database.is_some() {
+                        return Err(RpcError::ProvisioningFailed {
+                            stage: "db_restore".into(),
+                            reason: "the backup's database dump disappeared while the files were \
                                  being restored — the files were put back, the database was \
                                  NOT; restore the database again from this backup's off-site \
                                  copy"
-                            .into(),
-                    });
-                }
-                if sibling.exists() {
-                    dump_found = true;
-                    if let Some(db) = &detail.database {
-                        let restore = self.restore_db_dump(&detail.id, db, sibling).await;
-                        if let Err(e) = restore {
-                            return Err(RpcError::ProvisioningFailed {
-                                stage: "db_restore".into(),
-                                reason: e.to_string(),
-                            });
+                                .into(),
+                        });
+                    }
+                    if sibling.exists() {
+                        dump_found = true;
+                        if let Some(db) = &detail.database {
+                            let restore = self.restore_db_dump(&detail.id, db, sibling).await;
+                            if let Err(e) = restore {
+                                return Err(RpcError::ProvisioningFailed {
+                                    stage: "db_restore".into(),
+                                    reason: e.to_string(),
+                                });
+                            }
                         }
                     }
                 }
-            }
-            if mode == hyperion_types::BackupRestoreMode::DbOnly && !dump_found {
-                return Err(RpcError::Validation {
-                    message: "db-only restore requested but this backup has no .sql dump \
+                if mode == hyperion_types::BackupRestoreMode::DbOnly && !dump_found {
+                    return Err(RpcError::Validation {
+                        message: "db-only restore requested but this backup has no .sql dump \
                               (the hosting may have had no database when it was taken)"
-                        .into(),
-                });
+                            .into(),
+                    });
+                }
             }
+            Ok(())
+        }
+        .await;
+        if let Err(e) = db_step {
+            // The files were put back all the same.
+            if let Some(paths) = restored {
+                let _ = self
+                    .scan_writer_done(&detail, WriterKind::Restore, paths)
+                    .await;
+            }
+            return Err(e);
         }
 
         self.append_audit(
@@ -1975,6 +1994,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await;
         self.purge_page_cache_after(detail.id.as_str(), "hosting.restore")
             .await;
+        // Last: the hashing is detached, and nothing above waits for it.
+        if let Some(paths) = restored {
+            let _ = self
+                .scan_writer_done(&detail, WriterKind::Restore, paths)
+                .await;
+        }
 
         Ok(())
     }

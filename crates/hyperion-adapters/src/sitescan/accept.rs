@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use super::scan::{is_layer_b_code, WriterAccepted, WriterKind};
-use super::walk::{TenantRoot, WalkEvent, WalkOpts};
+use super::walk::{EntryKind, TenantRoot, WalkEvent, WalkOpts};
 use crate::AdapterError;
 
 /// A record this old is not about anything still pending.
@@ -41,12 +41,42 @@ const PAUSE_EVERY_FILES: u64 = 256;
 const RECORD_MAX_BYTES: u64 = 48 * 1024 * 1024;
 
 /// Which files a writer's hash covers.
+///
+/// `All` lists every code file as it stands, so whatever was waiting for review
+/// is accepted along with the writer's own files. Only a writer that replaces the
+/// whole tree may ask for it. A tenant can make a writer fail or its list come
+/// out unreadable, so a writer that can't say what it wrote records no list at
+/// all, and the scan reviews the changes as it always did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WriterPaths {
-    /// Every code file in the tree: the writer can't say what it changed.
+    /// Every code file in the tree.
     All,
+    /// Every code file below this directory, relative to the docroot.
+    Under(String),
     /// These, relative to the docroot.
     List(Vec<String>),
+}
+
+/// The most bytes of names one list may carry, which also bounds the job.
+pub const LIST_NAMES_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// A writer's names as the agent sends them: only code types, and `None` when
+/// they come to more than [`LIST_NAMES_MAX_BYTES`]. Never turned into "all of
+/// it": a list too big to send is no list.
+pub fn code_names(names: Vec<String>) -> Option<Vec<String>> {
+    let mut bytes = 0usize;
+    let mut out = Vec::new();
+    for n in names {
+        if !is_layer_b_code(&n) {
+            continue;
+        }
+        bytes = bytes.saturating_add(n.len() + 1);
+        if bytes > LIST_NAMES_MAX_BYTES {
+            return None;
+        }
+        out.push(n);
+    }
+    Some(out)
 }
 
 /// What the worker writes, one per hosting. Hashes are hex.
@@ -148,6 +178,38 @@ pub fn writer_hash(
                 }
             }
         }
+        WriterPaths::Under(dir) => {
+            // By hand, one directory at a time, each reached from the root
+            // without following a link: the jail has no walk that starts below it.
+            let mut todo = vec![dir.clone()];
+            let mut looked = 0u64;
+            'dirs: while let Some(d) = todo.pop() {
+                let Ok(listing) = tenant.list_dir(&d, WALK_MAX_ENTRIES as usize) else {
+                    continue;
+                };
+                for ent in listing.entries {
+                    looked += 1;
+                    if looked > WALK_MAX_ENTRIES || looked % PAUSE_EVERY_FILES == 0 && pause() {
+                        h.partial = true;
+                        break 'dirs;
+                    }
+                    let rel = format!("{d}/{}", ent.name);
+                    match ent.kind {
+                        EntryKind::Dir => todo.push(rel),
+                        EntryKind::File => {
+                            if files.len() >= LISTED_MAX {
+                                h.partial = true;
+                                break 'dirs;
+                            }
+                            if let Some(sha) = h.hash(&tenant, &rel) {
+                                files.insert(rel, hex::encode(sha));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         WriterPaths::All => {
             let opts = WalkOpts {
                 max_entries: WALK_MAX_ENTRIES,
@@ -177,9 +239,13 @@ pub fn writer_hash(
     }
 
     let now = unix_secs();
-    let mut merged = match read_record(out) {
-        Some(old) if old.kind == kind && now - old.written_at < ACCEPT_TTL_SECS => old.files,
-        _ => BTreeMap::new(),
+    // Added to a fresh record of the same kind, which keeps its age: pushes that
+    // change nothing mustn't keep old entries alive for ever.
+    let (mut merged, written_at) = match read_record(out) {
+        Some(old) if old.kind == kind && now - old.written_at < ACCEPT_TTL_SECS => {
+            (old.files, old.written_at)
+        }
+        _ => (BTreeMap::new(), now),
     };
     merged.extend(files);
     if merged.len() > LISTED_MAX {
@@ -193,7 +259,7 @@ pub fn writer_hash(
         out,
         &AcceptedRecord {
             kind,
-            written_at: now,
+            written_at,
             files: merged,
         },
     )?;

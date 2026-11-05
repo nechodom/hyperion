@@ -1417,6 +1417,8 @@ impl Rig {
             }
         });
         a.expect_site_scan_evict_manifests().returning(|_| ());
+        a.expect_wp_plugin_action()
+            .returning(|_, _, _, _| Err(AdapterError::Other("no wp-cli here".into())));
         let pool = open_memory().await.expect("open");
         let s = svc(pool.clone(), a).with_paths(HostingPaths {
             home_root: base.join("home").display().to_string(),
@@ -1462,6 +1464,28 @@ impl Rig {
         std::fs::write(p, body).expect("write");
     }
 
+    /// A writer finishing, and its detached hashing run to the end.
+    async fn done(&self, kind: WriterKind, paths: WriterPaths) {
+        let handle = self
+            .s
+            .scan_writer_done(&self.detail, kind, Some(paths))
+            .await;
+        if let Some(h) = handle {
+            h.await.expect("hash task");
+        }
+    }
+
+    /// Detached work started by an action: wait until it has had its say.
+    async fn settle(&self) {
+        for _ in 0..100 {
+            if !self.hashes.lock().expect("lock").is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
     async fn tick(&self) {
         self.s
             .site_scan_tick_at(&chrono::Utc, 2_000_000)
@@ -1487,8 +1511,7 @@ fn sha_hex(b: &str) -> String {
 async fn a_finished_writer_is_hashed_in_the_workers_own_unit_and_its_scan_queued() {
     let r = Rig::new(really_hash, clean_scan).await;
     r.write("a.php", "<?php // a\n");
-    r.s.scan_writer_done(
-        &r.detail,
+    r.done(
         WriterKind::GitDeploy,
         WriterPaths::List(vec![
             "a.php".into(),
@@ -1510,7 +1533,9 @@ async fn a_finished_writer_is_hashed_in_the_workers_own_unit_and_its_scan_queued
     };
     assert_eq!(root, Path::new(&r.detail.root_dir));
     assert_eq!(*kind, WriterKind::GitDeploy);
-    assert!(matches!(paths, WriterPaths::List(l) if l.len() == 3));
+    // Only the code type went out: the traversal and the text file were dropped by
+    // the agent before the worker ever saw them.
+    assert_eq!(*paths, WriterPaths::List(vec!["a.php".into()]));
     assert_eq!(out, &r.list_path());
     assert!(r.s.scan_request_flag(r.id()).await.is_some());
 
@@ -1529,12 +1554,8 @@ async fn a_finished_writer_is_hashed_in_the_workers_own_unit_and_its_scan_queued
 async fn the_scan_after_a_writer_is_handed_its_list_and_spends_it() {
     let r = Rig::new(really_hash, clean_scan).await;
     r.write("a.php", "<?php // a\n");
-    r.s.scan_writer_done(
-        &r.detail,
-        WriterKind::Restore,
-        WriterPaths::List(vec!["a.php".into()]),
-    )
-    .await;
+    r.done(WriterKind::Restore, WriterPaths::List(vec!["a.php".into()]))
+        .await;
     r.tick().await;
 
     let inputs = r.inputs.lock().expect("lock");
@@ -1557,8 +1578,7 @@ async fn a_scan_that_did_not_finish_leaves_the_list() {
     })
     .await;
     r.write("a.php", "<?php // a\n");
-    r.s.scan_writer_done(
-        &r.detail,
+    r.done(
         WriterKind::GitDeploy,
         WriterPaths::List(vec!["a.php".into()]),
     )
@@ -1588,8 +1608,7 @@ async fn a_list_written_during_the_scan_stays() {
     })
     .await;
     r.write("a.php", "<?php // a\n");
-    r.s.scan_writer_done(
-        &r.detail,
+    r.done(
         WriterKind::GitDeploy,
         WriterPaths::List(vec!["a.php".into()]),
     )
@@ -1620,8 +1639,7 @@ async fn a_list_older_than_seven_days_is_ignored_and_removed() {
 async fn a_failed_hash_job_means_normal_review() {
     let r = Rig::new(|_| WorkerReply::Failed("boom".into()), clean_scan).await;
     r.write("a.php", "<?php // a\n");
-    r.s.scan_writer_done(
-        &r.detail,
+    r.done(
         WriterKind::GitDeploy,
         WriterPaths::List(vec!["a.php".into()]),
     )
@@ -1639,8 +1657,11 @@ async fn a_site_that_is_not_scanned_is_not_hashed() {
     hyperion_state::hosting_kv::set(&r.pool, r.id(), "integrity_scan_enabled", "off", 1)
         .await
         .expect("kv");
-    r.s.scan_writer_done(&r.detail, WriterKind::GitDeploy, WriterPaths::All)
-        .await;
+    r.done(
+        WriterKind::GitDeploy,
+        WriterPaths::List(vec!["a.php".into()]),
+    )
+    .await;
     assert!(r.hashes.lock().expect("lock").is_empty());
     assert_eq!(r.s.scan_request_flag(r.id()).await, None);
 }
@@ -1649,8 +1670,7 @@ async fn a_site_that_is_not_scanned_is_not_hashed() {
 async fn a_purged_site_leaves_no_list() {
     let r = Rig::new(really_hash, clean_scan).await;
     r.write("a.php", "<?php // a\n");
-    r.s.scan_writer_done(
-        &r.detail,
+    r.done(
         WriterKind::GitDeploy,
         WriterPaths::List(vec!["a.php".into()]),
     )
@@ -1684,22 +1704,28 @@ async fn the_mail_module_is_handed_to_the_scan_as_rendered() {
 
 /// The deploy's half: its record, then the hash of exactly what it named.
 #[tokio::test]
-async fn a_successful_deploy_hashes_what_it_changed_and_a_failed_one_nothing() {
+async fn a_successful_deploy_hashes_what_it_changed_and_one_that_cant_say_nothing() {
     use hyperion_adapters::gitsync::Deployed;
     use hyperion_types::gitsync::GitSyncLast;
     let r = Rig::new(really_hash, clean_scan).await;
     r.write("a.php", "<?php // a\n");
-    let ok = Deployed {
+    let deployed = |paths| Deployed {
         last: GitSyncLast {
             commit: "abc1234".into(),
             status: "ok".into(),
             ..Default::default()
         },
-        paths: WriterPaths::List(vec!["a.php".into()]),
+        paths,
     };
-    r.s.git_sync_finish(&r.detail, Ok(ok), "manual".into(), "me".into())
-        .await
-        .expect("recorded");
+    r.s.git_sync_finish(
+        &r.detail,
+        Ok(deployed(Some(WriterPaths::List(vec!["a.php".into()])))),
+        "manual".into(),
+        "me".into(),
+    )
+    .await
+    .expect("recorded");
+    r.settle().await;
     {
         let jobs = r.hashes.lock().expect("lock");
         let [WorkerJob::WriterHash { kind, paths, .. }] = jobs.as_slice() else {
@@ -1709,7 +1735,22 @@ async fn a_successful_deploy_hashes_what_it_changed_and_a_failed_one_nothing() {
         assert_eq!(*paths, WriterPaths::List(vec!["a.php".into()]));
     }
 
+    // A first checkout, an unknown previous revision, a diff that didn't come out:
+    // no list, never everything. The scan is still queued.
     r.hashes.lock().expect("lock").clear();
+    std::fs::remove_file(r.list_path()).expect("rm");
+    hyperion_state::hosting_kv::delete(&r.pool, r.id(), "scan_requested")
+        .await
+        .expect("kv");
+    r.s.git_sync_finish(&r.detail, Ok(deployed(None)), "webhook".into(), "me".into())
+        .await
+        .expect("recorded");
+    r.settle().await;
+    assert!(r.hashes.lock().expect("lock").is_empty());
+    assert!(!r.list_path().exists());
+    assert!(r.s.scan_request_flag(r.id()).await.is_some());
+
+    // And a deploy that failed has nothing to hash at all.
     let err =
         r.s.git_sync_finish(
             &r.detail,
@@ -1719,6 +1760,7 @@ async fn a_successful_deploy_hashes_what_it_changed_and_a_failed_one_nothing() {
         )
         .await;
     assert!(err.is_err());
+    r.settle().await;
     assert!(r.hashes.lock().expect("lock").is_empty());
 }
 
@@ -1754,6 +1796,7 @@ async fn a_restore_hashes_the_archive_members() {
     )
     .await
     .expect("restore");
+    r.settle().await;
 
     let jobs = r.hashes.lock().expect("lock").clone();
     let [WorkerJob::WriterHash { kind, paths, .. }] = jobs.as_slice() else {
@@ -1765,7 +1808,8 @@ async fn a_restore_hashes_the_archive_members() {
     };
     let mut names = names.clone();
     names.sort();
-    assert_eq!(names, ["index.php", "readme.txt", "wp-content/x.js"]);
+    // The text file was dropped by the agent: only code is hashed.
+    assert_eq!(names, ["index.php", "wp-content/x.js"]);
     assert!(r.s.scan_request_flag(r.id()).await.is_some());
     // Hashed after the extraction: the code files are on the list, with the
     // content they have now.
@@ -1773,4 +1817,213 @@ async fn a_restore_hashes_the_archive_members() {
         panic!("no list")
     };
     assert_eq!(got.files.len(), 2);
+}
+
+/// What a tenant can make fail must not become "list everything": a garbage upload
+/// restores nothing, and the file already waiting for review is still waiting.
+#[tokio::test]
+async fn a_failed_restore_upload_records_no_list() {
+    let r = Rig::new(really_hash, clean_scan).await;
+    let backups = r.scan_dir.parent().expect("base").join("backups");
+    std::fs::create_dir_all(&backups).expect("mkdir");
+    let garbage = backups.join("junk.tar.gz");
+    std::fs::write(&garbage, b"this is not a tar.gz at all").expect("write");
+    r.write("pending.php", "<?php // quiet\n");
+
+    let err =
+        r.s.backup_restore(
+            HostingSelector::Id(r.detail.id.clone()),
+            garbage.display().to_string(),
+            hyperion_types::BackupRestoreMode::FilesOnly,
+        )
+        .await;
+    assert!(err.is_err());
+    r.settle().await;
+    assert!(r.hashes.lock().expect("lock").is_empty(), "no hash job");
+    assert!(!r.list_path().exists());
+    // The scan still goes ahead, handed nothing to accept.
+    assert!(r.s.scan_request_flag(r.id()).await.is_some());
+    r.tick().await;
+    assert!(r.inputs.lock().expect("lock")[0].accepted.is_none());
+}
+
+/// A list too big to send is no list; and anything that is not code never goes.
+#[tokio::test]
+async fn a_list_over_the_cap_records_nothing() {
+    let r = Rig::new(really_hash, clean_scan).await;
+    let big = |c: char| format!("{}.php", c.to_string().repeat(6 * 1024 * 1024));
+    r.s.scan_writer_done(
+        &r.detail,
+        WriterKind::GitDeploy,
+        Some(WriterPaths::List(vec![big('a'), big('b'), big('c')])),
+    )
+    .await;
+    assert!(r.hashes.lock().expect("lock").is_empty());
+    assert!(r.s.scan_request_flag(r.id()).await.is_some());
+    assert!(
+        accept::code_names(vec!["a.php".into(), "b.txt".into(), "c/.htaccess".into()])
+            == Some(vec!["a.php".into(), "c/.htaccess".into()])
+    );
+}
+
+/// A plugin folder coming back is the one thing an emergency restore wrote.
+#[tokio::test]
+async fn emergency_restore_accepts_only_its_own_folder() {
+    let r = Rig::new(really_hash, clean_scan).await;
+    r.write("wp-content/plugins/foo-old/foo.php", "<?php // foo\n");
+    r.write("wp-content/plugins/foo-old/inc/a.php", "<?php // a\n");
+    r.write(
+        "wp-content/plugins/other/o.php",
+        "<?php // pending, quiet\n",
+    );
+    r.write("custom.php", "<?php // pending, quiet\n");
+    // The plugin action that follows the rename is best-effort.
+    let _ =
+        r.s.wp_emergency_restore(HostingSelector::Id(r.detail.id.clone()), "foo".into())
+            .await;
+    r.settle().await;
+
+    let jobs = r.hashes.lock().expect("lock").clone();
+    let [WorkerJob::WriterHash { paths, .. }] = jobs.as_slice() else {
+        panic!("{jobs:?}")
+    };
+    assert_eq!(*paths, WriterPaths::Under("wp-content/plugins/foo".into()));
+    let accept::Loaded::Found(got, _) = accept::load_accepted(&r.list_path(), 1) else {
+        panic!("no list")
+    };
+    let mut names: Vec<&str> = got.files.keys().map(String::as_str).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "wp-content/plugins/foo/foo.php",
+            "wp-content/plugins/foo/inc/a.php"
+        ]
+    );
+}
+
+/// The hashing is detached: the writer's caller gets its answer first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_caller_does_not_wait_for_the_hash() {
+    static RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    fn slow(job: WorkerJob) -> WorkerReply {
+        while !RELEASE.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        execute(job, &|| false)
+    }
+    let r = Rig::new(slow, clean_scan).await;
+    r.write("a.php", "<?php // a\n");
+    let started = std::time::Instant::now();
+    let handle =
+        r.s.scan_writer_done(
+            &r.detail,
+            WriterKind::GitDeploy,
+            Some(WriterPaths::List(vec!["a.php".into()])),
+        )
+        .await
+        .expect("detached");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(
+        !handle.is_finished(),
+        "returned while the job is still running"
+    );
+    assert_eq!(r.s.scan_request_flag(r.id()).await, None, "not queued yet");
+    RELEASE.store(true, std::sync::atomic::Ordering::SeqCst);
+    handle.await.expect("task");
+    assert!(r.s.scan_request_flag(r.id()).await.is_some());
+    assert!(r.list_path().exists());
+}
+
+/// "Everything" is for the writer that replaces the whole tree, and for nothing a
+/// tenant can make fail or make say a lot.
+#[test]
+fn all_is_only_for_snapshot_restore() {
+    for (name, src) in [
+        ("backups.rs", include_str!("../backups.rs")),
+        ("git_sync.rs", include_str!("../git_sync.rs")),
+        ("wp.rs", include_str!("../wp.rs")),
+        ("scan_queue.rs", include_str!("../scan_queue.rs")),
+        (
+            "gitsync.rs",
+            include_str!("../../../../hyperion-adapters/src/gitsync.rs"),
+        ),
+        (
+            "backup.rs",
+            include_str!("../../../../hyperion-adapters/src/backup.rs"),
+        ),
+    ] {
+        let code = src.split("#[cfg(test)]").next().expect("code");
+        let uses: Vec<&str> = code
+            .lines()
+            .filter(|l| l.contains("WriterPaths::All") && !l.trim_start().starts_with("//"))
+            .collect();
+        assert!(uses.is_empty(), "{name} lists everything: {uses:?}");
+    }
+    let snap = include_str!("../snapshots.rs");
+    assert_eq!(snap.matches("WriterPaths::All").count(), 1);
+}
+
+/// The hashing is the last thing each action does, after the steps that matter to
+/// the site: the plugin deactivation, the database, the cache purge.
+#[test]
+fn the_hash_is_the_last_step_of_each_writer() {
+    let last_call = |src: &str| src.rfind("scan_writer_done(").expect("a call");
+    let wp = include_str!("../wp.rs");
+    let at = wp.find("pub async fn wp_emergency_restore").expect("fn");
+    let body = &wp[at..];
+    assert!(
+        body.find("WpPluginAction::Deactivate").expect("deactivate")
+            < body.find("scan_writer_done(").expect("call")
+    );
+    let backups = include_str!("../backups.rs");
+    let at = backups.find("pub async fn backup_restore(").expect("fn");
+    let body = &backups[at..];
+    let end = body
+        .find("pub(super) async fn backup_owned_by")
+        .expect("end");
+    let body = &body[..end];
+    assert!(
+        body.rfind("self.purge_page_cache_after").expect("purge")
+            < body.rfind("scan_writer_done(").expect("call")
+    );
+    assert!(
+        body.find("restore_db_dump").expect("db") < body.rfind("scan_writer_done(").expect("call")
+    );
+    let git = include_str!("../git_sync.rs");
+    let at = git.find("pub(super) async fn git_sync_finish").expect("fn");
+    let body = &git[at..];
+    assert!(
+        body.find("purge_page_cache_after(").expect("purge")
+            < body.find("scan_writer_done(").expect("call")
+    );
+    let snap = include_str!("../snapshots.rs");
+    let at = snap.find("pub async fn snapshot_restore").expect("fn");
+    let body = &snap[at..];
+    assert!(
+        body.find("import_restored_dump(").expect("db")
+            < body
+                .find("snapshot_files_hashed(&detail, mode).await;\n        Ok(")
+                .expect("call")
+    );
+    let _ = last_call;
+}
+
+/// The mail module is compared with the agent's rendering only where the install
+/// tick keeps it current.
+#[tokio::test]
+async fn the_mail_module_is_compared_only_where_the_tick_looks_after_it() {
+    let r = Rig::new(really_hash, clean_scan).await;
+    assert_eq!(r.s.scan_own_expected(&r.detail).await.len(), 1);
+    // A suspended site is skipped by the tick.
+    let mut suspended = r.detail.clone();
+    suspended.state = HostingState::Suspended;
+    assert!(r.s.scan_own_expected(&suspended).await.is_empty());
+    // So is one with the auto-configure switch off.
+    r.s.wp_mail_autofix_set(HostingSelector::Id(r.detail.id.clone()), false)
+        .await
+        .expect("set");
+    assert!(r.s.scan_own_expected(&r.detail).await.is_empty());
+    r.tick().await;
+    assert!(r.inputs.lock().expect("lock")[0].own_expected.is_empty());
 }

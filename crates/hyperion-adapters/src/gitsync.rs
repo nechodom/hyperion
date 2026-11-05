@@ -383,9 +383,11 @@ pub async fn sync(p: SyncParams<'_>) -> Result<GitSyncLast, (String, String)> {
 /// A deploy, and which code files it changed in the webroot.
 pub struct Deployed {
     pub last: GitSyncLast,
-    /// Relative to the webroot. [`WriterPaths::All`] when the deploy can't say:
-    /// a first checkout, or a diff that didn't come out.
-    pub paths: WriterPaths,
+    /// The files the commit changed, relative to the webroot. `None` when the
+    /// deploy can't say (a first checkout, an unknown previous revision, a diff
+    /// that didn't come out): no list is recorded then, and the scan reviews the
+    /// changes like any others. Never "everything".
+    pub paths: Option<WriterPaths>,
 }
 
 /// [`sync`], with the names of the files the commit changed. They come from
@@ -616,7 +618,7 @@ async fn sync_inner(
     let paths = match (before, after) {
         (Some(b), Some(a)) if is_rev(&b) && is_rev(&a) => {
             if b == a {
-                WriterPaths::List(Vec::new())
+                Some(WriterPaths::List(Vec::new()))
             } else {
                 match git(
                     in_repo(&["diff", "--name-only", "-z", "--no-renames", &b, &a]),
@@ -625,11 +627,11 @@ async fn sync_inner(
                 .await
                 {
                     Ok(out) => changed_paths(&out, p.subdir),
-                    Err(_) => WriterPaths::All,
+                    Err(_) => None,
                 }
             }
         }
-        _ => WriterPaths::All,
+        _ => None,
     };
 
     // Mirror the tree (or a sub-directory of it) into the webroot, dropping
@@ -692,18 +694,18 @@ fn is_rev(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Most names a diff may carry before the deploy just says "everything".
+/// Most names a diff may carry before the deploy says nothing about them.
 const CHANGED_MAX: usize = 200_000;
 
 /// The webroot-relative names in `git diff --name-only -z` output. The checkout
 /// holds the whole branch and only `subdir` of it is deployed, so a name outside
 /// it changed nothing in the webroot and one inside it loses the prefix.
-fn changed_paths(diff: &str, subdir: &str) -> WriterPaths {
+fn changed_paths(diff: &str, subdir: &str) -> Option<WriterPaths> {
     let sub = subdir.trim().trim_matches('/');
     let mut out = Vec::new();
     for name in diff.split('\0').filter(|n| !n.is_empty()) {
         if out.len() >= CHANGED_MAX {
-            return WriterPaths::All;
+            return None;
         }
         let rel = if sub.is_empty() {
             name
@@ -714,7 +716,7 @@ fn changed_paths(diff: &str, subdir: &str) -> WriterPaths {
         };
         out.push(rel.to_string());
     }
-    WriterPaths::List(out)
+    Some(WriterPaths::List(out))
 }
 
 /// Remove the checkout and git's private HOME (on disconnect). Runs as the
@@ -969,28 +971,31 @@ mod tests {
     fn the_diff_names_become_webroot_paths() {
         let diff = "index.php\0web/app.php\0web/img/a.png\0docs/x.php\0";
         // Whole repo: every name.
-        let WriterPaths::List(all) = changed_paths(diff, "") else {
+        let Some(WriterPaths::List(all)) = changed_paths(diff, "") else {
             panic!("not a list")
         };
         assert_eq!(all.len(), 4);
         // A sub-directory deploy: only what is under it, without the prefix.
         assert_eq!(
             changed_paths(diff, "/web/"),
-            WriterPaths::List(vec!["app.php".into(), "img/a.png".into()])
+            Some(WriterPaths::List(vec![
+                "app.php".into(),
+                "img/a.png".into()
+            ]))
         );
         // A name that merely starts with it is another directory.
         assert_eq!(
             changed_paths("website/a.php\0", "web"),
-            WriterPaths::List(Vec::new())
+            Some(WriterPaths::List(Vec::new()))
         );
         // No change at all is an empty list, not "everything".
-        assert_eq!(changed_paths("", ""), WriterPaths::List(Vec::new()));
+        assert_eq!(changed_paths("", ""), Some(WriterPaths::List(Vec::new())));
     }
 
     #[test]
-    fn a_huge_diff_just_says_everything() {
+    fn a_huge_diff_records_no_list() {
         let diff = "a.php\0".repeat(CHANGED_MAX + 1);
-        assert_eq!(changed_paths(&diff, ""), WriterPaths::All);
+        assert_eq!(changed_paths(&diff, ""), None);
     }
 
     #[test]

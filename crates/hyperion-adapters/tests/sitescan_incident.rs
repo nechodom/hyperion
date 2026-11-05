@@ -3056,9 +3056,6 @@ fn a_pending_file_isnt_laundered_by_a_restore() {
     assert_eq!(rels(&out.review), ["wp-content/themes/kid/planted.php"]);
 }
 
-/// A restore that can't say what it wrote lists everything, and then a file that
-/// was already waiting is on the list at its present hash. That is the restore's
-/// own tree: the planted file is the restored file only if their bytes match.
 #[test]
 fn a_file_written_after_the_hash_stays_review() {
     let s = deployable_site();
@@ -3385,4 +3382,122 @@ fn a_spent_list_goes_but_a_newer_one_stays() {
     };
     accept::spend_accepted(&out, &now);
     assert!(!out.exists());
+}
+
+#[test]
+fn a_folder_hash_covers_that_folder_and_nothing_beside_it() {
+    let s = Site::new();
+    s.write("wp-content/plugins/foo/foo.php", "<?php // foo\n");
+    s.write("wp-content/plugins/foo/inc/deep/a.php", "<?php // a\n");
+    s.write("wp-content/plugins/foo/readme.txt", "text\n");
+    s.write("wp-content/plugins/foo-old/b.php", "<?php // b\n");
+    s.write("wp-content/plugins/other/o.php", "<?php // pending\n");
+    s.write("wp-content/plugins/foobar.php", "<?php // pending\n");
+    // A link inside the folder to somewhere else in the tree is not followed.
+    std::os::unix::fs::symlink(
+        s.path("wp-content/plugins/other"),
+        s.path("wp-content/plugins/foo/link"),
+    )
+    .expect("link");
+    let out = s.baseline.parent().expect("dir").join("accepted").join("7");
+    accept::writer_hash(
+        &s.root,
+        WriterKind::Restore,
+        &WriterPaths::Under("wp-content/plugins/foo".into()),
+        &out,
+        &|| false,
+    )
+    .expect("hash");
+    let accept::Loaded::Found(a, _) = accept::load_accepted(&out, unix_now()) else {
+        panic!("no list")
+    };
+    let mut names: Vec<&str> = a.files.keys().map(String::as_str).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "wp-content/plugins/foo/foo.php",
+            "wp-content/plugins/foo/inc/deep/a.php"
+        ]
+    );
+
+    // And a folder that isn't one, or leaves the tree, lists nothing.
+    for bad in [
+        "../x",
+        "/etc",
+        "wp-content/plugins/nope",
+        "wp-content/plugins/foo/foo.php",
+    ] {
+        accept::writer_hash(
+            &s.root,
+            WriterKind::Restore,
+            &WriterPaths::Under(bad.into()),
+            &out,
+            &|| false,
+        )
+        .expect("hash");
+        let accept::Loaded::Found(a, _) = accept::load_accepted(&out, unix_now()) else {
+            panic!("no list")
+        };
+        assert!(
+            a.files.is_empty()
+                || !a
+                    .files
+                    .keys()
+                    .any(|k| !k.starts_with("wp-content/plugins/foo/")),
+            "{bad}: {:?}",
+            a.files
+        );
+    }
+}
+
+/// A webhook that changes nothing, over and over, must not keep what an earlier
+/// deploy listed alive past the week.
+#[test]
+fn a_merge_keeps_the_oldest_age() {
+    let s = Site::new();
+    s.write("a.php", "<?php // a\n");
+    let dir = s.baseline.parent().expect("dir").join("accepted");
+    fs::create_dir_all(&dir).expect("mkdir");
+    let out = dir.join("7");
+    let six_days_ago = unix_now() - 6 * 24 * 3600;
+    let old = accept::AcceptedRecord {
+        kind: WriterKind::GitDeploy,
+        written_at: six_days_ago,
+        files: [("a.php".to_string(), "00".repeat(32))].into(),
+    };
+    fs::write(&out, serde_json::to_vec(&old).expect("json")).expect("write");
+
+    // A push that changed nothing.
+    accept::writer_hash(
+        &s.root,
+        WriterKind::GitDeploy,
+        &WriterPaths::List(Vec::new()),
+        &out,
+        &|| false,
+    )
+    .expect("hash");
+    let rec: accept::AcceptedRecord =
+        serde_json::from_slice(&fs::read(&out).expect("read")).expect("json");
+    assert_eq!(rec.written_at, six_days_ago);
+    assert_eq!(rec.files.len(), 1);
+    // Two days on, it is a week old and gone, however recently it was touched.
+    assert!(matches!(
+        accept::load_accepted(&out, unix_now() + 2 * 24 * 3600),
+        accept::Loaded::Nothing
+    ));
+
+    // Another kind of writer starts over, with its own age.
+    fs::write(&out, serde_json::to_vec(&old).expect("json")).expect("write");
+    accept::writer_hash(
+        &s.root,
+        WriterKind::Restore,
+        &WriterPaths::List(Vec::new()),
+        &out,
+        &|| false,
+    )
+    .expect("hash");
+    let rec: accept::AcceptedRecord =
+        serde_json::from_slice(&fs::read(&out).expect("read")).expect("json");
+    assert!(rec.written_at >= unix_now() - 5 && rec.files.is_empty());
 }

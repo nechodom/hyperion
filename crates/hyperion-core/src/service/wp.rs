@@ -1419,12 +1419,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_adapters::wpcli::emergency_rename_plugin(&detail.root_dir, &slug, false)
             .await
             .map_err(|e| RpcError::Internal_with(e.to_string()))?;
-        self.scan_writer_done(
-            &detail,
-            hyperion_adapters::sitescan::scan::WriterKind::Restore,
-            hyperion_adapters::sitescan::accept::WriterPaths::All,
-        )
-        .await;
         let _ = self
             .wp_plugin_action(
                 sel,
@@ -1439,6 +1433,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
+        // Last: the hashing is detached, and nothing above waits for it. Only the
+        // folder that came back, so nothing outside it can be accepted.
+        let _ = self
+            .scan_writer_done(
+                &detail,
+                hyperion_adapters::sitescan::scan::WriterKind::Restore,
+                Some(hyperion_adapters::sitescan::accept::WriterPaths::Under(
+                    format!("wp-content/plugins/{slug}"),
+                )),
+            )
+            .await;
         Ok(())
     }
 

@@ -370,7 +370,7 @@ fn runs_as_php(rel: &str) -> bool {
 
 /// The file types a writer's hash covers: PHP, JavaScript and the files PHP
 /// obeys. `.maintenance` is left out, as a deploy never writes it.
-pub(super) fn is_layer_b_code(rel: &str) -> bool {
+pub fn is_layer_b_code(rel: &str) -> bool {
     is_php_like(rel) || is_js(rel) || is_php_settings(rel)
 }
 

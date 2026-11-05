@@ -1845,6 +1845,35 @@ garbage
         assert!(accepted("example_cz-1700000000.sql"));
     }
 
+    /// A name that isn't UTF-8 can't be re-opened by the scan, and a list with a
+    /// hole in it is no list: the restore says nothing about what it wrote. (Linux
+    /// only: the macOS filesystem refuses such a name before it gets here.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_restore_with_an_unreadable_name_lists_nothing() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = tempfile::tempdir().expect("tmp");
+        let archive = dir.path().join("a.tar.gz");
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive).expect("create"),
+            flate2::Compression::fast(),
+        );
+        let mut tar = tar::Builder::new(gz);
+        for name in [&b"htdocs/index.php"[..], b"htdocs/\xff.php"] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(3);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            tar.append_data(&mut h, std::ffi::OsStr::from_bytes(name), &b"abc"[..])
+                .expect("append");
+        }
+        tar.into_inner().expect("tar").finish().expect("gz");
+        let (_, names) = restore_archive_listing(&archive, &dir.path().join("site"))
+            .await
+            .expect("restore");
+        assert_eq!(names, None);
+    }
+
     #[tokio::test]
     async fn a_restore_names_the_regular_files_it_put_in_htdocs() {
         let dir = tempfile::tempdir().expect("tmp");

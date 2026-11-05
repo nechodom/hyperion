@@ -426,15 +426,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: last.message.clone(),
             });
         }
-        if let Some(paths) = paths {
-            self.scan_writer_done(
+        self.purge_page_cache_after(id, "hosting.gitsync.deploy")
+            .await;
+        // Last, with the deploy lock still held by the caller: the hashing is
+        // detached and this returns at once. `None` is a deploy that can't say what
+        // it changed, which records no list.
+        let _ = self
+            .scan_writer_done(
                 detail,
                 hyperion_adapters::sitescan::scan::WriterKind::GitDeploy,
-                paths,
+                paths.flatten(),
             )
-            .await;
-        }
-        self.purge_page_cache_after(id, "hosting.gitsync.deploy")
             .await;
         Ok(last)
     }
