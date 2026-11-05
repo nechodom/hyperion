@@ -315,6 +315,9 @@ fn ct(n: u32, project: &'static str, service: &'static str) -> Ct {
 struct World {
     cts: Vec<Ct>,
     ps_err: Option<DockerError>,
+    /// Held in `inspect` until the test lets it go, to stage a removal in the
+    /// middle of a slow read.
+    inspect_gate: Option<Gate>,
     /// `docker inspect` as the real adapter hands it back when docker
     /// itself fails: it exits 1 having printed `[]`, which the adapter
     /// returns as an answer.
@@ -336,6 +339,14 @@ struct World {
     remote: std::collections::HashMap<String, Result<String, RemoteDigestError>>,
     /// The references the registry was asked about, in order.
     lookups: Vec<String>,
+}
+
+/// The tick says it is inside `inspect` on `entered`, and stays there until
+/// `release` is sent to.
+#[derive(Clone)]
+struct Gate {
+    entered: std::sync::mpsc::Sender<()>,
+    release: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
 }
 
 type Shared = Arc<Mutex<World>>;
@@ -397,6 +408,18 @@ fn world_mock(world: &Shared) -> MockAdapterPort {
     let w = world.clone();
     let mut a = happy_mocks();
     a.expect_docker_read().returning(move |cmd, max| {
+        if matches!(cmd, DockerCmd::Inspect(_)) {
+            let gate = w.lock().expect("world").inspect_gate.clone();
+            if let Some(g) = gate {
+                let _ = g.entered.send(());
+                // `block_in_place`, so the worker's queued tasks (the pool
+                // returning its connection among them) move to another
+                // worker instead of starving behind this wait.
+                tokio::task::block_in_place(|| {
+                    let _ = g.release.lock().expect("gate").recv();
+                });
+            }
+        }
         let mut w = w.lock().expect("world");
         w.reads.push(format!("{cmd:?}"));
         match cmd {
@@ -527,6 +550,53 @@ async fn tick_through(s: &HostingService<MockAdapterPort>, from: i64, to: i64) {
         tick_at(s, t).await;
         t += 30;
     }
+}
+
+/// Log lines written while a test runs, to read back.
+#[derive(Clone, Default)]
+struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log").extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+    type Writer = LogBuf;
+    fn make_writer(&'a self) -> LogBuf {
+        self.clone()
+    }
+}
+
+/// A database that cannot be read reads as "off", and says so in the log.
+#[tokio::test]
+async fn an_unreadable_module_state_reads_as_off_with_a_warning() {
+    let log = LogBuf::default();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_ansi(false)
+            .finish(),
+    );
+    let pool = open_memory().await.expect("open");
+    hyperion_state::docker::set_node_installed(&pool, false, 1)
+        .await
+        .expect("on");
+    let s = svc(pool.clone(), happy_mocks());
+    assert!(s.docker_module_enabled().await);
+    assert!(log.0.lock().expect("log").is_empty(), "nothing to say yet");
+
+    pool.close().await;
+    assert!(!s.docker_module_enabled().await);
+    let said = String::from_utf8_lossy(&log.0.lock().expect("log")).into_owned();
+    assert!(said.contains("WARN"), "{said}");
+    assert!(said.contains("docker module state unreadable"), "{said}");
+    assert_eq!(said.lines().count(), 1, "one line: {said}");
 }
 
 #[tokio::test]
@@ -910,6 +980,53 @@ async fn a_failing_inspect_is_the_daemons_problem_not_the_projects() {
     assert!(!st.daemon_ok);
     assert_eq!(st.projects.len(), 1, "the stack is still listed");
     assert_eq!(st.projects[0].containers.len(), 1);
+}
+
+/// A tick whose reads are overtaken by a removal of the module writes
+/// nothing back: no project rows, no snapshot, no alert.
+async fn tick_overtaken_by_removal(blank_inspect: bool) {
+    let w = world(vec![ct(1, "shop", "web")]);
+    let (entered, entered_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    {
+        let mut w = w.lock().expect("world");
+        w.inspect_gate = Some(Gate {
+            entered,
+            release: Arc::new(Mutex::new(release_rx)),
+        });
+        w.inspect_blank = blank_inspect;
+    }
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    let s = Arc::new(s);
+    let ticking = {
+        let s = s.clone();
+        tokio::spawn(async move { s.docker_tick_at(T0).await })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv())
+        .await
+        .expect("join")
+        .expect("the tick reached inspect");
+    s.docker_node_remove().await.expect("removed meanwhile");
+    release.send(()).expect("let it go");
+    ticking.await.expect("join").expect("tick");
+
+    let rows = hyperion_state::docker::list_projects(&s.pool)
+        .await
+        .expect("rows");
+    assert!(rows.is_empty(), "nothing written back: {rows:?}");
+    assert!(s.docker_snapshot.read().await.is_none());
+    assert!(!s.docker_module_enabled().await);
+    assert!(alerts(&s).await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removal_during_a_slow_tick_is_not_rewritten() {
+    tick_overtaken_by_removal(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removal_during_a_failing_tick_is_not_rewritten_either() {
+    tick_overtaken_by_removal(true).await;
 }
 
 #[tokio::test]

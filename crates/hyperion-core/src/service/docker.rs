@@ -48,9 +48,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// so with it off nothing here runs a `docker` process. A database error
     /// reads as off: a tick that cannot tell does nothing.
     pub async fn docker_module_enabled(&self) -> bool {
-        hyperion_state::docker::node_installed(&self.pool)
-            .await
-            .unwrap_or(false)
+        match hyperion_state::docker::node_installed(&self.pool).await {
+            Ok(on) => on,
+            Err(e) => {
+                // Reads as off, but not silently: a monitor that went quiet
+                // because its database failed must say so somewhere.
+                tracing::warn!(error = %e, "docker module state unreadable, treating it as off");
+                false
+            }
+        }
     }
 
     /// The module's state on this node. `docker version` runs only while the
@@ -281,7 +287,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let want_stats = prev
             .as_ref()
             .map_or(true, |p| now - p.stats_at >= STATS_EVERY_SECS);
-        match self.docker_observe(want_stats, prev.as_ref(), now).await {
+        let observed = self.docker_observe(want_stats, prev.as_ref(), now).await;
+        // The reads can be slow. If the module was removed meanwhile, what
+        // they found must not be written back over the data that removal
+        // just deleted.
+        if !self.docker_module_enabled().await {
+            return Ok(());
+        }
+        match observed {
             // The daemon, not any project, is what is wrong. Nothing about
             // projects is learnt from a read that did not happen.
             Err(e) => self.docker_daemon_bad(&e, prev, now).await,

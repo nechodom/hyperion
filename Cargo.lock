@@ -1545,6 +1545,7 @@ dependencies = [
  "tokio-rustls",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "ulid",
  "url",
 ]
