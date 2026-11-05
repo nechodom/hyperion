@@ -393,6 +393,7 @@ fn log_error(e: &DockerError) -> RpcError {
 
 /// `f` over every item, at most `limit` at a time, results in the order of
 /// the items. A task that panics yields `None` and spares the others.
+#[cfg(test)]
 pub(crate) async fn bounded_map<T, R, F, Fut>(items: Vec<T>, limit: usize, f: F) -> Vec<Option<R>>
 where
     T: Send + 'static,
