@@ -4,56 +4,106 @@
 {% let import_tab = "wordpress" %}
 {% include "_import_header.html" %}
 
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
 {% if let Some(m) = flash_error %}
   <div class="flash error">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
     <div class="flash-body">{{ m }}</div>
   </div>
 {% endif %}
-
-<div class="group">
-  <div class="ghead">Move a WordPress site from any host</div>
-  {% if let Some(m) = minted %}
-  <div class="item" id="import-code">
-    <h3>Paste this code into the plugin</h3>
-    <pre class="code-block import-oneliner"><code>{{ m.code }}</code></pre>
-    <div class="item-actions" style="justify-content:flex-start;margin-top:0.6rem">
-      <button class="btn small" type="button" data-copy="{{ m.code }}">Copy code</button>
-      <span class="text-soft small">Valid for 4 hours, extended automatically while a transfer runs. It lets its holder upload a site to this panel, so treat it like a password.</span>
-    </div>
-    {% if !m.target_domain.is_empty() %}
-    <p class="text-soft small" style="margin:0.75rem 0 0">The site will land as <strong>{{ m.target_domain }}</strong>, with its URLs rewritten to match.</p>
-    {% endif %}
+{% if insecure_panel %}
+  <div class="flash warn">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    <div class="flash-body"><strong>This panel is on plain HTTP, so the plugin will refuse its codes.</strong> A transfer carries the site's database and passwords. Turn on HTTPS for the panel first.</div>
   </div>
-  {% endif %}
-  <div class="item{% if minted.is_some() %} muted{% endif %}">
-    <ol class="import-steps" style="margin-top:0">
-      <li><a href="/import/wordpress/hyperion-migrate.zip"><strong>Download the plugin</strong></a> and install it on the source site: <em>Plugins → Add New → Upload Plugin</em>.</li>
-      <li><strong>Generate a code</strong> below and paste it in <em>Tools → Hyperion Migration</em>.</li>
-      <li><strong>Keep that tab open</strong> while it transfers. If it closes, open the page again and the transfer picks up where it stopped. The site stays online throughout.</li>
-    </ol>
-    <p class="text-soft small" style="margin:0.75rem 0 1rem">Works on any host, with no SSH and no panel access. Sites land on this node; use <a href="/hostings/transfer">Move</a> afterwards to put one on another. Mailboxes and DNS stay where they are.</p>
-    <form method="post" action="/import/wordpress/mint" class="import-mint">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <div class="field" style="margin:0">
-        <label for="target_domain">Import as <span class="text-soft">(optional)</span></label>
-        <input id="target_domain" name="target_domain" type="text" placeholder="keep the site's domain" autocomplete="off" spellcheck="false">
+{% endif %}
+
+<div class="group wpm">
+  <div class="ghead">Move a WordPress site from any host</div>
+
+  <div class="item wpm-step{% if minted.is_some() %} is-done{% endif %}" data-wpm-step>
+    <span class="wpm-num" aria-hidden="true">
+      <span class="wpm-digit">1</span>
+      <svg class="wpm-tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+    </span>
+    <div class="wpm-body">
+      <h3>Install the plugin on the source site</h3>
+      <p>In its wp-admin: <em>Plugins → Add New → Upload Plugin</em>, then activate it. Installing it changes nothing on the site.</p>
+      <p class="wpm-meta">hyperion-migrate.zip · version {{ plugin_version }} · WordPress 4.7+ · PHP 5.6+</p>
+    </div>
+    <a class="btn wpm-download{% if minted.is_none() %} primary{% endif %}" href="/import/wordpress/hyperion-migrate.zip" download data-wpm-download>
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download plugin
+    </a>
+  </div>
+
+  <div class="item wpm-step{% if minted.is_some() %} is-done{% endif %}">
+    <span class="wpm-num" aria-hidden="true">
+      <span class="wpm-digit">2</span>
+      <svg class="wpm-tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+    </span>
+    <div class="wpm-body wpm-wide">
+      <h3>Generate a code for this transfer</h3>
+      {% if let Some(m) = minted %}
+      <div id="import-code">
+        <pre class="code-block import-oneliner"><code>{{ m.code }}</code></pre>
+        <div class="wpm-code-actions">
+          <button class="btn primary" type="button" data-copy="{{ m.code }}">Copy code</button>
+          <span class="text-soft small">Valid for 4 hours, extended automatically while a transfer runs. It lets its holder upload a site to this panel, so treat it like a password.</span>
+        </div>
+        {% if !m.target_domain.is_empty() %}
+        <p class="text-soft small wpm-landing">The site will land as <strong>{{ m.target_domain }}</strong>, with its URLs rewritten to match.</p>
+        {% endif %}
       </div>
-      {% if !profiles.is_empty() %}
-      <div class="field" style="margin:0">
-        <label for="profile_id">Profile <span class="text-soft">(optional)</span></label>
-        <select id="profile_id" name="profile_id">
-          <option value="">None</option>
-          {% for p in profiles %}
-          <option value="{{ p.id }}">{{ p.name }} · {{ p.price }}</option>
-          {% endfor %}
-        </select>
-      </div>
+      {% else %}
+      <p>Leave “Import as” empty to keep the site's own domain.</p>
       {% endif %}
-      <button class="btn {% if minted.is_none() %}primary{% endif %}" type="submit">
-        {% if minted.is_some() %}Generate another code{% else %}Generate code{% endif %}
-      </button>
-    </form>
+      <form method="post" action="/import/wordpress/mint" class="import-mint wpm-mint">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="target_domain">Import as <span class="text-soft">(optional)</span></label>
+          <input id="target_domain" name="target_domain" type="text" placeholder="keep the site's domain" autocomplete="off" spellcheck="false">
+        </div>
+        {% if !profiles.is_empty() %}
+        <div class="field">
+          <label for="profile_id">Profile <span class="text-soft">(optional)</span></label>
+          <select id="profile_id" name="profile_id">
+            <option value="">None</option>
+            {% for p in profiles %}
+            <option value="{{ p.id }}">{{ p.name }} · {{ p.price }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% endif %}
+        <button class="btn" type="submit" data-wpm-mint>
+          {% if minted.is_some() %}Generate another code{% else %}Generate code{% endif %}
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <div class="item wpm-step">
+    <span class="wpm-num" aria-hidden="true"><span class="wpm-digit">3</span></span>
+    <div class="wpm-body">
+      <h3>Paste it in the plugin and start</h3>
+      <p>Under <em>Tools → Hyperion Migration</em>. Keep that tab open while it transfers. If it closes, open the page again and the transfer carries on where it stopped. The site stays online throughout.</p>
+    </div>
+  </div>
+
+  <div class="item muted wpm-scope">
+    <div>
+      <h4>Comes across</h4>
+      <p>Files, the database and wp-config.php, with URLs and database settings adapted to the new home. Works on any host, with no SSH and no panel access.</p>
+    </div>
+    <div>
+      <h4>Stays behind</h4>
+      <p>Mailboxes and DNS records, plus caches and old backups. The site lands on this node; use <a href="/hostings/transfer">Move</a> afterwards to put it on another.</p>
+    </div>
   </div>
 </div>
 

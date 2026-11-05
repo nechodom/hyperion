@@ -1332,6 +1332,18 @@ function isShortcutContext(ev) {
 })();
 
 // ============================================================
+//  WordPress plugin import: once the plugin is on its way, the
+//  next thing to press is Generate code.
+// ============================================================
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('[data-wpm-download]');
+  if (!link) return;
+  link.classList.remove('primary');
+  link.closest('[data-wpm-step]')?.classList.add('is-done');
+  document.querySelector('[data-wpm-mint]')?.classList.add('primary');
+});
+
+// ============================================================
 //  Sidebar status dots — monitoring / WordPress updates / certs.
 //  One request for all three, so the dots can never disagree with
 //  each other, and a hiccup in one RPC does not turn the sidebar
