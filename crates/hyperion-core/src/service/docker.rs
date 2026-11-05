@@ -400,11 +400,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         for chunk in ids.chunks(INSPECT_CHUNK) {
             // A container removed since `ps` just is not in the answer: the
             // adapter hands back what docker printed even when it exits 1.
+            // That also means a docker that FAILED answers `[]`, which must
+            // not read as "all these containers are gone": the project would
+            // be marked gone. Ids asked for and nothing back is the daemon's
+            // problem; the last picture stays.
             let raw = self
                 .adapters
                 .docker_read(DockerCmd::Inspect(chunk.to_vec()), JSON_MAX_BYTES)
                 .await?;
-            containers.extend(parse_inspect(&raw)?);
+            let rows = parse_inspect(&raw)?;
+            if rows.is_empty() {
+                return Err(DockerError::Failed(
+                    "docker inspect returned none of the containers it listed".into(),
+                ));
+            }
+            containers.extend(rows);
         }
         for c in &mut containers {
             c.project = clean_name(&c.project);

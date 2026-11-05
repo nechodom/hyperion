@@ -291,7 +291,10 @@ fn ct(n: u32, project: &'static str, service: &'static str) -> Ct {
 struct World {
     cts: Vec<Ct>,
     ps_err: Option<DockerError>,
-    inspect_err: Option<DockerError>,
+    /// `docker inspect` as the real adapter hands it back when docker
+    /// itself fails: it exits 1 having printed `[]`, which the adapter
+    /// returns as an answer.
+    inspect_blank: bool,
     /// Containers `ps` lists that are gone by the time `inspect` asks.
     vanish_before_inspect: Vec<u32>,
     reads: Vec<String>,
@@ -384,8 +387,8 @@ fn world_mock(world: &Shared) -> MockAdapterPort {
                 Ok(out.into_bytes())
             }
             DockerCmd::Inspect(ids) => {
-                if let Some(e) = w.inspect_err.clone() {
-                    return Err(e);
+                if w.inspect_blank {
+                    return Ok(b"[]\n".to_vec());
                 }
                 let rows: Vec<_> = w
                     .cts
@@ -867,7 +870,7 @@ async fn a_failing_inspect_is_the_daemons_problem_not_the_projects() {
     let w = world(vec![ct(1, "shop", "web")]);
     let (s, _dir) = worker_with(world_mock(&w)).await;
     tick_at(&s, T0).await;
-    w.lock().expect("world").inspect_err = Some(DockerError::Failed("boom".into()));
+    w.lock().expect("world").inspect_blank = true;
     tick_through(&s, T0 + 30, T0 + 400).await;
 
     let sent = alerts(&s).await;
@@ -878,6 +881,11 @@ async fn a_failing_inspect_is_the_daemons_problem_not_the_projects() {
         .expect("row")
         .expect("known");
     assert_eq!((row.gone_since, row.problem_since), (0, 0));
+    // The last good picture stays on the page, marked as not current.
+    let st = s.docker_overview().await.expect("overview");
+    assert!(!st.daemon_ok);
+    assert_eq!(st.projects.len(), 1, "the stack is still listed");
+    assert_eq!(st.projects[0].containers.len(), 1);
 }
 
 #[tokio::test]
