@@ -988,7 +988,7 @@ async fn the_owning_node_is_worked_out_again_on_recovery_unless_chosen() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cert_alerts_at_14_and_3_days_once_each_over_time() {
+fn cert_alerts_at_14_and_3_days_and_at_expiry_once_each_over_time() {
     let day = 86_400;
     let base = 1_800_000_000;
     let expires = base + 20 * day;
@@ -1002,20 +1002,24 @@ fn cert_alerts_at_14_and_3_days_once_each_over_time() {
             last = Some(d);
         }
     }
-    assert_eq!(fired, vec![(6, 14), (17, 3)], "{fired:?}");
+    assert_eq!(fired, vec![(6, 14), (17, 3), (20, 0)], "{fired:?}");
 
     // Already inside the last window when first seen: the 3 only.
     assert_eq!(cert_alert_due(base + 2 * day, base, None), Some(3));
     // Far away: nothing.
     assert_eq!(cert_alert_due(base + 40 * day, base, None), None);
-    // Already warned at 3, never again for the same certificate.
+    // Already warned at 3: nothing until it expires, then once.
     assert_eq!(cert_alert_due(base + day, base, Some(3)), None);
+    assert_eq!(cert_alert_due(base - 1, base, Some(3)), Some(0));
+    assert_eq!(cert_alert_due(base - 30 * day, base, Some(0)), None);
+    // First seen already expired: the expiry warning only.
+    assert_eq!(cert_alert_due(base - day, base, None), Some(0));
     // Warned at 14 and now at 10 days: still nothing new.
     assert_eq!(cert_alert_due(base + 10 * day, base, Some(14)), None);
 }
 
 #[tokio::test]
-async fn cert_alerts_at_14_and_3_days_once_each() {
+async fn cert_alerts_at_14_and_3_days_and_at_expiry_once_each() {
     let (s, pool) = url_master().await;
     let id = s
         .url_monitor_set(input("https://example.test/"))
@@ -1069,14 +1073,22 @@ async fn cert_alerts_at_14_and_3_days_once_each() {
 
     expire(-1).await;
     s.url_cert_alerts(now).await.expect("pass");
-    assert_eq!(certs().await.len(), 2, "the two thresholds, once each");
+    s.url_cert_alerts(now).await.expect("again");
+    let bells = certs().await;
+    assert_eq!(bells.len(), 3, "and once more when it has expired");
+    assert_eq!(bells[2].1, "error", "{bells:?}");
+    assert!(bells[2].3.contains("expired on"), "{bells:?}");
+
+    expire(-10).await;
+    s.url_cert_alerts(now).await.expect("pass");
+    assert_eq!(certs().await.len(), 3, "an expired one does not repeat");
 
     // A renewed certificate starts over.
     expire(80).await;
     s.url_cert_alerts(now).await.expect("pass");
     expire(12).await;
     s.url_cert_alerts(now).await.expect("pass");
-    assert_eq!(certs().await.len(), 3);
+    assert_eq!(certs().await.len(), 4);
 }
 
 #[test]

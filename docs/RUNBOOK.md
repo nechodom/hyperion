@@ -355,7 +355,7 @@ monitor, which is unchanged. Each check has an address, an interval (30 seconds
 at the shortest), an expected status, how many failures alert, and optional own
 email addresses, Slack webhook and generic webhook (the cluster's Slack and
 administrator addresses otherwise). https addresses also warn at 14 and 3 days
-before the certificate expires. Uptime Kuma monitors are entered by hand: there is no import and no history
+before the certificate expires, and once more when it has expired. Uptime Kuma monitors are entered by hand: there is no import and no history
 carried over.
 
 The checks run **from the master**, so a whole node dying is seen from outside.

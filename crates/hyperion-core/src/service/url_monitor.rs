@@ -43,8 +43,9 @@ const CERT_EVERY_SECS: i64 = 3_600;
 /// Seconds one certificate read may take. Shorter than a probe, and run
 /// beside it, so it never lengthens a check.
 const CERT_MAX_TIME_SECS: &str = "10";
-/// Days left at which a certificate warns, once each.
-pub(super) const CERT_ALERT_DAYS: [i64; 2] = [14, 3];
+/// Days left at which a certificate warns, once each. 0 is the expiry
+/// itself: the warning that it has now expired.
+pub(super) const CERT_ALERT_DAYS: [i64; 3] = [14, 3, 0];
 
 const MAX_CHECKS: i64 = 500;
 const URL_MAX_CHARS: usize = 2_048;
