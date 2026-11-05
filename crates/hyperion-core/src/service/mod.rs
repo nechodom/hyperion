@@ -54,6 +54,7 @@ mod firewall;
 mod fs_health;
 pub use cpu_usage::{CpuClass, CpuTracker, ProcSample, ProcSnapshot, TICK_SECS as CPU_TICK_SECS};
 pub use docker::{loopback_port, proxy_offer, ProxyOffer};
+pub use docker_logs::new_log_gate as new_docker_log_gate;
 pub use docker_updates::image_state;
 pub use fs_health::check_usr_writable;
 mod fs_util;
@@ -774,6 +775,10 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// What the Docker module's tick saw last, for the overview to serve
     /// without running `docker` per page view. `None` until the first read.
     pub docker_snapshot: Arc<tokio::sync::RwLock<Option<hyperion_types::docker::DockerNodeStatus>>>,
+    /// Permits for `docker logs` processes, shared by every request this
+    /// node serves, so several people reading stacks at once still run only
+    /// [`docker_logs::MAX_CONCURRENT_READS`] of them.
+    pub docker_log_gate: Arc<tokio::sync::Semaphore>,
 }
 
 /// Default renewal window — matches Let's Encrypt's recommended
@@ -960,6 +965,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             )),
             backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             docker_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
+            docker_log_gate: docker_logs::new_log_gate(),
         }
     }
 

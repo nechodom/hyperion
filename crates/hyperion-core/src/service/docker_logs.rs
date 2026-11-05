@@ -20,8 +20,15 @@ use hyperion_types::docker::{
 };
 use std::sync::Arc;
 
-/// `docker logs` processes running at once for a whole-stack read.
-const MAX_CONCURRENT_READS: usize = 8;
+/// `docker logs` processes running at once on a node, however many requests
+/// are being served.
+pub(super) const MAX_CONCURRENT_READS: usize = 8;
+/// A fresh limit for `docker logs` processes, [`MAX_CONCURRENT_READS`] wide.
+/// One per service, so the limit is the node's.
+pub fn new_log_gate() -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_READS))
+}
+
 /// Containers read for one stack. More than this is a stack nobody reads
 /// through a web page; the rest is reported as left out.
 const MAX_STACK_CONTAINERS: usize = 32;
@@ -393,7 +400,27 @@ where
     F: Fn(T) -> Fut,
     Fut: std::future::Future<Output = R> + Send + 'static,
 {
-    let gate = Arc::new(tokio::sync::Semaphore::new(limit.max(1)));
+    bounded_map_shared(
+        items,
+        Arc::new(tokio::sync::Semaphore::new(limit.max(1))),
+        f,
+    )
+    .await
+}
+
+/// [`bounded_map`] against a semaphore the caller keeps, so that several
+/// calls at once share one limit.
+pub(crate) async fn bounded_map_shared<T, R, F, Fut>(
+    items: Vec<T>,
+    gate: Arc<tokio::sync::Semaphore>,
+    f: F,
+) -> Vec<Option<R>>
+where
+    T: Send + 'static,
+    R: Send + 'static,
+    F: Fn(T) -> Fut,
+    Fut: std::future::Future<Output = R> + Send + 'static,
+{
     let mut set = tokio::task::JoinSet::new();
     let n = items.len();
     for (i, item) in items.into_iter().enumerate() {
@@ -557,7 +584,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         })
     }
 
-    /// One `docker logs` per target, eight at a time, in the order given.
+    /// One `docker logs` per target, in the order given, with the whole node
+    /// held to [`MAX_CONCURRENT_READS`] at a time.
     ///
     /// Each read may use the whole [`MAX_LOG_BYTES`]. `docker logs` prints
     /// oldest first and a read that reaches the limit is killed there, which
@@ -571,7 +599,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         since: Option<i64>,
     ) -> Vec<Result<(Vec<DockerLogLine>, bool), DockerError>> {
         let adapters = self.adapters.clone();
-        bounded_map(targets, MAX_CONCURRENT_READS, move |t: Target| {
+        bounded_map_shared(targets, self.docker_log_gate.clone(), move |t: Target| {
             let adapters = adapters.clone();
             async move {
                 let mut tail = tail.max(1);

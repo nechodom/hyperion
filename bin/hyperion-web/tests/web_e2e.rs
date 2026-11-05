@@ -367,6 +367,7 @@ async fn start_agent_full(
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         docker_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
+        docker_log_gate: hyperion_core::service::new_docker_log_gate(),
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
     let path = dir.path().join("agent.sock");

@@ -315,6 +315,10 @@ fn ct(n: u32, project: &'static str, service: &'static str) -> Ct {
 struct World {
     cts: Vec<Ct>,
     ps_err: Option<DockerError>,
+    /// The node's `docker logs` limit, when a test wants every read checked
+    /// against it, and how many reads ran without holding one of its permits.
+    gate_probe: Option<Arc<tokio::sync::Semaphore>>,
+    logs_without_permit: usize,
     /// Held in `inspect` until the test lets it go, to stage a removal in the
     /// middle of a slow read.
     inspect_gate: Option<Gate>,
@@ -418,6 +422,17 @@ fn world_mock(world: &Shared) -> MockAdapterPort {
                 tokio::task::block_in_place(|| {
                     let _ = g.release.lock().expect("gate").recv();
                 });
+            }
+        }
+        if matches!(cmd, DockerCmd::Logs { .. }) {
+            let mut w = w.lock().expect("world");
+            // The caller of a read holds a permit while it runs, so a gate
+            // with one permit has none left to give.
+            if w.gate_probe
+                .as_ref()
+                .is_some_and(|g| g.available_permits() != 0)
+            {
+                w.logs_without_permit += 1;
             }
         }
         let mut w = w.lock().expect("world");
@@ -1804,6 +1819,40 @@ async fn bounded_map_runs_at_most_the_limit_at_once_and_keeps_order() {
     let peak = peak.load(SeqCst);
     assert!(peak <= 8, "{peak} at once");
     assert!(peak >= 4, "and they do overlap ({peak})");
+}
+
+/// Two people reading whole stacks at the same moment still run no more
+/// `docker logs` than the node's limit allows: the limit is the node's, not
+/// each request's. With one permit, every read of every request must hold it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_stack_reads_share_one_limit() {
+    let services: Vec<&'static str> = vec!["a", "b", "c", "d", "e", "f"];
+    let (mut s, w, _d) = shop_with(&services).await;
+    let gate = Arc::new(tokio::sync::Semaphore::new(1));
+    s.docker_log_gate = gate.clone();
+    {
+        let mut w = w.lock().expect("world");
+        w.gate_probe = Some(gate.clone());
+        for n in 1..=6u32 {
+            w.logs.insert(n, printed(&[(ts(n, 0), "x")]));
+        }
+    }
+    let s = Arc::new(s);
+    let readers: Vec<_> = (0..3)
+        .map(|_| {
+            let s = s.clone();
+            tokio::spawn(async move { s.docker_logs(logs_for("shop", None)).await })
+        })
+        .collect();
+    for r in readers {
+        let chunk = r.await.expect("join").expect("logs");
+        assert_eq!(chunk.lines.len(), 6, "every read got its lines");
+    }
+    let reads = reads_of(&w, "Logs");
+    let unheld = w.lock().expect("world").logs_without_permit;
+    assert_eq!(reads, 18, "3 requests of 6 containers");
+    assert_eq!(unheld, 0, "a docker logs ran without the node's permit");
+    assert_eq!(gate.available_permits(), 1, "every permit came back");
 }
 
 #[test]
