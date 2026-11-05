@@ -1184,6 +1184,27 @@ mod tests {
             .expect("scanned");
         assert_eq!((i.rule_hits, i.plugin_issues, i.review_pending), (1, 1, 0));
         assert!(!i.is_clean());
+
+        // A tampered Hyperion mu-plugin has no component section: it is
+        // counted with the files that need a look.
+        put_scan(
+            &pool,
+            a.as_str(),
+            &format!(
+                r#"{{"scanned_at":{},"result":{{"native_scan_ran":true,
+                     "coverage":{{"upstream_ran":true}},
+                     "findings":[{{"rel":"wp-content/mu-plugins/hyperion.php",
+                       "kind":"upstream_modified","severity":"high","source_label":"hyperion"}}]}}}}"#,
+                FROM + 1
+            ),
+        )
+        .await;
+        let i = integrity(&pool, a.as_str(), FROM, TO)
+            .await
+            .expect("q")
+            .expect("scanned");
+        assert_eq!((i.rule_hits, i.plugin_issues), (1, 0));
+        assert!(!i.is_clean());
     }
 
     /// In the pilot the new buckets don't reach a report, and ClamAV is still

@@ -1533,6 +1533,38 @@ fn headline_counts_a_lone_rule_carrying_comparison() {
     assert!(!html.contains("0 file(s)"));
 }
 
+/// A tampered Hyperion mu-plugin has no section of its own: the card says it
+/// needs attention, lists it, and offers to move it away.
+#[test]
+fn a_tampered_hyperion_file_is_listed_and_can_be_quarantined() {
+    let html = card_of(
+        hyperion_types::WpIntegrityScanResult {
+            findings: vec![hyperion_types::SiteFileFinding {
+                rel: "wp-content/mu-plugins/hyperion.php".into(),
+                kind: hyperion_types::FindingKind::UpstreamModified,
+                severity: "high".into(),
+                sha256: "aa".into(),
+                snippet: "differs from what this Hyperion version writes".into(),
+                source_label: Some("hyperion".into()),
+                ..Default::default()
+            }],
+            ..native_scan()
+        },
+        true,
+    );
+    assert!(html.contains(r#"data-verdict="findings""#), "{html}");
+    assert!(html.contains("1 file(s) need attention"), "{html}");
+    assert!(html.contains("Files that need a look — 1"), "{html}");
+    assert!(
+        html.contains("wp-content/mu-plugins/hyperion.php"),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"hx-post="/hostings/integrity/quarantine""#),
+        "{html}"
+    );
+}
+
 /// A site with no WordPress has no release to compare with, which is not a
 /// failure, and its card never talks about wordpress.org.
 fn non_wordpress_scan() -> hyperion_types::WpIntegrityScanResult {

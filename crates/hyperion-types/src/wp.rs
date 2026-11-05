@@ -459,6 +459,19 @@ impl SiteFileFinding {
         )
     }
 
+    /// Does a core, plugin or theme section of the card show this comparison?
+    /// Hyperion's own files belong to no component, so none does.
+    pub fn has_section(&self) -> bool {
+        self.is_comparison()
+            && (self.component.is_some()
+                || matches!(
+                    self.kind,
+                    FindingKind::CoreModified
+                        | FindingKind::CoreUnexpected
+                        | FindingKind::CoreMissing
+                ))
+    }
+
     /// "plugin" or "theme" when the finding stands for that whole folder rather
     /// than a file in it. Core's whole-component finding is `.`, which the card
     /// words on its own.
@@ -915,11 +928,12 @@ impl WpIntegrityScanResult {
 
     /// The findings the card lists on their own. Failed comparisons are left out:
     /// the core, plugin and theme sections already show them, with the fix. One
-    /// that also hit a rule stays, because those sections don't carry the rule.
+    /// that also hit a rule stays, because those sections don't carry the rule,
+    /// and so does one no section carries, such as Hyperion's own file.
     pub fn listed_findings(&self) -> impl Iterator<Item = &SiteFileFinding> {
         self.findings
             .iter()
-            .filter(|f| !f.is_comparison() || f.rule_id.is_some())
+            .filter(|f| !f.has_section() || f.rule_id.is_some())
     }
 
     /// The number in the headline: `shown_finding_count`, but never below what
@@ -935,19 +949,18 @@ impl WpIntegrityScanResult {
     pub fn shown_finding_count(&self) -> usize {
         self.total_findings()
             + self.theme_issue_count()
-            + self
-                .listed_findings()
-                .filter(|f| !f.is_comparison())
-                .count()
+            + self.listed_findings().filter(|f| !f.has_section()).count()
     }
 
     /// What the card says. Standing findings and changes to review come first and
     /// stay in front of a queued scan, which only adds its spinner; a queued scan
     /// otherwise stands in for the last verdict. A record from before the native
     /// scan keeps its old meanings. `report_only` doesn't matter here: the panel
-    /// shows the pilot's results, it is the alerts and reports that wait.
+    /// shows the pilot's results, it is the alerts and reports that wait. Any
+    /// finding at all is Findings, so the card never reads Clean where
+    /// `is_clean` doesn't.
     pub fn verdict(&self) -> ScanVerdict {
-        if self.shown_finding_count() > 0 || self.listed_findings().next().is_some() {
+        if self.shown_finding_count() > 0 || !self.findings.is_empty() {
             return ScanVerdict::Findings;
         }
         if !self.review.is_empty() {
@@ -1420,14 +1433,18 @@ mod tests {
     #[test]
     fn listed_findings_skip_what_the_component_sections_show() {
         let mut r = native();
+        let of_plugin = |kind| SiteFileFinding {
+            component: Some("p".into()),
+            ..finding(kind)
+        };
         r.findings = vec![
             finding(FindingKind::CoreModified),
-            finding(FindingKind::UpstreamModified),
-            finding(FindingKind::UpstreamAdded),
+            of_plugin(FindingKind::UpstreamModified),
+            of_plugin(FindingKind::UpstreamAdded),
             finding(FindingKind::RuleHit),
             SiteFileFinding {
                 rule_id: Some("php.eval".into()),
-                ..finding(FindingKind::UpstreamModified)
+                ..of_plugin(FindingKind::UpstreamModified)
             },
         ];
         assert_eq!(r.listed_findings().count(), 2);
@@ -1454,11 +1471,74 @@ mod tests {
         let mut lone = native();
         lone.findings = vec![SiteFileFinding {
             rule_id: Some("php.eval".into()),
-            ..finding(FindingKind::UpstreamModified)
+            ..of_plugin(FindingKind::UpstreamModified)
         }];
         assert_eq!(lone.shown_finding_count(), 0);
         assert_eq!(lone.verdict(), ScanVerdict::Findings);
         assert_eq!(lone.headline_count(), 1);
+    }
+
+    /// Hyperion's own mu-plugin, tampered with: a comparison no core, plugin or
+    /// theme section carries, so the findings list is where it shows.
+    #[test]
+    fn a_comparison_no_section_carries_is_listed() {
+        let mut r = native();
+        r.findings = vec![SiteFileFinding {
+            rel: "wp-content/mu-plugins/hyperion.php".into(),
+            severity: "high".into(),
+            source_label: Some("hyperion".into()),
+            ..finding(FindingKind::UpstreamModified)
+        }];
+        assert_eq!(r.listed_findings().count(), 1);
+        assert_eq!(r.shown_finding_count(), 1);
+        assert_eq!(r.headline_count(), 1);
+        assert_eq!(r.verdict(), ScanVerdict::Findings);
+        assert!(!r.is_clean());
+        // A core comparison has its section even without a component.
+        r.findings = vec![finding(FindingKind::CoreUnexpected)];
+        assert_eq!(r.listed_findings().count(), 0);
+    }
+
+    /// Whatever is in `findings`, the card can't read Clean while `is_clean`
+    /// says no: a live record reads Clean exactly when it is clean.
+    #[test]
+    fn verdict_clean_is_is_clean_for_a_live_record() {
+        let items = [
+            None,
+            Some(finding(FindingKind::RuleHit)),
+            Some(finding(FindingKind::UpstreamModified)),
+            Some(finding(FindingKind::CoreMissing)),
+            Some(SiteFileFinding {
+                component: Some("p".into()),
+                ..finding(FindingKind::UpstreamAdded)
+            }),
+            Some(finding(FindingKind::TooLargeToInspect)),
+        ];
+        for item in items {
+            for partial in [false, true] {
+                for upstream in [false, true] {
+                    for review in [false, true] {
+                        let mut r = native();
+                        r.findings = item.clone().into_iter().collect();
+                        if partial {
+                            r.coverage.partial_reasons = vec!["stopped".into()];
+                        }
+                        r.coverage.upstream_ran = upstream;
+                        if review {
+                            r.review = vec![finding(FindingKind::BaselineChange)];
+                        }
+                        assert_eq!(
+                            r.verdict() == ScanVerdict::Clean,
+                            r.is_clean(),
+                            "{item:?} partial={partial} upstream={upstream} review={review}"
+                        );
+                        if !r.findings.is_empty() {
+                            assert_eq!(r.verdict(), ScanVerdict::Findings, "{item:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

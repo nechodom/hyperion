@@ -391,6 +391,32 @@ fn flipping_live_does_not_alert_what_stood_during_the_pilot() {
     assert!(!plan.error, "a review alone is a warning");
 }
 
+/// A tampered Hyperion mu-plugin is a comparison no section carries: it is a
+/// key of its own and alerts as a suspected compromise, on a first scan too.
+#[test]
+fn a_tampered_hyperion_file_alerts() {
+    let scan = hyperion_types::WpIntegrityScanResult {
+        findings: vec![hyperion_types::SiteFileFinding {
+            source_label: Some("hyperion".into()),
+            ..file_finding(
+                "wp-content/mu-plugins/hyperion.php",
+                hyperion_types::FindingKind::UpstreamModified,
+                "high",
+            )
+        }],
+        ..native_result(false)
+    };
+    assert!(integrity_finding_keys(&scan).contains("find:wp-content/mu-plugins/hyperion.php:-"));
+    for prior in [None, Some(native_result(false))] {
+        let plan = plan_integrity_alert(prior.as_ref(), &scan);
+        assert_eq!((plan.findings, plan.review), (1, 0), "{prior:?}");
+        assert!(plan.error);
+    }
+    // Standing, it doesn't alert again.
+    let plan = plan_integrity_alert(Some(&scan), &scan);
+    assert_eq!((plan.findings, plan.review), (0, 0));
+}
+
 #[test]
 fn a_failed_theme_alerts_once_live() {
     let prior = native_result(false);
