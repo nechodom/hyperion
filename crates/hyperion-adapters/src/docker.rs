@@ -21,6 +21,11 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const SYSTEM_DF_TIMEOUT: Duration = Duration::from_secs(120);
 /// A registry round trip, token included, on a slow link.
 const IMAGETOOLS_TIMEOUT: Duration = Duration::from_secs(45);
+/// What every `--format` is given. The word `json` as a format needs a CLI of
+/// 23.0 or newer; the template below is what it stands for and every CLI
+/// that can print JSON at all understands it (checked on a node: the output
+/// of both is byte for byte the same on 29.x).
+const JSON_FORMAT: &str = "{{json .}}";
 /// Longest stderr text carried in `DockerError::Failed`.
 const FAILED_TEXT_MAX: usize = 2000;
 
@@ -103,9 +108,9 @@ impl DockerCmd {
     pub fn args(&self) -> Vec<String> {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         match self {
-            Self::Version => s(&["version", "--format", "json"]),
+            Self::Version => s(&["version", "--format", JSON_FORMAT]),
             Self::BuildxVersion => s(&["buildx", "version"]),
-            Self::PsAll => s(&["ps", "--all", "--no-trunc", "--format", "json"]),
+            Self::PsAll => s(&["ps", "--all", "--no-trunc", "--format", JSON_FORMAT]),
             Self::Inspect(ids) => {
                 let mut a = s(&["inspect", "--type", "container"]);
                 a.extend(ids.iter().map(|i| i.0.clone()));
@@ -122,8 +127,14 @@ impl DockerCmd {
                 a.push(id.0.clone());
                 a
             }
-            Self::Stats => s(&["stats", "--no-stream", "--no-trunc", "--format", "json"]),
-            Self::SystemDf => s(&["system", "df", "--format", "json"]),
+            Self::Stats => s(&[
+                "stats",
+                "--no-stream",
+                "--no-trunc",
+                "--format",
+                JSON_FORMAT,
+            ]),
+            Self::SystemDf => s(&["system", "df", "--format", JSON_FORMAT]),
             Self::ImageInspect(r) => {
                 let mut a = s(&["image", "inspect"]);
                 a.push(r.0.clone());
@@ -320,7 +331,7 @@ struct PsRow {
     id: String,
 }
 
-/// Container ids from `docker ps --format json`. Everything else in a ps
+/// Container ids from `docker ps --format '{{json .}}'`. Everything else in a ps
 /// row (labels included) is dropped here.
 pub fn parse_ps(bytes: &[u8]) -> Result<Vec<ContainerId>, DockerError> {
     jsonl::<PsRow>(bytes)?
@@ -714,6 +725,24 @@ mod tests {
                 "{args:?}"
             );
         }
+    }
+
+    /// Every read that is asked for JSON asks with the template, which also
+    /// older CLIs know; the bare word `json` needs a 23.0 CLI.
+    #[test]
+    fn json_is_asked_for_with_the_template_not_the_bare_word() {
+        let mut formats = 0;
+        for cmd in sample_of_every_variant() {
+            let args = cmd.args();
+            for pair in args.windows(2) {
+                if pair[0] == "--format" {
+                    formats += 1;
+                    assert_eq!(pair[1], "{{json .}}", "{args:?}");
+                }
+            }
+            assert!(!args.iter().any(|a| a == "json"), "{args:?}");
+        }
+        assert_eq!(formats, 4, "version, ps, stats and system df");
     }
 
     #[test]

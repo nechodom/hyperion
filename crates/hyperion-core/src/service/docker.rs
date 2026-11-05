@@ -253,10 +253,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         .into(),
                 },
                 DockerError::NotResponding => daemon_silent(),
+                DockerError::Parse(_) => docker_too_old(),
+                // A CLI that does not know the question at all says so on
+                // stderr.
+                DockerError::Failed(t) if looks_too_old(&t) => docker_too_old(),
                 other => RpcError::Internal_with(format!("docker version: {other}")),
             })?;
-        let v = parse_version(&out)
-            .map_err(|e| RpcError::Internal_with(format!("docker version: {e}")))?;
+        let v = parse_version(&out).map_err(|_| docker_too_old())?;
         v.server.ok_or_else(daemon_silent)
     }
 }
@@ -940,7 +943,9 @@ fn daemon_error_text(e: &DockerError) -> String {
                 format!("docker failed: {line}")
             }
         }
-        DockerError::Parse(_) => "Docker's output could not be read".into(),
+        DockerError::Parse(_) => {
+            "Docker's output could not be read; the Docker version may be too old".into()
+        }
     }
 }
 
@@ -957,6 +962,24 @@ fn clean_name(s: &str) -> String {
         out.replace_range(0..1, "_");
     }
     out
+}
+
+/// An install on a Docker whose answers cannot be read.
+fn docker_too_old() -> RpcError {
+    RpcError::Validation {
+        message: "The Docker version on this node is too old for the module: its output cannot \
+                  be read. Update Docker, then turn the module on."
+            .into(),
+    }
+}
+
+/// Did `docker` fail because its CLI does not know the flag or the template?
+fn looks_too_old(stderr: &str) -> bool {
+    let t = stderr.to_ascii_lowercase();
+    t.contains("unknown flag")
+        || t.contains("unknown shorthand flag")
+        || t.contains("template parsing error")
+        || t.contains("is not a docker command")
 }
 
 pub(super) fn daemon_silent() -> RpcError {

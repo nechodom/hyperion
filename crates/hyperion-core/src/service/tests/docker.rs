@@ -53,6 +53,30 @@ async fn install_with_a_silent_daemon_is_refused() {
     assert!(!s.docker_module_enabled().await);
 }
 
+/// A Docker whose `version` output cannot be read, or whose CLI does not
+/// know the template, is called too old, not an internal error.
+#[tokio::test]
+async fn install_on_a_docker_too_old_to_read_says_so() {
+    for answer in [
+        Ok(b"Client: Docker Engine 1.12\n".to_vec()),
+        Err(DockerError::Parse("expected value".into())),
+        Err(DockerError::Failed(
+            "Template parsing error: template: :1: function \"json\" not defined".into(),
+        )),
+        Err(DockerError::Failed("unknown flag: --format".into())),
+    ] {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_docker_read().returning(move |_, _| answer.clone());
+        let s = svc(pool, a);
+        let err = s.docker_node_install().await.expect_err("too old");
+        let text = err.to_string();
+        assert!(text.contains("too old"), "{text}");
+        assert!(text.contains("Update Docker"), "{text}");
+        assert!(!s.docker_module_enabled().await);
+    }
+}
+
 #[tokio::test]
 async fn install_records_buildx() {
     let pool = open_memory().await.expect("open");

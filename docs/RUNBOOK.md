@@ -398,6 +398,10 @@ upstream and node filled in, and you type the domain.
   unless its answer fails authentication (the master cannot verify who wrote
   it). That node then appears in a warning at the top of the page instead of a
   row.
+- **"The Docker version on this node is too old".** Turning the module on read
+  `docker version` and could not make sense of it. Hyperion asks Docker for
+  JSON with the `{{json .}}` template, which older CLIs understand, but a
+  very old Docker still answers in a form it cannot read. Update Docker.
 - **An image shows "cannot verify".** The row says why. For a registry other
   than Docker Hub, install `docker-buildx-plugin` and log in with `docker login`
   as root on the node.
