@@ -81,6 +81,31 @@ enum SiteMode {
     WpCritical,
     /// A normal page after this many seconds.
     Slow(u64),
+    /// A 200 of this many bytes: a normal page padded with text.
+    Big(usize),
+    /// A 200 of this many bytes that STARTS with the WordPress critical-error
+    /// page.
+    BigCriticalFirst(usize),
+    /// A 200 of this many bytes whose critical-error text comes after the
+    /// first 100 000 bytes, beyond what the probe reads.
+    BigCriticalLate(usize),
+}
+
+/// `first`, then padding, then `last` at about 100 000 bytes in, the whole
+/// `n` bytes long.
+fn padded(first: &str, last: &str, n: usize) -> String {
+    let mut out = String::with_capacity(n);
+    out.push_str(first);
+    if !last.is_empty() {
+        while out.len() < 100_000 {
+            out.push_str("<p>lorem ipsum dolor sit amet</p>\n");
+        }
+        out.push_str(last);
+    }
+    while out.len() < n {
+        out.push_str("<p>lorem ipsum dolor sit amet</p>\n");
+    }
+    out
 }
 
 /// A local HTTPS site on 127.0.0.1 whose behaviour the test switches.
@@ -181,6 +206,23 @@ async fn spawn_test_site() -> TestSite {
                         tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
                         page("200 OK", ok)
                     }
+                    SiteMode::Big(n) => page("200 OK", &padded(ok, "", n)),
+                    SiteMode::BigCriticalFirst(n) => page(
+                        "200 OK",
+                        &padded(
+                            "<p>There has been a critical error on this website.</p>",
+                            "",
+                            n,
+                        ),
+                    ),
+                    SiteMode::BigCriticalLate(n) => page(
+                        "200 OK",
+                        &padded(
+                            ok,
+                            "<p>There has been a critical error on this website.</p>",
+                            n,
+                        ),
+                    ),
                 };
                 let _ = tls.write_all(reply.as_bytes()).await;
                 let _ = tls.shutdown().await;
