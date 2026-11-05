@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::service::url_monitor::{
-    cert_alert_due, cert_check_due, parse_cert_expiry, url_check_outcome,
+    cert_alert_due, cert_check_due, cert_curl_config, parse_cert_expiry, read_cert_expiry,
+    url_check_outcome,
 };
 use hyperion_state::web_users::WebRole;
 use hyperion_types::url_monitor::{UrlAlertContext, UrlMonitorInput};
@@ -1089,6 +1090,64 @@ async fn cert_alerts_at_14_and_3_days_and_at_expiry_once_each() {
     expire(12).await;
     s.url_cert_alerts(now).await.expect("pass");
     assert_eq!(certs().await.len(), 4);
+}
+
+/// An address with a quote and a newline in it stays a value: nothing in it
+/// becomes a further curl option.
+#[test]
+fn the_certificate_read_cannot_be_given_options_by_the_address() {
+    let evil = "https://example.test/\"\noutput = \"/etc/cron.d/pwned\"\nurl = \"http://evil\"";
+    let known = [
+        "silent",
+        "insecure",
+        "head",
+        "output",
+        "connect-timeout",
+        "max-time",
+        "write-out",
+        "url",
+    ];
+    let config = cert_curl_config(evil);
+    for l in config.lines() {
+        let d = l.split([' ', '=']).next().unwrap_or("");
+        assert!(known.contains(&d), "unexpected option {d:?}:\n{config}");
+    }
+    assert_eq!(
+        config.lines().filter(|l| l.starts_with("output")).count(),
+        1
+    );
+}
+
+/// The address of a check may carry a token; the certificate read keeps it
+/// off curl's command line.
+#[tokio::test]
+async fn the_certificate_read_keeps_the_address_off_the_command_line() {
+    if curl_missing() {
+        return;
+    }
+    let site = spawn_test_site().await;
+    site.set(SiteMode::Slow(4));
+    let token = format!(
+        "CERT-TOKEN-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    );
+    let url = format!("https://{}/?key={token}", site.host());
+    let read = tokio::spawn(async move { read_cert_expiry(&url).await });
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    let out = std::process::Command::new("ps")
+        .args(["-axo", "args="])
+        .output()
+        .expect("ps");
+    let seen = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(!seen.contains(&token), "the token is on a command line");
+    assert!(
+        seen.contains("curl --config -"),
+        "the read was not running when the command lines were read"
+    );
+    let _ = read.await;
 }
 
 #[test]

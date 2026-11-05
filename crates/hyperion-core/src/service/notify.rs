@@ -1176,43 +1176,52 @@ pub(super) async fn http_post_json(url: &str, json_body: &str) -> Result<(), Str
     // We also drop `-L` (no redirect-following) + cap redirects + restrict the
     // protocol, closing the redirect-to-internal pivot.
     let resolve = ssrf_guard_resolve(url).await?;
-    let mut args: Vec<String> = vec![
-        "-sSk".into(),
-        "--max-redirs".into(),
-        "0".into(),
-        "--proto".into(),
-        "=https,http".into(),
-        "--max-time".into(),
-        "10".into(),
-    ];
-    for r in &resolve {
-        args.push("--resolve".into());
-        args.push(r.clone());
-    }
-    args.extend([
-        "-H".into(),
-        "Content-Type: application/json".into(),
-        "-X".into(),
-        "POST".into(),
-        "-d".into(),
-        json_body.to_string(),
-        url.to_string(),
-    ]);
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let out = tokio::process::Command::new("/usr/bin/curl")
-        .args(&arg_refs)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
+    post_json_pinned(url, &resolve, json_body).await
+}
+
+/// The POST of [`http_post_json`] once the destination has been vetted and
+/// pinned. A webhook address is a secret (Slack's is its whole credential)
+/// and the payload may name sites, so both go to curl on stdin: a command
+/// line is readable by every local user.
+pub(super) async fn post_json_pinned(
+    url: &str,
+    resolve: &[String],
+    json_body: &str,
+) -> Result<(), String> {
+    let (_, stderr, code) = hyperion_adapters::cmd::curl_with_config_capture(&post_json_config(
+        url, resolve, json_body,
+    ))
+    .await
+    .map_err(|e| e.to_string())?;
+    if code == 0 {
         Ok(())
     } else {
-        Err(format!(
-            "curl exit {}: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        ))
+        Err(format!("curl exit {code}: {stderr}"))
     }
+}
+
+/// The curl options of one JSON POST, as a config file for stdin.
+pub(super) fn post_json_config(url: &str, resolve: &[String], json_body: &str) -> String {
+    use hyperion_adapters::cmd::curl_config_quote as q;
+    let mut config = String::from(
+        "silent\nshow-error\ninsecure\n\
+         max-redirs = \"0\"\n\
+         proto = \"=https,http\"\n\
+         max-time = \"10\"\n",
+    );
+    for r in resolve {
+        config.push_str(&format!("resolve = \"{}\"\n", q(r)));
+    }
+    // `data-raw`: unlike `data`, a body that starts with `@` is not a file.
+    config.push_str(&format!(
+        "header = \"Content-Type: application/json\"\n\
+         request = \"POST\"\n\
+         data-raw = \"{}\"\n\
+         url = \"{}\"\n",
+        q(json_body),
+        q(url),
+    ));
+    config
 }
 
 /// Per-section + field validation. Returns owned (field, FieldValue)

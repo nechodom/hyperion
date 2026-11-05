@@ -310,25 +310,27 @@ fn failure_text(r: &HttpProbeResult) -> String {
 /// Reads the TLS handshake and a HEAD answer, nothing more. `None` when curl
 /// is absent, the host did not answer, or this curl build prints no
 /// certificate information.
-async fn read_cert_expiry(url: &str) -> Option<i64> {
-    let out = tokio::process::Command::new("/usr/bin/curl")
-        .args([
-            "-sk",
-            "-I",
-            "-o",
-            "/dev/null",
-            "--connect-timeout",
-            "5",
-            "--max-time",
-            CERT_MAX_TIME_SECS,
-            "-w",
-            "%{certs}",
-            url,
-        ])
-        .output()
+pub(super) async fn read_cert_expiry(url: &str) -> Option<i64> {
+    let (out, _, _) = hyperion_adapters::cmd::curl_with_config_capture(&cert_curl_config(url))
         .await
         .ok()?;
-    parse_cert_expiry(&String::from_utf8_lossy(&out.stdout))
+    parse_cert_expiry(&out)
+}
+
+/// The options of one certificate read, for curl's stdin: an address may
+/// carry a token, and a command line is readable by every local user.
+pub(super) fn cert_curl_config(url: &str) -> String {
+    use hyperion_adapters::cmd::curl_config_quote as q;
+    format!(
+        "silent\ninsecure\nhead\n\
+         output = \"/dev/null\"\n\
+         connect-timeout = \"5\"\n\
+         max-time = \"{}\"\n\
+         write-out = \"%{{certs}}\"\n\
+         url = \"{}\"\n",
+        q(CERT_MAX_TIME_SECS),
+        q(url),
+    )
 }
 
 /// One probe and, for an https address whose certificate is due, the read of
