@@ -257,7 +257,7 @@ stop the daemon, a restart loop, an unreachable registry, and the reverse-proxy 
 end to end. Dev panel walk through `/docker` with a stub.
 
 **Test node:** `tes-1`, named by the owner. Debian 13,
-a Hyperion worker with one test hosting (the test hosting), SSH as root
+a Hyperion worker with one test hosting, SSH as root
 with `-o IdentitiesOnly=no`. Docker Engine 29.9.3, Compose v5.7.0 and buildx 0.38.1
 were installed there on 2026-11-04 from Docker's apt repository, with default daemon
 settings, and no stacks are left running. All destructive tests run here and on no
