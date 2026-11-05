@@ -2385,7 +2385,10 @@ mod site_scan {
         let cfg = dir.path().join("agent.toml");
         assert!(!read_new_layers_live(Some(&cfg)), "no file");
         std::fs::write(&cfg, "[integrity]\nvendor_refs_live = true\n").expect("write");
-        assert!(!read_new_layers_live(Some(&cfg)), "the section without the key");
+        assert!(
+            !read_new_layers_live(Some(&cfg)),
+            "the section without the key"
+        );
         std::fs::write(&cfg, "[integrity]\nnew_layers_live = \"yes\"\n").expect("write");
         assert!(!read_new_layers_live(Some(&cfg)), "not a boolean");
         std::fs::write(&cfg, "[integrity]\nnew_layers_live = true\n").expect("write");
@@ -2677,7 +2680,7 @@ mod site_scan {
         let t1 = t0 + 6 * HOUR;
         s.site_scan_tick_at(&chrono::Utc, t1).await.expect("tick");
 
-        let asked = asked.lock().expect("lock");
+        let asked = asked.lock().expect("lock").clone();
         assert!(asked[0].is_empty(), "nothing stood before the first run");
         let mut second = asked[1].clone();
         second.sort();

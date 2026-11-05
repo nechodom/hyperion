@@ -44,6 +44,8 @@ const NICE: &str = "/usr/bin/nice";
 /// How much of the worker's stderr goes into a failure message.
 const STDERR_TAIL_BYTES: usize = 2048;
 
+// One job is alive per run, so the size of the variants costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerJob {
     /// Look at the docroot and say what it holds, so the agent knows which
