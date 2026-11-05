@@ -11,6 +11,19 @@
   </div>
 </div>
 
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = flash_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
 {% if let Some(err) = daemon_error %}
   <div class="flash error">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
@@ -106,9 +119,25 @@
       <div class="small" style="color:var(--warn)">Published on every address. Docker sends this traffic around the host's firewall input rules, which is where Hyperion's bans live, so the app can be reached directly and bypass nginx, the WAF and bans. A rule dropping this port in an input chain does not stop a request from outside. Publish it as <code>{{ o.compose_hint }}</code> in the compose file to keep it behind the proxy.</div>
       {% endif %}
     </div>
-    {% if px.can_create %}
+    {% if px.can_create || !px.link_choices.is_empty() %}
     <div class="svc-actions">
+      {% if !px.link_choices.is_empty() %}
+      <form method="post" action="{{ px.link_action }}" style="display:inline-flex;gap:0.4rem;align-items:center"
+            data-confirm-title="Point a reverse proxy at {{ o.url }}"
+            data-confirm-body="The chosen hosting will forward to {{ o.url }} instead of where it forwards now, so its visitors reach this stack from then on. Docker is not touched. You can change it back on the hosting's page."
+            data-confirm-confirm-label="Point it here">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="port" value="{{ o.port }}">
+        <label class="sr-only" for="link-{{ o.port }}">Existing reverse proxy</label>
+        <select id="link-{{ o.port }}" name="hosting" class="small">
+          {% for d in px.link_choices %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
+        </select>
+        <button class="btn small" type="submit">Point it here</button>
+      </form>
+      {% endif %}
+      {% if px.can_create %}
       <a class="btn small primary" href="{{ o.href }}">Add reverse proxy</a>
+      {% endif %}
     </div>
     {% endif %}
   </div>

@@ -1954,6 +1954,19 @@ async fn seed_demo_docker(svc: &StubService) {
     use hyperion_types::docker::{
         DockerContainer, DockerDisk, DockerNodeStatus, DockerPort, DockerProject,
     };
+    // A reverse proxy forwarding elsewhere, which the shop stack's page
+    // offers to point at its port.
+    svc.create(hyperion_rpc::wire::HostingCreateReq {
+        domain: hyperion_validate::Domain::parse("app.zahrada-plus.cz").expect("domain"),
+        aliases: vec![],
+        php_version: None,
+        database: None,
+        system_user: None,
+        kind: "reverse_proxy".into(),
+        proxy_upstream_url: Some("http://127.0.0.1:9000".into()),
+    })
+    .await
+    .expect("demo proxy");
     let now = hyperion_types::now_secs();
     let c =
         |project: &str, service: &str, state: &str, mem_mib: u64, cpu_x100: i64| DockerContainer {

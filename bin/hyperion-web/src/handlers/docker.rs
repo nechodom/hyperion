@@ -783,6 +783,8 @@ struct StackTpl<'a> {
     css_version: &'static str,
     htmx_version: &'static str,
     csrf_token: String,
+    flash: Option<String>,
+    flash_error: Option<String>,
     node_label: String,
     name: String,
     tone: &'static str,
@@ -811,6 +813,8 @@ struct StackTpl<'a> {
 struct ProxyOfferView {
     /// `http://127.0.0.1:18080`, what the hosting would forward to.
     url: String,
+    /// The host port, which "Point it here" posts.
+    port: u16,
     /// "web, container port 80".
     what: String,
     /// Open on every address; the warning explains the consequence.
@@ -835,11 +839,22 @@ struct ProxyView {
     elsewhere: Vec<String>,
     /// The reader may open the wizard.
     can_create: bool,
+    /// Where "Point it here" posts.
+    link_action: String,
+    /// Reverse-proxy hostings on this node that could be pointed at a port
+    /// here: the ones not already forwarding to this stack. Empty for a
+    /// reader who may not change a hosting's upstream.
+    link_choices: Vec<String>,
 }
 
 /// What a stack's published ports allow. Offers are one per host port: the
 /// same port on `0.0.0.0` and `::` is one app, and public if any bind is.
-fn proxy_view(node_id: &str, p: &DockerProject, can_create: bool) -> Option<ProxyView> {
+fn proxy_view(
+    node_id: &str,
+    p: &DockerProject,
+    can_create: bool,
+    link_choices: Vec<String>,
+) -> Option<ProxyView> {
     use hyperion_core::service::{proxy_offer, ProxyOffer};
     if p.containers.is_empty() {
         return None;
@@ -867,6 +882,7 @@ fn proxy_view(node_id: &str, p: &DockerProject, can_create: bool) -> Option<Prox
                             port.host_port, port.container_port
                         ),
                         url,
+                        port: port.host_port,
                         what,
                         public_bind: false,
                     });
@@ -893,7 +909,67 @@ fn proxy_view(node_id: &str, p: &DockerProject, can_create: bool) -> Option<Prox
         conflicts,
         elsewhere,
         can_create,
+        link_action: format!(
+            "/docker/{}/{}/link-proxy",
+            enc(node_id),
+            project_token(&p.name)
+        ),
+        link_choices,
     })
+}
+
+/// The upstream a proxy would use for `host_port`, if this stack offers that
+/// port at all. Decided from what the stack publishes, the same way the
+/// offers are, so a posted port never becomes an address on its own.
+fn offer_url(p: &DockerProject, host_port: u16) -> Option<String> {
+    use hyperion_core::service::{proxy_offer, ProxyOffer};
+    p.containers
+        .iter()
+        .flat_map(|c| &c.ports)
+        .filter(|port| port.host_port == host_port)
+        .find_map(|port| match proxy_offer(port) {
+            ProxyOffer::Offer { url, .. } => Some(url),
+            _ => None,
+        })
+}
+
+/// Reverse-proxy hostings that could be pointed at this stack: not in the
+/// trash, and not already forwarding to it.
+fn link_choices(hostings: Vec<hyperion_types::HostingSummary>, linked: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = hostings
+        .into_iter()
+        .filter(|h| h.kind.as_deref() == Some("reverse_proxy"))
+        .filter(|h| h.state != hyperion_types::HostingState::Trashed)
+        .filter(|h| !linked.iter().any(|l| l.eq_ignore_ascii_case(&h.domain)))
+        .map(|h| h.domain)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The reverse proxies on `canonical` a stack's offer could take, for a
+/// reader who may change an upstream. A node that does not answer offers
+/// none: the "Add reverse proxy" path still works.
+async fn fetch_link_choices(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    canonical: &str,
+    p: &DockerProject,
+) -> Vec<String> {
+    if !ctx.can(Capability::HostingEditConfig) || p.containers.is_empty() {
+        return Vec::new();
+    }
+    match crate::dispatcher::dispatch_to_node(
+        state,
+        dispatch_target(canonical),
+        Request::HostingList,
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingList(v)) => link_choices(v, &p.hostings),
+        _ => Vec::new(),
+    }
 }
 
 fn container_tone(c: &DockerContainer) -> &'static str {
@@ -1003,6 +1079,7 @@ pub async fn get_docker_stack(
     State(state): State<SharedState>,
     ctx: AuthCtx,
     Path((node, project)): Path<(String, String)>,
+    Query(q): Query<DockerQuery>,
 ) -> Result<Response, AppError> {
     if !allowed(&ctx) {
         return Ok(Redirect::to("/").into_response());
@@ -1046,7 +1123,8 @@ pub async fn get_docker_stack(
     let sv = stack_view(&canonical, p);
     let mut containers: Vec<ContainerView> = p.containers.iter().map(container_view).collect();
     containers.sort_by(|a, b| (a.tone == "ok", &a.name).cmp(&(b.tone == "ok", &b.name)));
-    let proxy = proxy_view(&canonical, p, ctx.can(Capability::HostingCreate));
+    let choices = fetch_link_choices(&state, &ctx, &canonical, p).await;
+    let proxy = proxy_view(&canonical, p, ctx.can(Capability::HostingCreate), choices);
     let tpl = StackTpl {
         username: &ctx.username,
         user_initial: crate::handlers::user_initial(&ctx.username),
@@ -1054,6 +1132,8 @@ pub async fn get_docker_stack(
         css_version: crate::handlers::css_version(),
         htmx_version: crate::handlers::htmx_version(),
         csrf_token: crate::handlers::session_csrf_token(&state, &ctx),
+        flash: q.flash,
+        flash_error: q.flash_error,
         node_label: label,
         name: sv.name,
         tone: sv.tone,
@@ -1090,6 +1170,121 @@ pub async fn get_docker_stack(
         proxy,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// POST /docker/:node/:project/link-proxy
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+pub struct LinkProxyForm {
+    #[serde(default)]
+    pub hosting: String,
+    /// The host port; text, so a bad value is a message and not a 422.
+    #[serde(default)]
+    pub port: String,
+}
+
+/// Point an existing reverse-proxy hosting at a port this stack publishes.
+/// It changes the hosting's upstream, the same change its own page makes,
+/// so the stack is linked the way a new proxy would be. Docker is not
+/// touched. The address is worked out here from what the stack publishes;
+/// the form only names a port.
+pub async fn post_link_proxy(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path((node, project)): Path<(String, String)>,
+    axum::Form(form): axum::Form<LinkProxyForm>,
+) -> Result<Response, AppError> {
+    if !allowed(&ctx) {
+        return Err(AppError::Forbidden);
+    }
+    let list = registry(&state).await.map_err(AppError::Rpc)?;
+    if !list.cluster_installed {
+        return Err(AppError::NotFound);
+    }
+    let canonical = registered_target(&state, &list, &node)
+        .await
+        .ok_or(AppError::NotFound)?;
+    let name = project_from_url(&project).ok_or(AppError::NotFound)?;
+    let sel = match crate::handlers::hostings::require_manage_for_selector(
+        &state,
+        &ctx,
+        form.hosting.trim(),
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let back = format!("/docker/{}/{}", enc(&canonical), project_token(&name));
+    let refuse =
+        |msg: &str| Ok(Redirect::to(&format!("{back}?flash_error={}", enc(msg))).into_response());
+
+    let st = match crate::dispatcher::dispatch_to_node(
+        &state,
+        dispatch_target(&canonical),
+        Request::DockerOverview,
+    )
+    .await
+    {
+        Ok(RpcResponse::DockerOverview(st)) => st,
+        Ok(RpcResponse::Error(e)) => return refuse(&e.to_string()),
+        Ok(_) => return Err(AppError::Internal("unexpected agent response".into())),
+        Err(e) => return refuse(&e.to_string()),
+    };
+    let p = st
+        .projects
+        .iter()
+        .find(|p| p.name == name)
+        .ok_or(AppError::NotFound)?;
+    let Some(url) = form
+        .port
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .and_then(|port| offer_url(p, port))
+    else {
+        return refuse("That port is not one this stack offers to a reverse proxy.");
+    };
+
+    let Ok((detail, owner)) =
+        crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone()).await
+    else {
+        return refuse("That hosting was not found.");
+    };
+    if detail.kind != "reverse_proxy" {
+        return refuse(&format!("{} is not a reverse proxy.", detail.domain));
+    }
+    // 127.0.0.1 is this stack only on the stack's own node.
+    let owner = canonical_node(&state, owner.as_deref().unwrap_or(LOCAL_NODE_SENTINEL)).await;
+    if owner != canonical {
+        return refuse(&format!(
+            "{} is on another node, where 127.0.0.1 does not reach this stack.",
+            detail.domain
+        ));
+    }
+
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        dispatch_target(&canonical),
+        Request::HostingSetProxyUpstream {
+            sel,
+            upstream_url: url.clone(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingSetProxyUpstream(_)) => Ok(Redirect::to(&format!(
+            "{back}?flash={}",
+            enc(&format!("{} now forwards to {url}.", detail.domain))
+        ))
+        .into_response()),
+        Ok(RpcResponse::Error(e)) => refuse(&e.to_string()),
+        Ok(_) => Err(AppError::Internal("unexpected agent response".into())),
+        Err(e) => refuse(&e.to_string()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2248,5 +2443,63 @@ mod tests {
         };
         assert!(node_view(&row("web-1", st(p))).has_updates);
         assert!(!node_view(&row("web-1", st(proj("quiet", "ok")))).has_updates);
+    }
+
+    #[test]
+    fn link_choices_are_live_reverse_proxies_not_yet_pointing_here() {
+        use hyperion_types::{HostingId, HostingState, HostingSummary};
+        let h = |domain: &str, kind: &str, state: HostingState| HostingSummary {
+            id: HostingId(domain.into()),
+            domain: domain.into(),
+            state,
+            php_version: None,
+            created_at: 0,
+            node_id: None,
+            maintenance_mode: false,
+            kind: Some(kind.into()),
+            wp_version: None,
+            cert_not_after: None,
+            cert_issuer: None,
+            disk_bytes: None,
+            last_backup_at: None,
+            last_backup_ok: None,
+        };
+        let got = link_choices(
+            vec![
+                h("zed.example.cz", "reverse_proxy", HostingState::Suspended),
+                h("app.example.cz", "reverse_proxy", HostingState::Active),
+                h("gone.example.cz", "reverse_proxy", HostingState::Trashed),
+                h("blog.example.cz", "php", HostingState::Active),
+                h("Here.example.cz", "reverse_proxy", HostingState::Active),
+            ],
+            &["here.example.cz".to_string()],
+        );
+        assert_eq!(got, vec!["app.example.cz", "zed.example.cz"]);
+    }
+
+    #[test]
+    fn offer_url_follows_the_published_port_only() {
+        let mut p = proj("shop", "ok");
+        let mut c = container_with(None);
+        let port = |ip: &str, host: u16, proto: &str| hyperion_types::docker::DockerPort {
+            host_ip: ip.into(),
+            host_port: host,
+            container_port: 80,
+            proto: proto.into(),
+        };
+        c.ports = vec![
+            port("127.0.0.1", 18080, "tcp"),
+            port("0.0.0.0", 80, "tcp"),
+            port("10.0.0.5", 18090, "tcp"),
+            port("0.0.0.0", 5353, "udp"),
+        ];
+        p.containers = vec![c];
+        assert_eq!(
+            offer_url(&p, 18080).as_deref(),
+            Some("http://127.0.0.1:18080")
+        );
+        for refused in [80, 18090, 5353, 9999] {
+            assert_eq!(offer_url(&p, refused), None, "{refused}");
+        }
     }
 }
