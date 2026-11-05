@@ -78,6 +78,7 @@ async fn create_after_rolled_back_failure_can_recreate_same_domain() {
             hyperion_types::ServiceInstallStatus::default(),
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        site_scan: Default::default(),
         docker_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
         docker_log_gate: crate::service::new_docker_log_gate(),
     };
@@ -129,6 +130,7 @@ async fn list_returns_active_after_create() {
             hyperion_types::ServiceInstallStatus::default(),
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        site_scan: Default::default(),
         docker_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
         docker_log_gate: crate::service::new_docker_log_gate(),
     };
@@ -188,6 +190,7 @@ async fn duplicate_domain_is_already_exists() {
             hyperion_types::ServiceInstallStatus::default(),
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        site_scan: Default::default(),
         docker_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
         docker_log_gate: crate::service::new_docker_log_gate(),
     };

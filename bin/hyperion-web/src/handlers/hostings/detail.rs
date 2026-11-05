@@ -347,6 +347,12 @@ pub(super) struct DetailTpl<'a> {
 }
 
 impl<'a> DetailTpl<'a> {
+    /// The integrity card goes on the overview for a site that has no WordPress
+    /// row for it.
+    pub(super) fn integrity_on_overview(&self) -> bool {
+        integrity_on_overview(&self.detail.kind, self.wp_status.is_some())
+    }
+
     /// A PHP branch that will never get a fix for a known hole (8.1 for the
     /// 2026-10 RCE advisories). The template warns on the site and marks the
     /// branch in every version picker.

@@ -298,7 +298,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         // boots WordPress around it. On the default 30s a big plugin was
         // reported as failed while the node kept replacing the folder, and
         // the re-scan right after read it half-replaced.
-        Request::WpPluginAction { .. } => 300,
+        Request::WpPluginAction { .. } | Request::ScanComponentReinstall { .. } => 300,
+        // Up to 2 GiB copied and fsynced, one way or the other.
+        Request::ScanFileQuarantine { .. } | Request::ScanFileRestore { .. } => 300,
         // Move a bundle / install WordPress.
         Request::BackupFetchChunk { .. }
         | Request::HostingMigrationFetchBundleFile { .. }
@@ -395,7 +397,8 @@ fn timeout_for_request(req: &Request) -> u64 {
         // Enabling quotas apt-installs `quota` and runs quotacheck, which
         // the node itself allows 240 s; QuotaSet enables them inline.
         Request::QuotaEnableKernel { .. } | Request::QuotaSet { .. } => 600,
-        // ClamAV over the docroot plus wp-cli checksums.
+        // The native scan, waited for. `hctl` only: the panel
+        // sends `WpIntegrityScanRequest`, which returns at once.
         Request::WpIntegrityScan { .. } => 900,
         Request::WpCoreRepair { .. } => 900,
         // SSH preflight + remote extract against the source panel.

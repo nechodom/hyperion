@@ -175,3 +175,28 @@ async fn create_rolls_back_on_nginx_failure() {
     let r = s.create(req("example.cz")).await;
     assert!(r.is_err());
 }
+
+/// A database password ends up in a mariadb option file the root client reads:
+/// a newline there would start a line of its own (`plugin-dir=…`). Refused
+/// before anything is looked up or changed.
+#[tokio::test]
+async fn db_password_with_a_control_character_is_refused() {
+    let s = svc(open_memory().await.expect("open"), happy_mocks());
+    for pw in [
+        "long-enough-pw\n[client]\nplugin-dir=/home/x",
+        "long-enough-pw\r",
+        "long-enough\tpw",
+        "long-enough-pw\u{7f}",
+        "long-enough-pw\0",
+    ] {
+        let sel = HostingSelector::Domain(Domain::parse("pw.cz").unwrap());
+        let err = s
+            .db_reset_password(sel, pw.to_string())
+            .await
+            .expect_err("refused");
+        assert!(
+            matches!(&err, RpcError::Validation { message } if message.contains("control characters")),
+            "{pw:?}: {err:?}"
+        );
+    }
+}

@@ -65,6 +65,24 @@ pub async fn get_for_hosting(
     }))
 }
 
+/// Every MariaDB database this hosting owns: name, login and where its secret is.
+pub async fn mariadb_logins_for_hosting(
+    pool: &SqlitePool,
+    hosting_id: &HostingId,
+) -> Result<Vec<(String, String, SecretId)>, StateError> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT db_name, db_user, secret_id FROM databases WHERE hosting_id = ? AND engine = ?",
+    )
+    .bind(hosting_id.as_str())
+    .bind(DbProvision::MariaDB.as_str())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(name, user, secret)| (name, user, SecretId(secret)))
+        .collect())
+}
+
 pub async fn delete(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
     sqlx::query("DELETE FROM databases WHERE id = ?")
         .bind(id)

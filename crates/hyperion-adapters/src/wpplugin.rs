@@ -140,6 +140,103 @@ if (!defined('DISABLE_WP_CRON')
 unset($hyperion_cron_status);
 "#;
 
+/// The Hyperion plugin module that makes a preview vhost usable.
+///
+/// Keyed on the `HYPERION_PREVIEW_HOST` fastcgi param, which only the
+/// preview server block sets — so on the real vhost this file does
+/// nothing and normal visitors never touch this code path. A request header
+/// cannot forge it: headers reach PHP as `HTTP_*`, never under this name.
+pub const PREVIEW_MODULE: &str = r#"<?php
+/**
+ * Hyperion preview — loaded by mu-plugins/hyperion.php (managed — do not edit).
+ *
+ * When a request arrives through the node's internal preview vhost (which
+ * sets the HYPERION_PREVIEW_HOST fastcgi param), keep WordPress ON that
+ * hostname instead of bouncing to the site's real Site Address. On the
+ * real vhost the param is absent and this whole block is skipped.
+ */
+if (!defined('ABSPATH')) { exit; }
+if (!empty($_SERVER['HYPERION_PREVIEW_HOST']) && !defined('HYPERION_PREVIEW_HOST')) {
+    define('HYPERION_PREVIEW_HOST', strtolower((string) $_SERVER['HYPERION_PREVIEW_HOST']));
+    $hyp_host = HYPERION_PREVIEW_HOST;
+    $hyp_url  = 'https://' . $hyp_host;
+
+    // The site's REAL hostnames, read before the filters below change what
+    // get_option() answers (WP_HOME / WP_SITEURL are already folded in by
+    // core's own option filters, which load before mu-plugins). Only these
+    // are rewritten: a redirect to a payment gateway or an OAuth provider
+    // has to leave the site, and pinning every redirect to the preview host
+    // sent those to a 404 on the preview instead.
+    $hyp_real = array();
+    foreach (array(get_option('home'), get_option('siteurl')) as $hyp_u) {
+        $hyp_h = is_string($hyp_u) ? parse_url($hyp_u, PHP_URL_HOST) : null;
+        if (is_string($hyp_h) && $hyp_h !== '') {
+            $hyp_h = strtolower($hyp_h);
+            $hyp_real[$hyp_h] = true;
+            $hyp_real[strpos($hyp_h, 'www.') === 0 ? substr($hyp_h, 4) : 'www.' . $hyp_h] = true;
+        }
+    }
+    unset($hyp_real[$hyp_host], $hyp_u, $hyp_h);
+    $hyp_real = array_keys($hyp_real);
+
+    // Force home/siteurl to the preview host. Priority 999 so this beats
+    // WordPress's own _config_wp_home/_config_wp_siteurl (priority 10),
+    // which is how a WP_HOME / WP_SITEURL constant in wp-config.php takes
+    // effect — common on imported sites, and the reason the first version
+    // of this shim (plain option filters) did nothing there.
+    add_filter('option_home',    function () use ($hyp_url) { return $hyp_url; }, 999);
+    add_filter('option_siteurl', function () use ($hyp_url) { return $hyp_url; }, 999);
+
+    // Rewrite the host of a URL to the preview host — when it is one of the
+    // site's own. Relative URLs and foreign hosts pass through unchanged.
+    $hyp_rewrite = function ($url) use ($hyp_url, $hyp_real) {
+        if (!is_string($url) || $url === '') { return $url; }
+        return preg_replace_callback('#^(?:https?:)?//([^/:?\#]+)(?::\d+)?#i', function ($m) use ($hyp_url, $hyp_real) {
+            return in_array(strtolower($m[1]), $hyp_real, true) ? $hyp_url : $m[0];
+        }, $url, 1);
+    };
+    add_filter('home_url', $hyp_rewrite, 999);
+    add_filter('site_url', $hyp_rewrite, 999);
+    add_filter('content_url', $hyp_rewrite, 999);
+    add_filter('plugins_url', $hyp_rewrite, 999);
+
+    // The catch-all for redirects: EVERY WordPress redirect goes through
+    // wp_redirect(), so a canonical bounce, a login redirect or an SSL
+    // plugin cannot send the visitor back to the real domain.
+    add_filter('wp_redirect', $hyp_rewrite, 999);
+
+    // And drop the canonical redirect outright (registered before
+    // mu-plugins load, so remove_action here takes effect).
+    remove_action('template_redirect', 'redirect_canonical');
+
+    // Absolute URLs stored in the content itself — every image in every
+    // post, page-builder CSS, menus — still name the real domain, which
+    // before the DNS cutover is the OLD server or nothing at all. Rewrite
+    // them in the response, preview requests only, text responses only.
+    if ($hyp_real) {
+        $hyp_quoted = implode('|', array_map(function ($h) { return preg_quote($h, '#'); }, $hyp_real));
+        ob_start(function ($out) use ($hyp_host, $hyp_quoted) {
+            if (!is_string($out) || $out === '') { return $out; }
+            foreach (headers_list() as $h) {
+                if (stripos($h, 'content-type:') === 0 && !preg_match('#text/|json|xml|javascript#i', $h)) {
+                    return $out;
+                }
+            }
+            // `//host`, `http(s)://host`, and the JSON-escaped `https:\/\/host`,
+            // but not a longer name that merely starts with the host.
+            return preg_replace_callback(
+                '#(?:https?:)?(//|\\\\/\\\\/)(?:' . $hyp_quoted . ')(?::\d+)?(?![a-z0-9-]|\.[a-z0-9])#i',
+                function ($m) use ($hyp_host) {
+                    return $m[1] === '//' ? 'https://' . $hyp_host : 'https:\/\/' . $hyp_host;
+                },
+                $out
+            );
+        });
+    }
+    unset($hyp_host, $hyp_url, $hyp_real, $hyp_rewrite, $hyp_quoted);
+}
+"#;
+
 /// The loader. Static except for `{{VERSION}}`.
 ///
 /// Runs on every request of every site: a handful of `is_file` stats (the
@@ -393,6 +490,57 @@ pub fn render_loader() -> String {
     LOADER_TEMPLATE.replace("{{VERSION}}", &LOADER_VERSION.to_string())
 }
 
+/// What Hyperion keeps at one of its paths, as far as the site scan can know it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedContent {
+    /// The same bytes on every site; this binary writes exactly these.
+    Fixed(String),
+    /// Rendered per site from settings only the agent knows (the mail module:
+    /// domain, From address, log path, policy). The agent says what it should be.
+    PerSite,
+    /// The status page: JSON data in a fixed shape, see [`status_shape_ok`].
+    Status,
+}
+
+/// One file Hyperion keeps inside a site's `mu-plugins`, for the site scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedFile {
+    /// Relative to the docroot.
+    pub rel: String,
+    pub content: ManagedContent,
+}
+
+/// Every file this plugin puts in a site, so the scan can tell ours from a
+/// tenant's. A module added to [`Module::ALL`] has to be answered for here: the
+/// match has no wildcard.
+///
+/// How the scan treats a mismatch: a file that isn't what this binary writes is
+/// a finding, but for the first hour after the agent starts it is an item to
+/// review, since the previous version's file may still be there until the install
+/// tick rewrites it. A High rule hit in it is a finding even then; a Medium one
+/// stays a review item within that hour, like the mismatch itself.
+pub fn managed_files() -> Vec<ManagedFile> {
+    let file = |rel: String, content: ManagedContent| ManagedFile { rel, content };
+    let mut out = vec![file(
+        format!("{}/{LOADER_FILE}", mu_rel()),
+        ManagedContent::Fixed(render_loader()),
+    )];
+    for m in Module::ALL {
+        let content = match m {
+            Module::Mail => ManagedContent::PerSite,
+            Module::RegGuard => ManagedContent::Fixed(crate::regguard::render_mu_plugin()),
+            Module::Preview => ManagedContent::Fixed(PREVIEW_MODULE.to_string()),
+            Module::Cron => ManagedContent::Fixed(CRON_MODULE.to_string()),
+        };
+        out.push(file(format!("{}/{}", module_dir_rel(), m.file()), content));
+    }
+    out.push(file(
+        format!("{}/{STATUS_FILE}", module_dir_rel()),
+        ManagedContent::Status,
+    ));
+    out
+}
+
 /// What the agent tells the status page. Every field is optional on the PHP
 /// side, so adding one here never breaks a page reading an older file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
@@ -433,11 +581,35 @@ pub struct BackupStatus {
 /// direct HTTP request — it names the site's sender and node.
 pub fn render_status(status: &SiteStatus) -> String {
     let json = serde_json::to_string(status).unwrap_or_else(|_| "{}".into());
-    format!(
-        "<?php\n// Written by Hyperion — what the server last checked. Edits are overwritten.\n\
-         if (!defined('ABSPATH')) {{ exit; }}\nreturn json_decode('{}', true);\n",
-        php_single_quoted(&json)
-    )
+    format!("{STATUS_HEAD}{}{STATUS_TAIL}", php_single_quoted(&json))
+}
+
+const STATUS_HEAD: &str =
+    "<?php\n// Written by Hyperion — what the server last checked. Edits are overwritten.\n\
+     if (!defined('ABSPATH')) { exit; }\nreturn json_decode('";
+const STATUS_TAIL: &str = "', true);\n";
+
+/// Is this exactly the shape [`render_status`] writes: the fixed head, one
+/// single-quoted literal whose only escapes are `\\` and `\'`, and the fixed
+/// tail, with nothing else. Its content is data the agent chose each hour, so no
+/// digest can be compiled in, but code in it (a quote that ends the literal, a
+/// second statement) can be told from data without running or guessing at it.
+pub fn status_shape_ok(file: &str) -> bool {
+    let Some(rest) = file.strip_prefix(STATUS_HEAD) else {
+        return false;
+    };
+    let Some(literal) = rest.strip_suffix(STATUS_TAIL) else {
+        return false;
+    };
+    let mut chars = literal.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => return false,
+            '\\' if !matches!(chars.next(), Some('\\' | '\'')) => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Escape for a PHP single-quoted string: only `\` and `'` are special there.
@@ -456,6 +628,17 @@ pub fn module_path(root_dir: &str, module: Module) -> PathBuf {
         .join("wp-content/mu-plugins")
         .join(MODULE_DIR)
         .join(module.file())
+}
+
+/// `wp-content/mu-plugins/hyperion/<module>`, relative to the docroot.
+pub fn module_rel(module: Module) -> String {
+    format!("{}/{}", module_dir_rel(), module.file())
+}
+
+/// The digest the site scan compares a file with.
+pub fn expected_digest(content: &str) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(content.as_bytes()).into()
 }
 
 /// `<root>/wp-content/mu-plugins/hyperion.php` — logical, as above.
@@ -895,5 +1078,39 @@ mod tests {
         assert!(std::fs::read_to_string(dir.join(STATUS_FILE))
             .expect("status")
             .contains("json_decode"));
+    }
+
+    #[test]
+    fn the_status_shape_is_exactly_what_the_agent_writes() {
+        let st = SiteStatus {
+            domain: "o'brien\\x.cz".into(),
+            ..Default::default()
+        };
+        let body = render_status(&st);
+        assert!(status_shape_ok(&body), "{body}");
+        for bad in [
+            format!("{body}echo 1;\n"),
+            format!("{body}\n"),
+            body.replace("exit; }", "exit; } system('id');"),
+            body.replace("return json_decode('", "return json_decode('\\x"),
+            body.replace("', true);", "'); evil(); //', true);"),
+            body.replace("<?php", "<?php /* */"),
+            String::new(),
+        ] {
+            assert!(!status_shape_ok(&bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_module_is_listed_once() {
+        let files = managed_files();
+        for m in Module::ALL {
+            assert_eq!(
+                files.iter().filter(|f| f.rel == module_rel(m)).count(),
+                1,
+                "{m:?}"
+            );
+        }
+        assert_eq!(files.len(), Module::ALL.len() + 2);
     }
 }

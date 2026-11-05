@@ -529,6 +529,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // manifest): leave it out rather than write unknown state.
                 None => continue,
             }
+            let checked;
+            let mut v = v;
+            if k == SCAN_TRUST_KV_KEY {
+                let (clean, kept, dropped) = clean_carried_trust(v);
+                self.append_audit(
+                    "wp.integrity.trust_imported",
+                    Some(id),
+                    &serde_json::json!({ "kept": kept, "dropped": dropped }).to_string(),
+                    "ok",
+                )
+                .await;
+                if dropped > 0 {
+                    report.push(format!(
+                        "trust list: {dropped} entries left out, they aren't what a scan writes"
+                    ));
+                }
+                if kept == 0 {
+                    continue;
+                }
+                checked = clean;
+                v = &checked;
+            }
             match hyperion_state::hosting_kv::set(&self.pool, id, k, v, now_secs()).await {
                 Ok(()) => kv_done += 1,
                 Err(e) => report.push(fail(&format!("setting {k}"), &e)),
@@ -2031,6 +2053,10 @@ pub(super) fn carried_kv_scope(key: &str) -> Option<CarryScope> {
         phpworkers::KV_AUTO_STATE,
         hyperion_types::wpcron::KV_ENABLED,
         INTEGRITY_ENABLED_KV_KEY,
+        // What someone vouched for: paths relative to the docroot, and the files
+        // come along. Without it a Copy asks all over again, and a file with a
+        // rule hit someone accepted would read as a new finding.
+        SCAN_TRUST_KV_KEY,
         PERM_AUTOHEAL_KV_KEY,
         WP_MAIL_AUTOFIX_KV_KEY,
         WP_MAIL_OVERRIDE_KV_KEY,

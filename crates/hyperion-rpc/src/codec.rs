@@ -672,11 +672,81 @@ pub enum Request {
     /// cluster-wide vulnerability dashboard.
     VulnFindingsList,
     /// Verify a hosting's WordPress core + plugins against the checksums
-    /// WordPress.org publishes, and (where a scanner exists) sweep its
-    /// docroot with ClamAV. The "has anything been tampered with?"
-    /// sibling of `WpVulnScan`.
+    /// WordPress.org publishes, and read the rest of its files. ClamAV is the
+    /// node's weekly pass, not part of this. The "has anything been tampered
+    /// with?" sibling of `WpVulnScan`.
     WpIntegrityScan {
         hosting: HostingSelector,
+    },
+    /// The last stored integrity result for a hosting, without scanning:
+    /// answered by `Response::WpIntegrityScan`. What the WordPress tab
+    /// reads when it opens — a page view must never start a scan.
+    WpIntegrityStored {
+        hosting: HostingSelector,
+    },
+    /// Ask for a scan and return at once, answered by `Response::WpIntegrityScan`
+    /// with the stored result and `scan_queued` set. What "Scan now" sends: the
+    /// node's next tick runs it ahead of the schedule. The blocking
+    /// `WpIntegrityScan` is `hctl`'s.
+    WpIntegrityScanRequest {
+        hosting: HostingSelector,
+    },
+    /// Move a file the last scan reported to quarantine, answered by
+    /// `Response::WpIntegrityScan`. `rel` and `sha256` must name an item of the
+    /// stored result. `actor` is who the audit row names.
+    ScanFileQuarantine {
+        hosting: HostingSelector,
+        rel: String,
+        sha256: String,
+        #[serde(default)]
+        actor: String,
+    },
+    /// Put a quarantined file back, answered by `Response::WpIntegrityScan`.
+    ScanFileRestore {
+        hosting: HostingSelector,
+        id: String,
+        #[serde(default)]
+        actor: String,
+    },
+    /// Vouch for a file the last scan reported, as it stands, answered by
+    /// `Response::WpIntegrityScan`. The panel only sends this for `WpScanTrust`.
+    ScanFileTrust {
+        hosting: HostingSelector,
+        rel: String,
+        sha256: String,
+        #[serde(default)]
+        actor: String,
+    },
+    /// Vouch for every change to review with no rule hit, answered by
+    /// `Response::WpIntegrityScan`. The panel only sends this for `WpScanTrust`.
+    ScanTrustAllReview {
+        hosting: HostingSelector,
+        #[serde(default)]
+        actor: String,
+    },
+    /// Delete this node's reference copy of one vendor package version, answered by
+    /// `Response::WpIntegrityScan`. The panel only sends this for `WpScanTrust`.
+    ScanVendorForget {
+        hosting: HostingSelector,
+        #[serde(default)]
+        theme: bool,
+        slug: String,
+        version: String,
+        #[serde(default)]
+        actor: String,
+    },
+    /// What a hosting holds in quarantine: metadata only.
+    ScanQuarantineList {
+        hosting: HostingSelector,
+    },
+    /// Replace a plugin or theme that failed its comparison with wordpress.org's
+    /// copy, answered by `Response::WpPluginAction`. Refused unless wordpress.org is
+    /// what the stored result compared it with.
+    ScanComponentReinstall {
+        hosting: HostingSelector,
+        slug: String,
+        #[serde(default)]
+        theme: bool,
     },
     /// Every hosting's last stored integrity scan on this node — drives
     /// the cluster-wide integrity dashboard.
@@ -2578,6 +2648,7 @@ pub enum Response {
     WpVulnScan(hyperion_types::WpVulnScanResult),
     VulnFindingsList(Vec<hyperion_types::HostingVulnSummary>),
     WpIntegrityScan(hyperion_types::WpIntegrityScanResult),
+    ScanQuarantineList(hyperion_types::QuarantineList),
     IntegrityFindingsList(Vec<hyperion_types::HostingIntegritySummary>),
     WpStagingCreate {
         staging_domain: String,

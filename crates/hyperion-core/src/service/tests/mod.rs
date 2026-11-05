@@ -688,6 +688,7 @@ fn mk_care_report() -> CareReport {
         core_issues: 0,
         plugin_issues: 0,
         malware_hits: 0,
+        ..Default::default()
     });
     // A readable checklist with everything ticked — the ordinary case.
     // `None` here would mean the record could not be READ, which puts
@@ -919,29 +920,6 @@ async fn sibling_on_same_user(
 
 fn vh_defaults() -> hyperion_types::VhostOptions {
     hyperion_types::VhostOptions::default()
-}
-
-// ============================================================
-//  WordPress integrity scan. The feature exists because the
-//  operator SELLS "regular malware scanning", so the thing worth
-//  guarding is not the happy path — it's that a scan which could
-//  not run never renders as a clean site.
-// ============================================================
-
-/// A core verification that actually ran and found nothing.
-fn core_verified() -> integrity::CoreChecksums {
-    integrity::CoreChecksums {
-        checked: true,
-        ..Default::default()
-    }
-}
-
-/// A plugin verification that actually ran and found nothing.
-fn plugins_verified() -> integrity::PluginChecksums {
-    integrity::PluginChecksums {
-        checked: true,
-        ..Default::default()
-    }
 }
 
 // ============================================================
@@ -1258,6 +1236,7 @@ mod protection;
 mod provision;
 mod quota;
 mod rollback;
+mod scan_actions;
 mod scheduler;
 mod site_config;
 mod snapshots;

@@ -47,15 +47,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "php8.4-fpm php8.4-cli php8.4-mysql php8.4-pgsql \
                  php8.4-curl php8.4-gd php8.4-mbstring php8.4-xml php8.4-zip php8.4-soap",
             ),
-            // ClamAV for the per-hosting malware scan. The scanner is the
-            // `clamscan` CLI (from the `clamav` package), not a daemon, so
-            // there is no unit to "start" — but `clamav-freshclam` IS a
-            // service, and it is what keeps the virus database current, so
-            // that is the unit the Services page tracks. Installing it
-            // pulls `clamav` (hence clamscan) as a dependency; naming both
-            // is belt-and-braces. First `freshclam` run downloads a few
-            // hundred MB of signatures, so the first scan afterwards may
-            // lag briefly.
+            // ClamAV, optional: one weekly pass over every scanned site, in the
+            // night window, and only with 2 GiB of memory free (the signatures
+            // are over a gigabyte loaded). The scanner is the `clamscan` CLI
+            // (from the `clamav` package), not a daemon, so there is no unit to
+            // "start" — but `clamav-freshclam` IS a service, and it is what
+            // keeps the virus database current, so that is the unit the
+            // Services page tracks. Installing it pulls `clamav` (hence
+            // clamscan) as a dependency; naming both is belt-and-braces. The
+            // first `freshclam` run downloads a few hundred MB of signatures,
+            // and until it is done the pass waits.
             "clamav-freshclam" => Some("clamav clamav-freshclam"),
             "hyperion-web" => Some("hyperion-web"),
             "hyperion-agent" if allow_self_restart => Some("hyperion-agent"),
@@ -734,12 +735,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ("php8.2-fpm", "PHP 8.2 FPM"),
             ("php8.3-fpm", "PHP 8.3 FPM"),
             ("php8.4-fpm", "PHP 8.4 FPM"),
-            // ClamAV malware scanner. Tracked by its freshclam service
-            // (the DB updater); installing it provides the `clamscan` the
-            // per-hosting File-integrity scan uses. Absent until installed,
-            // which is exactly when the integrity card says "Install
-            // clamav on the node" — this is where the Install button is.
-            ("clamav-freshclam", "ClamAV (malware scanner)"),
+            // ClamAV, optional. Tracked by its freshclam service (the DB
+            // updater); installing it provides the `clamscan` the node's weekly
+            // pass uses. Absent until installed, which is exactly when the
+            // integrity card says ClamAV isn't installed — this is where the
+            // Install button is.
+            (
+                "clamav-freshclam",
+                "ClamAV (optional, weekly malware pass, needs 2 GiB free)",
+            ),
         ];
         // Fan ALL the probes out in parallel — was serial loop +
         // serial(rich + present) per unit, ~10 units × ~100 ms =

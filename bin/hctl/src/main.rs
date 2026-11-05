@@ -532,6 +532,15 @@ pub enum WpCmd {
     VulnScan { selector: String },
     /// Verify core + plugin checksums and scan for malware.
     IntegrityScan { selector: String },
+    /// Forget this node's reference copy of a vendor package version.
+    VendorForget {
+        selector: String,
+        slug: String,
+        version: String,
+        /// The package is a theme's, not a plugin's.
+        #[arg(long)]
+        theme: bool,
+    },
     /// Re-download WordPress core files over the existing ones.
     CoreRepair { selector: String },
     /// Update WordPress core to a release the site is offered (backup first).

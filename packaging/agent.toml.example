@@ -352,3 +352,19 @@ strategy = "mobile"
 # It rides the weekly site-check tick, so it can be spaced out but not made
 # more frequent than that.
 # cwv_interval_days = 7
+
+# Site scan. Scanning never runs wp-cli or any tenant PHP.
+#
+# These flags are per node: each node reads its own file, the settings sync
+# doesn't copy [integrity], and the per-node settings page doesn't edit it.
+# Set them in /etc/hyperion/agent.toml on every node whose sites should change;
+# they are read at each scan, with no restart.
+#
+# [integrity]
+# Rule hits, changes to review and theme comparisons show in the panel only, with
+# no alerts and no effect on care reports, until this is true. Default false.
+# new_layers_live = false
+# Premium plugins and themes are compared with the package WordPress holds a link
+# to. A difference is only a change to review, with no alerts, until this is true.
+# None of the vendor hosts is confirmed against a real licence yet. Default false.
+# vendor_refs_live = false

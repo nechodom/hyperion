@@ -596,19 +596,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // removed it before the permission repair (see restore_from_staging).
         let _ = tokio::fs::remove_dir_all(&staging).await;
         let (secure_dump, kept_aside) = staged?;
-
         let mut db_restored = false;
         if let (Some(db), Some(dump)) = (detail.database.as_ref(), secure_dump.as_deref()) {
-            self.import_restored_dump(
-                &detail,
-                db,
-                dump,
-                &plan,
-                &snapshot,
-                mode,
-                kept_aside.as_deref(),
-            )
-            .await?;
+            let imported = self
+                .import_restored_dump(
+                    &detail,
+                    db,
+                    dump,
+                    &plan,
+                    &snapshot,
+                    mode,
+                    kept_aside.as_deref(),
+                )
+                .await;
+            if let Err(e) = imported {
+                // The files were swapped in all the same.
+                self.snapshot_files_hashed(&detail, mode).await;
+                return Err(e);
+            }
             db_restored = true;
         }
 
@@ -627,6 +632,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
+        // Last: the hashing is detached, and nothing above waits for it.
+        self.snapshot_files_hashed(&detail, mode).await;
         Ok(hyperion_types::SnapshotRestoreOutcome {
             snapshot,
             files_restored: mode.restores_files(),
@@ -634,6 +641,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             safety_snapshot: safety.unwrap_or_default(),
             previous_site_kept_at: kept_aside.unwrap_or_default(),
         })
+    }
+
+    /// The one writer that replaces the whole tree, so the one that lists all of
+    /// it. The restored tree is whatever the snapshot held, infected or not: the
+    /// scan accepts what hashes to it, when the rules find nothing.
+    async fn snapshot_files_hashed(
+        &self,
+        detail: &HostingDetail,
+        mode: hyperion_types::BackupRestoreMode,
+    ) {
+        if mode.restores_files() {
+            let _ = self
+                .scan_writer_done(
+                    detail,
+                    hyperion_adapters::sitescan::scan::WriterKind::Restore,
+                    Some(hyperion_adapters::sitescan::accept::WriterPaths::All),
+                )
+                .await;
+        }
     }
 
     /// restic into `staging`, the database dump lifted out of the tenant's

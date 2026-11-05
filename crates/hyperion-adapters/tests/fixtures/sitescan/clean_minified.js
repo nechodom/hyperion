@@ -1,0 +1,2 @@
+/*! synthetic jQuery-style helper, inert fixture */
+!function(w,d){"use strict";var loadScript=function(u,cb){var s=d.createElement("script");s.src="/wp-content/themes/child/js/extra.js";s.async=!0;s.onload=cb;d.head.appendChild(s)},o=function(e){return d.querySelector(e)};w.helper={load:loadScript,$:o,ready:function(f){"loading"!=d.readyState?f():d.addEventListener("DOMContentLoaded",f)}};var t=d.createElement("script");t.setAttribute("src","vendor/chart.min.js");d.body.appendChild(t)}(window,document);

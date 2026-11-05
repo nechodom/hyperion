@@ -272,6 +272,22 @@ pub async fn write_manifest(manifest: &BackupManifest, path: &Path) -> Result<()
 /// Roughly equivalent to `tar -xzf <archive> -C <target_root>` — the
 /// archive root is the hosting's `htdocs` directory.
 pub async fn restore_archive(archive: &Path, target_root: &Path) -> Result<u64, AdapterError> {
+    restore_archive_listing(archive, target_root)
+        .await
+        .map(|(n, _)| n)
+}
+
+/// Members named at most this many times: a longer archive isn't listed.
+const LISTED_MEMBERS_MAX: usize = 500_000;
+
+/// [`restore_archive`], and the regular files it put under `htdocs/`, named
+/// relative to the document root. `None` when there were too many to list: the
+/// caller then can't say what changed. The names are the archive's own, so they
+/// are only ever paths to open through a [`crate::sitescan::TenantRoot`].
+pub async fn restore_archive_listing(
+    archive: &Path,
+    target_root: &Path,
+) -> Result<(u64, Option<Vec<String>>), AdapterError> {
     if !archive.exists() {
         return Err(AdapterError::Other(format!(
             "archive not found: {}",
@@ -283,9 +299,20 @@ pub async fn restore_archive(archive: &Path, target_root: &Path) -> Result<u64, 
     let target_root = target_root.to_path_buf();
     // Extraction is synchronous (flate2 + tar) and security-sensitive, so run it
     // on a blocking thread with full member validation.
-    tokio::task::spawn_blocking(move || extract_tar_gz_sandboxed(&archive, &target_root))
-        .await
-        .map_err(|e| AdapterError::Other(format!("restore task join: {e}")))?
+    tokio::task::spawn_blocking(move || {
+        let archive_len = std::fs::metadata(&archive)?.len();
+        let file = std::fs::File::open(&archive)?;
+        let mut names = Some(Vec::new());
+        extract_archive_sandboxed(
+            flate2::read::GzDecoder::new(file),
+            &target_root,
+            Some("htdocs"),
+            &mut names,
+        )?;
+        Ok((archive_len, names))
+    })
+    .await
+    .map_err(|e| AdapterError::Other(format!("restore task join: {e}")))?
 }
 
 /// Extract a gzip-compressed tar over `target_root`, refusing any member that
@@ -304,7 +331,7 @@ pub fn extract_tar_gz_sandboxed(archive: &Path, target_root: &Path) -> Result<u6
     let file = std::fs::File::open(archive)?;
     let gz = flate2::read::GzDecoder::new(file);
     // A hosting backup only ever contains `htdocs/…`.
-    extract_archive_sandboxed(gz, target_root, Some("htdocs"))?;
+    extract_archive_sandboxed(gz, target_root, Some("htdocs"), &mut None)?;
     Ok(archive_len)
 }
 
@@ -324,7 +351,7 @@ pub fn extract_docroot_tar_gz_sandboxed(
     target_root: &Path,
 ) -> Result<u64, AdapterError> {
     let gz = flate2::read::MultiGzDecoder::new(std::fs::File::open(archive)?);
-    extract_archive_sandboxed(gz, target_root, None)
+    extract_archive_sandboxed(gz, target_root, None, &mut None)
 }
 
 /// Extract a *plain* (non-gzip) tar over `target_root`, refusing any member that
@@ -334,7 +361,7 @@ pub fn extract_docroot_tar_gz_sandboxed(
 pub fn extract_tar_sandboxed(archive: &Path, target_root: &Path) -> Result<u64, AdapterError> {
     let archive_len = std::fs::metadata(archive)?.len();
     let file = std::fs::File::open(archive)?;
-    extract_archive_sandboxed(file, target_root, None)?;
+    extract_archive_sandboxed(file, target_root, None, &mut None)?;
     Ok(archive_len)
 }
 
@@ -395,6 +422,9 @@ fn extract_archive_sandboxed<R: std::io::Read>(
     reader: R,
     target_root: &Path,
     require_prefix: Option<&str>,
+    // When it holds a list, the regular files are named in it, relative to the
+    // required prefix; it is emptied to `None` if they would be too many.
+    names: &mut Option<Vec<String>>,
 ) -> Result<u64, AdapterError> {
     use std::path::Component;
 
@@ -499,6 +529,18 @@ fn extract_archive_sandboxed<R: std::io::Read>(
             )));
         }
         count += 1;
+        if let (Some(list), Some(prefix), tar::EntryType::Regular) =
+            (names.as_mut(), require_prefix, etype)
+        {
+            match path
+                .strip_prefix(format!("{prefix}/"))
+                .ok()
+                .and_then(|p| p.to_str())
+            {
+                Some(rel) if list.len() < LISTED_MEMBERS_MAX => list.push(rel.to_string()),
+                _ => *names = None,
+            }
+        }
     }
     Ok(count)
 }
@@ -547,7 +589,7 @@ pub async fn restore_mariadb_dump(
         use std::io::Write;
         // tempfile creates 0600 with O_EXCL, so nothing else can read it or
         // have pre-planted it.
-        opt.write_all(mariadb_option_file(login).as_bytes())?;
+        opt.write_all(mariadb_option_file(login)?.as_bytes())?;
         opt.flush()?;
     }
     let opt_arg = format!("--defaults-extra-file={}", opt.path().display());
@@ -572,16 +614,25 @@ pub async fn restore_mariadb_dump(
 
 /// `[client]` option-file body for `login`. Values are double-quoted with
 /// `\` and `"` escaped, so a password containing `#`, `;` or a quote is read
-/// back literally rather than truncated as a comment.
-pub(crate) fn mariadb_option_file(login: &DbLogin<'_>) -> String {
-    let q = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
+/// back literally rather than truncated as a comment. A control character is
+/// refused, not quoted: a newline would start a line of its own (`plugin-dir=`,
+/// `default-auth=`) in a file a root client reads.
+pub(crate) fn mariadb_option_file(login: &DbLogin<'_>) -> Result<String, AdapterError> {
+    let q = |what: &str, v: &str| {
+        if v.chars().any(|c| c < ' ' || c == '\u{7f}') {
+            return Err(AdapterError::Other(format!(
+                "the database {what} contains a control character, which no option file may hold"
+            )));
+        }
+        Ok(v.replace('\\', "\\\\").replace('"', "\\\""))
+    };
     // `local-infile=0`: defense in depth against server-driven LOAD DATA LOCAL
     // reads by the root restore client (the argv pin is authoritative).
-    format!(
+    Ok(format!(
         "[client]\nuser=\"{}\"\npassword=\"{}\"\nlocal-infile=0\n",
-        q(login.user),
-        q(login.password)
-    )
+        q("user", login.user)?,
+        q("password", login.password)?
+    ))
 }
 
 /// Drop the `DEFINER=…` clauses mariadb-dump writes on views, triggers,
@@ -1690,7 +1741,8 @@ garbage
         let f = mariadb_option_file(&DbLogin {
             user: "lm_abc_u",
             password: r#"p#a;s"s\w"#,
-        });
+        })
+        .expect("plain text");
         assert_eq!(
             f,
             "[client]\nuser=\"lm_abc_u\"\npassword=\"p#a;s\\\"s\\\\w\"\nlocal-infile=0\n"
@@ -1705,11 +1757,43 @@ garbage
         let f = mariadb_option_file(&DbLogin {
             user: "lm_abc_u",
             password: "pw",
-        });
+        })
+        .expect("plain text");
         assert!(
             f.contains("\nlocal-infile=0\n"),
             "option file must disable LOCAL INFILE: {f}"
         );
+    }
+
+    /// A newline inside a value would end the quoted line and start one of its
+    /// own, such as `plugin-dir=` for a root client. No quoting is trusted with
+    /// that: the file isn't written.
+    #[test]
+    fn option_file_refuses_control_characters() {
+        for bad in [
+            "pw\n[client]\nplugin-dir=/home/x",
+            "pw\r",
+            "p\tw",
+            "pw\u{7f}",
+            "pw\0",
+        ] {
+            assert!(
+                mariadb_option_file(&DbLogin {
+                    user: "lm_abc_u",
+                    password: bad,
+                })
+                .is_err(),
+                "{bad:?}"
+            );
+            assert!(
+                mariadb_option_file(&DbLogin {
+                    user: bad,
+                    password: "pw",
+                })
+                .is_err(),
+                "{bad:?}"
+            );
+        }
     }
 
     /// A wrong size here would make a good backup look broken, so anything
@@ -1820,6 +1904,63 @@ garbage
         // An ordinary backup name still works, or the feature is useless.
         assert!(accepted("example.cz-1700000000.tar.gz"));
         assert!(accepted("example_cz-1700000000.sql"));
+    }
+
+    /// A name that isn't UTF-8 can't be re-opened by the scan, and a list with a
+    /// hole in it is no list: the restore says nothing about what it wrote. (Linux
+    /// only: the macOS filesystem refuses such a name before it gets here.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_restore_with_an_unreadable_name_lists_nothing() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = tempfile::tempdir().expect("tmp");
+        let archive = dir.path().join("a.tar.gz");
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive).expect("create"),
+            flate2::Compression::fast(),
+        );
+        let mut tar = tar::Builder::new(gz);
+        for name in [&b"htdocs/index.php"[..], b"htdocs/\xff.php"] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(3);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            tar.append_data(&mut h, std::ffi::OsStr::from_bytes(name), &b"abc"[..])
+                .expect("append");
+        }
+        tar.into_inner().expect("tar").finish().expect("gz");
+        let (_, names) = restore_archive_listing(&archive, &dir.path().join("site"))
+            .await
+            .expect("restore");
+        assert_eq!(names, None);
+    }
+
+    #[tokio::test]
+    async fn a_restore_names_the_regular_files_it_put_in_htdocs() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("htdocs/wp-content")).expect("mkdir");
+        std::fs::write(src.join("htdocs/index.php"), "<?php\n").expect("write");
+        std::fs::write(src.join("htdocs/wp-content/x.js"), "var x;\n").expect("write");
+        let archive = dir.path().join("a.tar.gz");
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive).expect("create"),
+            flate2::Compression::fast(),
+        );
+        let mut tar = tar::Builder::new(gz);
+        tar.append_dir_all("htdocs", src.join("htdocs"))
+            .expect("tar");
+        tar.into_inner().expect("tar").finish().expect("gz");
+
+        let target = dir.path().join("site");
+        let (n, names) = restore_archive_listing(&archive, &target)
+            .await
+            .expect("restore");
+        assert!(n >= 3);
+        let mut names = names.expect("listed");
+        names.sort();
+        assert_eq!(names, ["index.php", "wp-content/x.js"]);
+        assert!(target.join("htdocs/index.php").exists());
     }
 
     #[test]

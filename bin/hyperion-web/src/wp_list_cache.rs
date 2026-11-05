@@ -196,6 +196,8 @@ const KEEPS_WP_LISTS: &[&str] = &[
     "/hostings/perm-autoheal",
     "/hostings/page-cache/",
     "/hostings/integrity/scan",
+    "/hostings/integrity/trust",
+    "/hostings/integrity/vendor-forget",
     "/hostings/ban",
     "/hostings/waf-",
     "/hostings/access/",
@@ -324,6 +326,24 @@ mod tests {
         assert!(invalidates(&Method::POST, "/hostings/restore"));
         assert!(invalidates(&Method::POST, "/hostings/regguard"));
         assert!(invalidates(&Method::POST, "/profiles/3/apply"));
+        // A repair or a move changes what wp-cli lists; a scan or a trust doesn't.
+        for changes in [
+            "/hostings/integrity/repair-core",
+            "/hostings/integrity/reinstall-plugin",
+            "/hostings/integrity/reinstall-theme",
+            "/hostings/integrity/quarantine",
+            "/hostings/integrity/restore",
+        ] {
+            assert!(invalidates(&Method::POST, changes), "{changes}");
+        }
+        for keeps in [
+            "/hostings/integrity/scan",
+            "/hostings/integrity/trust",
+            "/hostings/integrity/trust-all",
+            "/hostings/integrity/vendor-forget",
+        ] {
+            assert!(!invalidates(&Method::POST, keeps), "{keeps}");
+        }
         assert!(!invalidates(&Method::POST, "/hostings/notes"));
         assert!(!invalidates(&Method::POST, "/hostings/vhost-options"));
         assert!(!invalidates(&Method::POST, "/hostings/ftp/account/reset"));

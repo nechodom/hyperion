@@ -1027,6 +1027,11 @@ details.howto ul { padding-left: 1.2rem; }
 .upd-act { display: flex; justify-content: flex-end; }
 .upd-act form { margin: 0; }
 .upd-act .btn { white-space: nowrap; }
+/* Integrity card: a fourth column holds a file's quarantine and trust buttons. */
+.chk-list.chk-files.file-acts li { grid-template-columns: 6px minmax(0, max-content) minmax(0, 1fr) auto; }
+.file-act { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
+.file-act form { margin: 0; }
+.file-act .btn { white-space: nowrap; }
 .chk-fixes { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .chk-fixes form { margin: 0; }
 .chk-fold > summary { display: inline-block; cursor: pointer; list-style: none; font-size: 0.8rem; color: var(--text-soft); }
@@ -1093,6 +1098,8 @@ details.howto ul { padding-left: 1.2rem; }
   .chk-list li > :nth-child(3) { grid-column: 2; }
   .chk-list.upd-list li { grid-template-columns: 6px minmax(0, 1fr); }
   .chk-list.upd-list li > :nth-child(4) { grid-column: 2; }
+  .chk-list.chk-files.file-acts li { grid-template-columns: 6px minmax(0, 1fr); }
+  .chk-list.chk-files.file-acts li > :nth-child(4) { grid-column: 2; justify-content: flex-start; }
   .upd-act { justify-content: flex-start; margin-top: 0.3rem; }
 }
 

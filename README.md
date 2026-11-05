@@ -190,8 +190,19 @@ install to sites that are running and backed up:
   offers to park it, which is the only fix once WordPress won't boot.
 - **Repair:** a file-permission check with a real write probe, core-file
   checksum repair, and a full reinstall that only runs after a backup succeeds.
-- **Integrity and malware scan** using wp-cli checksums and ClamAV, with repair
-  of core files and reinstall of tampered plugins from the findings.
+- **Integrity and malware scan** of a site's files, run by the agent with no
+  wp-cli and no site code executed. Core, plugins and themes are compared with
+  their release (wordpress.org, or the vendor's package for premium ones); every
+  other file is read for known malware patterns and watched for changes. Results
+  say what was and was not covered, and changes it cannot judge wait as "to
+  review" until someone trusts or quarantines them. Sites without WordPress are
+  scanned too. The database is not scanned. ClamAV is optional: one bounded
+  weekly pass for the node, only with 2 GiB of memory free. Findings alert
+  once, care reports and `hctl` carry the same verdict, and repair of core files
+  and reinstall of tampered plugins start from the findings. The new checks run
+  as a silent pilot until `[integrity] new_layers_live` is switched on. That
+  flag is per node: set it in each node's own `agent.toml` (the settings sync
+  doesn't carry `[integrity]`).
 - Staging copy with push to production (production is backed up first), Redis
   object cache, a `WP_DEBUG` switch, admin password reset, a sign-up spam
   guard, and a mail self-repair that sends WordPress mail through the local

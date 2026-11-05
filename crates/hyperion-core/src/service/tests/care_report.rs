@@ -47,13 +47,49 @@ fn a_czech_letter_carries_no_english() {
             core_issues: 2,
             plugin_issues: 1,
             malware_hits: 1,
+            ..Default::default()
         }),
         ..CareReport::empty(HostingId("t".into()), "example.cz".into(), from, to)
     };
     // ...and once more with everything UNMEASURED, so does every
     // "not monitored" branch plus the appended disclosure.
     let unmeasured = CareReport::empty(HostingId("t".into()), "example.cz".into(), from, to);
-    for r in [&measured, &unmeasured] {
+    // The live scan's own wordings: rule hits, changes awaiting review, and a
+    // site with nothing to compare with.
+    let live = |i: CareIntegrity| CareReport {
+        integrity: Some(CareIntegrity {
+            scanned_at: to - 3600,
+            checksums_ran: true,
+            malware_scan_ran: true,
+            ..i
+        }),
+        ..measured.clone()
+    };
+    let hits = live(CareIntegrity {
+        rule_hits: 2,
+        ..Default::default()
+    });
+    let review = live(CareIntegrity {
+        review_pending: 3,
+        ..Default::default()
+    });
+    let no_upstream = live(CareIntegrity {
+        no_upstream: true,
+        ..Default::default()
+    });
+    let no_upstream_review = live(CareIntegrity {
+        no_upstream: true,
+        review_pending: 1,
+        ..Default::default()
+    });
+    for r in [
+        &measured,
+        &unmeasured,
+        &hits,
+        &review,
+        &no_upstream,
+        &no_upstream_review,
+    ] {
         let (subject, body) = care_report_render_with(&cs, r, "example.cz", "");
         let whole = format!("{subject}\n{body}");
         for english in [
@@ -806,4 +842,111 @@ fn collapsing_blank_lines_keeps_crlf() {
     );
     assert_eq!(collapse_blank_runs("a\n\nb\n"), "a\n\nb\n");
     assert_eq!(collapse_blank_runs("a\n \n\t\nb"), "a\n \nb");
+}
+
+fn live_integrity(i: CareIntegrity) -> CareIntegrity {
+    CareIntegrity {
+        scanned_at: CARE_TO - 86_400,
+        checksums_ran: true,
+        malware_scan_ran: true,
+        ..i
+    }
+}
+
+/// The scan ran in full and left changes for us to confirm. That is neither
+/// "only partly checked" (it did run) nor a finding, and it can't read as clean.
+#[test]
+fn live_review_pending_blocks_clean_with_own_wording() {
+    let i = live_integrity(CareIntegrity {
+        review_pending: 3,
+        ..Default::default()
+    });
+    assert!(!i.is_clean());
+    for cat in [en(), LetterCatalog::new(LetterLang::Cs)] {
+        let text = care_section_integrity(&cat, Some(&i));
+        let partial = cat.render("care.integrity.partial", &[("when", "x")]);
+        let partial_head = partial.lines().next().unwrap_or_default();
+        assert!(!text.contains(partial_head), "{text}");
+        let clean = cat.render("care.integrity.clean", &[("when", "x")]);
+        assert!(
+            !text.contains(clean.lines().next().unwrap_or_default()),
+            "{text}"
+        );
+        assert!(text.contains('3'), "the count is stated: {text}");
+        // Nothing is appended about a half that did not run.
+        assert!(
+            !text.contains(cat.get("care.integrity.no_checksums")),
+            "{text}"
+        );
+        assert!(
+            !text.contains(cat.get("care.integrity.no_malware_scan")),
+            "{text}"
+        );
+    }
+    let en_text = care_section_integrity(&en(), Some(&i));
+    assert!(en_text.contains("confirm"), "{en_text}");
+    assert!(en_text.contains("ran"), "the check did run: {en_text}");
+    // A review that sits beside a check that did NOT run is the partial wording.
+    let half = CareIntegrity {
+        checksums_ran: false,
+        ..i
+    };
+    let text = care_section_integrity(&en(), Some(&half));
+    assert!(text.contains("only partly checked"), "{text}");
+    assert!(
+        text.contains(en().get("care.integrity.no_checksums")),
+        "{text}"
+    );
+}
+
+/// A site that isn't WordPress has no wordpress.org to compare with, and no
+/// sentence about it may suggest it was.
+#[test]
+fn non_wp_letter_never_mentions_wordpress_org() {
+    let base = CareIntegrity {
+        no_upstream: true,
+        ..Default::default()
+    };
+    let variants = [
+        live_integrity(base),
+        live_integrity(CareIntegrity {
+            review_pending: 2,
+            ..base
+        }),
+        live_integrity(CareIntegrity {
+            rule_hits: 1,
+            ..base
+        }),
+        live_integrity(CareIntegrity {
+            malware_hits: 1,
+            ..base
+        }),
+    ];
+    for cat in [en(), LetterCatalog::new(LetterLang::Cs)] {
+        for i in &variants {
+            let text = care_section_integrity(&cat, Some(i)).to_lowercase();
+            assert!(!text.contains("wordpress"), "{text}");
+        }
+    }
+    assert!(live_integrity(base).is_clean());
+    let clean = care_section_integrity(&en(), Some(&live_integrity(base)));
+    assert!(clean.contains("nothing found"), "{clean}");
+    // The same record on a WordPress site keeps the sentence that names it.
+    let wp = care_section_integrity(&en(), Some(&live_integrity(CareIntegrity::default())));
+    assert!(wp.contains("wordpress.org"), "{wp}");
+}
+
+/// A rule hit is listed among the findings in the customer's words.
+#[test]
+fn rule_hits_are_named_in_the_findings_list() {
+    let i = live_integrity(CareIntegrity {
+        rule_hits: 2,
+        ..Default::default()
+    });
+    let text = care_section_integrity(&en(), Some(&i));
+    assert!(text.contains("2 findings"), "{text}");
+    assert!(
+        text.contains("suspicious or unexpected files (2)"),
+        "{text}"
+    );
 }

@@ -1186,29 +1186,48 @@ pub struct CareBackups {
 /// flags carry the same honesty inside a scan that did happen: zero
 /// malware hits with `malware_scan_ran == false` means "not looked for",
 /// never "none found".
+///
+/// A live native scan sets `malware_scan_ran` itself (it is a malware check
+/// of its own) and fills the three fields at the end, which a record from
+/// before it, or from its silent pilot, leaves at zero.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct CareIntegrity {
     pub scanned_at: i64,
-    /// Whether the core/plugin checksum comparison actually ran.
+    /// Whether the core/plugin checksum comparison actually ran. For a site with
+    /// no upstream to compare (`no_upstream`) it is true when the scan covered it.
     pub checksums_ran: bool,
     /// Whether a malware scanner actually walked the docroot. False is a
     /// normal state (no scanner installed on the node), not an error.
     pub malware_scan_ran: bool,
     pub core_issues: i64,
+    /// Plugin and theme files that differ from their reference copy.
     pub plugin_issues: i64,
     pub malware_hits: i64,
+    /// Files the native scan's rules objected to.
+    #[serde(default)]
+    pub rule_hits: i64,
+    /// Changes the scan couldn't judge and we haven't confirmed. Not findings:
+    /// the check ran, and they keep it from reading as clean.
+    #[serde(default)]
+    pub review_pending: i64,
+    /// Not WordPress, so there was no release to compare with. Wording only.
+    #[serde(default)]
+    pub no_upstream: bool,
 }
 
 impl CareIntegrity {
     pub fn total_findings(&self) -> i64 {
-        self.core_issues + self.plugin_issues + self.malware_hits
+        self.core_issues + self.plugin_issues + self.malware_hits + self.rule_hits
     }
 
-    /// True only when BOTH signals ran and both came back empty — the
-    /// same rule as `WpIntegrityScanResult::is_clean`. A scan half of
-    /// which could not run is "unknown", and the report must say so.
+    /// True only when BOTH signals ran and both came back empty, with nothing
+    /// waiting for review — the same rule as `WpIntegrityScanResult::is_clean`.
+    /// A scan half of which could not run is "unknown", and the report must say so.
     pub fn is_clean(&self) -> bool {
-        self.checksums_ran && self.malware_scan_ran && self.total_findings() == 0
+        self.checksums_ran
+            && self.malware_scan_ran
+            && self.total_findings() == 0
+            && self.review_pending == 0
     }
 }
 
@@ -1991,6 +2010,38 @@ mod tests {
         };
         assert!(!dirty.is_clean());
         assert_eq!(dirty.total_findings(), 1);
+    }
+
+    /// Changes waiting for review and rule hits stand between a report and
+    /// "clean", and a report stored before they existed reads as it did.
+    #[test]
+    fn integrity_counts_what_the_native_scan_adds() {
+        let full = CareIntegrity {
+            scanned_at: 10,
+            checksums_ran: true,
+            malware_scan_ran: true,
+            ..Default::default()
+        };
+        assert!(full.is_clean());
+        let hit = CareIntegrity {
+            rule_hits: 2,
+            ..full
+        };
+        assert!(!hit.is_clean());
+        assert_eq!(hit.total_findings(), 2);
+        let review = CareIntegrity {
+            review_pending: 1,
+            ..full
+        };
+        assert!(!review.is_clean(), "changes to review are not a pass");
+        assert_eq!(review.total_findings(), 0, "and not a finding either");
+        let old: CareIntegrity = serde_json::from_str(
+            r#"{"scanned_at":10,"checksums_ran":true,"malware_scan_ran":true,
+                "core_issues":0,"plugin_issues":0,"malware_hits":0}"#,
+        )
+        .expect("old record");
+        assert!(old.is_clean());
+        assert!(!old.no_upstream);
     }
 
     #[test]

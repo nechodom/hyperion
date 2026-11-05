@@ -1262,6 +1262,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             hyperion_types::WpThemeAction::Update => "update",
             hyperion_types::WpThemeAction::UpdateAll => "update_all",
             hyperion_types::WpThemeAction::Delete => "delete",
+            hyperion_types::WpThemeAction::Reinstall { .. } => "reinstall",
         };
         self.append_audit(
             "wp.theme.action",
@@ -1432,6 +1433,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
+        // Last: the hashing is detached, and nothing above waits for it. Only the
+        // folder that came back, so nothing outside it can be accepted.
+        let _ = self
+            .scan_writer_done(
+                &detail,
+                hyperion_adapters::sitescan::scan::WriterKind::Restore,
+                Some(hyperion_adapters::sitescan::accept::WriterPaths::Under(
+                    format!("wp-content/plugins/{slug}"),
+                )),
+            )
+            .await;
         Ok(())
     }
 

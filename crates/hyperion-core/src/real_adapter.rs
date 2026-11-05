@@ -190,103 +190,6 @@ impl RealAdapter {
     }
 }
 
-/// The Hyperion plugin module that makes a preview vhost usable.
-///
-/// Keyed on the `HYPERION_PREVIEW_HOST` fastcgi param, which only the
-/// preview server block sets — so on the real vhost this file does
-/// nothing and normal visitors never touch this code path. A request header
-/// cannot forge it: headers reach PHP as `HTTP_*`, never under this name.
-const PREVIEW_SHIM_PHP: &str = r#"<?php
-/**
- * Hyperion preview — loaded by mu-plugins/hyperion.php (managed — do not edit).
- *
- * When a request arrives through the node's internal preview vhost (which
- * sets the HYPERION_PREVIEW_HOST fastcgi param), keep WordPress ON that
- * hostname instead of bouncing to the site's real Site Address. On the
- * real vhost the param is absent and this whole block is skipped.
- */
-if (!defined('ABSPATH')) { exit; }
-if (!empty($_SERVER['HYPERION_PREVIEW_HOST']) && !defined('HYPERION_PREVIEW_HOST')) {
-    define('HYPERION_PREVIEW_HOST', strtolower((string) $_SERVER['HYPERION_PREVIEW_HOST']));
-    $hyp_host = HYPERION_PREVIEW_HOST;
-    $hyp_url  = 'https://' . $hyp_host;
-
-    // The site's REAL hostnames, read before the filters below change what
-    // get_option() answers (WP_HOME / WP_SITEURL are already folded in by
-    // core's own option filters, which load before mu-plugins). Only these
-    // are rewritten: a redirect to a payment gateway or an OAuth provider
-    // has to leave the site, and pinning every redirect to the preview host
-    // sent those to a 404 on the preview instead.
-    $hyp_real = array();
-    foreach (array(get_option('home'), get_option('siteurl')) as $hyp_u) {
-        $hyp_h = is_string($hyp_u) ? parse_url($hyp_u, PHP_URL_HOST) : null;
-        if (is_string($hyp_h) && $hyp_h !== '') {
-            $hyp_h = strtolower($hyp_h);
-            $hyp_real[$hyp_h] = true;
-            $hyp_real[strpos($hyp_h, 'www.') === 0 ? substr($hyp_h, 4) : 'www.' . $hyp_h] = true;
-        }
-    }
-    unset($hyp_real[$hyp_host], $hyp_u, $hyp_h);
-    $hyp_real = array_keys($hyp_real);
-
-    // Force home/siteurl to the preview host. Priority 999 so this beats
-    // WordPress's own _config_wp_home/_config_wp_siteurl (priority 10),
-    // which is how a WP_HOME / WP_SITEURL constant in wp-config.php takes
-    // effect — common on imported sites, and the reason the first version
-    // of this shim (plain option filters) did nothing there.
-    add_filter('option_home',    function () use ($hyp_url) { return $hyp_url; }, 999);
-    add_filter('option_siteurl', function () use ($hyp_url) { return $hyp_url; }, 999);
-
-    // Rewrite the host of a URL to the preview host — when it is one of the
-    // site's own. Relative URLs and foreign hosts pass through unchanged.
-    $hyp_rewrite = function ($url) use ($hyp_url, $hyp_real) {
-        if (!is_string($url) || $url === '') { return $url; }
-        return preg_replace_callback('#^(?:https?:)?//([^/:?\#]+)(?::\d+)?#i', function ($m) use ($hyp_url, $hyp_real) {
-            return in_array(strtolower($m[1]), $hyp_real, true) ? $hyp_url : $m[0];
-        }, $url, 1);
-    };
-    add_filter('home_url', $hyp_rewrite, 999);
-    add_filter('site_url', $hyp_rewrite, 999);
-    add_filter('content_url', $hyp_rewrite, 999);
-    add_filter('plugins_url', $hyp_rewrite, 999);
-
-    // The catch-all for redirects: EVERY WordPress redirect goes through
-    // wp_redirect(), so a canonical bounce, a login redirect or an SSL
-    // plugin cannot send the visitor back to the real domain.
-    add_filter('wp_redirect', $hyp_rewrite, 999);
-
-    // And drop the canonical redirect outright (registered before
-    // mu-plugins load, so remove_action here takes effect).
-    remove_action('template_redirect', 'redirect_canonical');
-
-    // Absolute URLs stored in the content itself — every image in every
-    // post, page-builder CSS, menus — still name the real domain, which
-    // before the DNS cutover is the OLD server or nothing at all. Rewrite
-    // them in the response, preview requests only, text responses only.
-    if ($hyp_real) {
-        $hyp_quoted = implode('|', array_map(function ($h) { return preg_quote($h, '#'); }, $hyp_real));
-        ob_start(function ($out) use ($hyp_host, $hyp_quoted) {
-            if (!is_string($out) || $out === '') { return $out; }
-            foreach (headers_list() as $h) {
-                if (stripos($h, 'content-type:') === 0 && !preg_match('#text/|json|xml|javascript#i', $h)) {
-                    return $out;
-                }
-            }
-            // `//host`, `http(s)://host`, and the JSON-escaped `https:\/\/host`,
-            // but not a longer name that merely starts with the host.
-            return preg_replace_callback(
-                '#(?:https?:)?(//|\\\\/\\\\/)(?:' . $hyp_quoted . ')(?::\d+)?(?![a-z0-9-]|\.[a-z0-9])#i',
-                function ($m) use ($hyp_host) {
-                    return $m[1] === '//' ? 'https://' . $hyp_host : 'https:\/\/' . $hyp_host;
-                },
-                $out
-            );
-        });
-    }
-    unset($hyp_host, $hyp_url, $hyp_real, $hyp_rewrite, $hyp_quoted);
-}
-"#;
-
 impl RealAdapter {
     /// Refresh the preview shim for one hosting WITHOUT rewriting its
     /// vhost or touching nginx — just recompute whether a preview applies
@@ -328,13 +231,18 @@ async fn ensure_preview_shim(root_dir: &str, system_user: &str, preview_active: 
         wpplugin::remove_module(root_dir, Module::Preview).await;
         return;
     }
-    if wpplugin::module_state(root_dir, Module::Preview, PREVIEW_SHIM_PHP).await
+    if wpplugin::module_state(root_dir, Module::Preview, wpplugin::PREVIEW_MODULE).await
         == wpplugin::FileState::Current
     {
         return;
     }
-    if let Err(e) =
-        wpplugin::install_module(root_dir, system_user, Module::Preview, PREVIEW_SHIM_PHP).await
+    if let Err(e) = wpplugin::install_module(
+        root_dir,
+        system_user,
+        Module::Preview,
+        wpplugin::PREVIEW_MODULE,
+    )
+    .await
     {
         tracing::warn!(root_dir, error = %e, "preview shim: not written");
     }
@@ -374,6 +282,172 @@ fn local_node_identity() -> (String, String) {
 impl AdapterPort for RealAdapter {
     fn nginx_user(&self) -> String {
         self.nginx_user.clone()
+    }
+
+    async fn site_scan_worker(
+        &self,
+        job: hyperion_adapters::sitescan::runner::WorkerJob,
+    ) -> hyperion_adapters::sitescan::runner::WorkerReply {
+        hyperion_adapters::sitescan::runner::run_job(&job).await
+    }
+
+    async fn site_scan_cached_manifest(
+        &self,
+        key: &hyperion_adapters::sitescan::manifest::ComponentKey,
+        cache_dir: &std::path::Path,
+    ) -> Option<Option<hyperion_adapters::sitescan::manifest::Manifest>> {
+        // A manifest can be tens of MiB of JSON: off the async threads.
+        let (key, cache_dir) = (key.clone(), cache_dir.to_path_buf());
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::manifest::cached_wporg_manifest(&key, &cache_dir)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn site_scan_fetch_manifest(
+        &self,
+        key: &hyperion_adapters::sitescan::manifest::ComponentKey,
+        cache_dir: &std::path::Path,
+    ) -> Result<Option<hyperion_adapters::sitescan::manifest::Manifest>, AdapterError> {
+        hyperion_adapters::sitescan::manifest::fetch_wporg_manifest(key, cache_dir).await
+    }
+
+    async fn site_scan_cached_slug(
+        &self,
+        kind: hyperion_adapters::sitescan::manifest::ComponentKind,
+        slug: &str,
+        cache_dir: &std::path::Path,
+    ) -> Option<bool> {
+        hyperion_adapters::sitescan::manifest::cached_slug_known(kind, slug, cache_dir)
+    }
+
+    async fn site_scan_slug_known(
+        &self,
+        kind: hyperion_adapters::sitescan::manifest::ComponentKind,
+        slug: &str,
+        cache_dir: &std::path::Path,
+    ) -> Result<bool, AdapterError> {
+        hyperion_adapters::sitescan::manifest::wporg_slug_known(kind, slug, cache_dir).await
+    }
+
+    async fn site_scan_wp_config_db(&self, root: &std::path::Path) -> Option<(String, String)> {
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::vendor::read_wp_config_db(&root)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn site_scan_read_option(
+        &self,
+        db: &str,
+        prefix: &str,
+        option: &str,
+        user: &str,
+        password: &str,
+    ) -> Result<Option<String>, AdapterError> {
+        let login = hyperion_adapters::backup::DbLogin { user, password };
+        hyperion_adapters::mariadb::read_option(db, prefix, option, &login).await
+    }
+
+    async fn site_scan_vendor_fetch(
+        &self,
+        package: &hyperion_adapters::sitescan::vendor::PlannedPackage,
+        hosting_id: &str,
+        cache_dir: &std::path::Path,
+    ) -> Result<
+        hyperion_adapters::sitescan::vendor::VendorFetched,
+        hyperion_adapters::sitescan::vendor::VendorError,
+    > {
+        hyperion_adapters::sitescan::vendor::fetch_package(package, hosting_id, cache_dir).await
+    }
+
+    async fn site_scan_evict_manifests(&self, cache_dir: &std::path::Path) {
+        let cache_dir = cache_dir.to_path_buf();
+        let swept = tokio::task::spawn_blocking(move || {
+            let now = std::time::SystemTime::now();
+            hyperion_adapters::sitescan::vendor::sweep_leftovers(&cache_dir, now);
+            hyperion_adapters::sitescan::manifest::evict_stale_manifests(&cache_dir, now)
+        })
+        .await
+        .unwrap_or(0);
+        if swept > 0 {
+            tracing::info!(swept, "site scan: dropped cached manifests nothing reads");
+        }
+    }
+
+    async fn site_scan_quarantine(
+        &self,
+        req: hyperion_adapters::sitescan::quarantine::QuarantineRequest,
+    ) -> Result<hyperion_types::QuarantinedFile, AdapterError> {
+        // Up to 2 GiB copied and fsynced: off the async threads.
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::quarantine::quarantine_file(&req)
+        })
+        .await
+        .map_err(|e| AdapterError::Other(format!("quarantine: {e}")))?
+    }
+
+    async fn site_scan_restore(
+        &self,
+        req: hyperion_adapters::sitescan::quarantine::RestoreRequest,
+    ) -> Result<hyperion_types::QuarantinedFile, AdapterError> {
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::quarantine::restore_file(&req)
+        })
+        .await
+        .map_err(|e| AdapterError::Other(format!("quarantine: {e}")))?
+    }
+
+    async fn site_scan_quarantine_list(
+        &self,
+        base: &std::path::Path,
+        hosting_id: &str,
+        cap: usize,
+    ) -> Result<hyperion_types::QuarantineList, AdapterError> {
+        let (base, hosting_id) = (base.to_path_buf(), hosting_id.to_string());
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::quarantine::list_quarantine(&base, &hosting_id, cap)
+        })
+        .await
+        .map_err(|e| AdapterError::Other(format!("quarantine: {e}")))?
+    }
+
+    async fn clamav_facts(&self) -> hyperion_adapters::integrity::ClamFacts {
+        hyperion_adapters::integrity::ClamFacts::read()
+    }
+
+    async fn clamav_prepare(
+        &self,
+        roots: &[(HostingId, String)],
+        list_path: &std::path::Path,
+        limits: hyperion_adapters::integrity::ClamLimits,
+    ) -> Result<hyperion_adapters::integrity::ClamPlan, AdapterError> {
+        if let Some(dir) = list_path.parent() {
+            hyperion_adapters::sitescan::runner::prepare_scan_dirs(dir)?;
+        }
+        let (roots, list_path) = (roots.to_vec(), list_path.to_path_buf());
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::integrity::clamav_prepare_with(&roots, &list_path, limits)
+        })
+        .await
+        .map_err(|e| AdapterError::Other(format!("clamav list: {e}")))?
+        .map_err(AdapterError::from)
+    }
+
+    async fn clamav_run(
+        &self,
+        plan: hyperion_adapters::integrity::ClamPlan,
+    ) -> Result<hyperion_adapters::integrity::ClamSweep, AdapterError> {
+        hyperion_adapters::integrity::clamav_run(plan).await
+    }
+
+    async fn clamav_stop_orphan(&self) {
+        hyperion_adapters::integrity::clamav_stop_orphan().await;
     }
 
     async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError> {
