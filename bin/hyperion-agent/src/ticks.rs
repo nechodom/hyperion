@@ -473,7 +473,7 @@ fn spawn_docker_updates(svc: &Svc) {
         .build_hasher()
         .finish();
     let offset = 5 * MIN + draw % (6 * HOUR - 5 * MIN);
-    tracing::info!(offset_secs = offset, "docker image check scheduled");
+    tracing::debug!(offset_secs = offset, "docker image check scheduled");
     every(svc, offset, DAY, |svc| async move {
         if let Err(e) = svc.docker_updates_tick().await {
             tracing::warn!(error=%e, "docker image check failed");

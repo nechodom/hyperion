@@ -103,7 +103,7 @@
     <div class="svc-main">
       <div class="svc-title"><code>{{ o.url }}</code> <span class="text-soft small">{{ o.what }}</span></div>
       {% if o.public_bind %}
-      <div class="small" style="color:var(--warn)">Published on every address. Docker sends this traffic around the host's firewall input rules, which is where Hyperion's bans live, so the app can be reached directly and bypass nginx, the WAF and bans. Checked on a real node: a rule dropping this port in an input chain did not stop a request from outside. Publish it as <code>{{ o.compose_hint }}</code> in the compose file to keep it behind the proxy.</div>
+      <div class="small" style="color:var(--warn)">Published on every address. Docker sends this traffic around the host's firewall input rules, which is where Hyperion's bans live, so the app can be reached directly and bypass nginx, the WAF and bans. A rule dropping this port in an input chain does not stop a request from outside. Publish it as <code>{{ o.compose_hint }}</code> in the compose file to keep it behind the proxy.</div>
       {% endif %}
     </div>
     {% if px.can_create %}
