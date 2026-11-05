@@ -196,7 +196,11 @@ fn main() -> anyhow::Result<()> {
     // The scan worker is a sandboxed process that parses tenant files as root:
     // no async runtime, no agent.toml, no logging setup. Checked before clap so
     // nothing else in this binary has run.
-    if std::env::args().nth(1).as_deref() == Some(hyperion_adapters::sitescan::runner::WORKER_ARG) {
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(
+            hyperion_adapters::sitescan::runner::WORKER_ARG,
+        ))
+    {
         std::process::exit(hyperion_adapters::sitescan::runner::worker_main());
     }
     tokio::runtime::Builder::new_multi_thread()

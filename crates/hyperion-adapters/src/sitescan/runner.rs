@@ -30,7 +30,7 @@ pub const UNIT_NAME: &str = "hyperion-sitescan";
 /// Replies and jobs bigger than this are refused. A reply that large is a bug or
 /// an attack, and holding it in memory would not be free.
 pub const MAX_REPLY_BYTES: usize = 64 * 1024 * 1024;
-/// The unit is stopped after this long, a day's worth of a very slow node.
+/// The unit is stopped after this long (6 hours).
 const RUNTIME_MAX_SEC: u64 = 21_600;
 const SYSTEMD_RUN: &str = "/usr/bin/systemd-run";
 const NICE: &str = "/usr/bin/nice";
@@ -63,15 +63,9 @@ pub enum WorkerReply {
 /// scan reads and write only its own state directory.
 pub fn unit_args(cores: usize, exe: &Path) -> Vec<String> {
     let quota = if cores <= 2 { "50%" } else { "100%" };
-    let mut args: Vec<String> = [
-        "--unit=hyperion-sitescan",
-        "--quiet",
-        "--wait",
-        "--pipe",
-        "--collect",
-    ]
-    .map(String::from)
-    .to_vec();
+    let mut args: Vec<String> = ["--unit=hyperion-sitescan", "--wait", "--pipe", "--collect"]
+        .map(String::from)
+        .to_vec();
     let props = [
         "MemoryMax=256M".to_string(),
         "CPUWeight=10".to_string(),
@@ -88,7 +82,29 @@ pub fn unit_args(cores: usize, exe: &Path) -> Vec<String> {
         // directory: the worker reads those and never changes them.
         "ReadOnlyPaths=/home /var/lib/hyperion/scan/manifests".to_string(),
         format!("RuntimeMaxSec={RUNTIME_MAX_SEC}"),
+        // What the caps above leave open to a worker that has been taken over
+        // by a hostile file: PID 1's private socket (an unconfined unit), the
+        // agent's sockets in /run, devices, kernel knobs, handle-based opens
+        // through the writable mount, and signalling other processes.
+        "PrivateDevices=yes".to_string(),
+        "ProtectKernelTunables=yes".to_string(),
+        "ProtectKernelModules=yes".to_string(),
+        "ProtectKernelLogs=yes".to_string(),
+        "ProtectControlGroups=yes".to_string(),
+        "ProtectClock=yes".to_string(),
+        "RestrictNamespaces=yes".to_string(),
+        "LockPersonality=yes".to_string(),
+        "RestrictSUIDSGID=yes".to_string(),
+        "SystemCallArchitectures=native".to_string(),
+        "MemorySwapMax=0".to_string(),
+        // The tunables and cgroup protections leave a real /run writable.
+        "ReadOnlyPaths=/run".to_string(),
+        "SystemCallFilter=@system-service".to_string(),
+        "SystemCallFilter=~@privileged @mount @debug @raw-io @reboot @swap @module @network-io kill tkill tgkill pidfd_send_signal".to_string(),
     ];
+    // No `RestrictAddressFamilies=none` (systemd-run 252 rejects it) and no
+    // `InaccessiblePaths=/run` (the unit fails to start): the syscall filter
+    // and `PrivateNetwork` close sockets, and `ReadOnlyPaths` closes /run.
     for p in props {
         args.push("-p".to_string());
         args.push(p);
@@ -118,7 +134,9 @@ pub async fn run_direct(
 ) -> Result<WorkerReply, AdapterError> {
     static WARNED: Once = Once::new();
     WARNED.call_once(|| {
-        tracing::warn!("systemd-run not found: the site scan runs without its resource caps");
+        tracing::warn!(
+            "systemd-run not found: the site scan runs without its resource caps, as full root and with no read-only sandbox"
+        );
     });
     let mut cmd;
     if Path::new(NICE).exists() {
@@ -223,6 +241,11 @@ async fn run_child(
         };
         return Ok(failed(format!("scan worker ended with {status}{said}")));
     }
+    // A worker stopped by SIGTERM leaves systemd with a clean status and nothing
+    // written.
+    if reply.is_empty() {
+        return Ok(failed("scan worker ended with no reply".to_string()));
+    }
     Ok(serde_json::from_slice::<WorkerReply>(&reply)
         .unwrap_or_else(|e| failed(format!("scan worker reply could not be read: {e}"))))
 }
@@ -231,9 +254,15 @@ fn failed(msg: String) -> WorkerReply {
     WorkerReply::Failed(msg)
 }
 
-/// What `systemd-run` says when the fixed unit name is taken.
+/// What `systemd-run` says when the fixed unit name is taken, on systemd 252:
+/// `Failed to start transient service unit: Unit hyperion-sitescan.service was
+/// already loaded or has a fragment file.` Only a line that starts that way
+/// counts: stderr can also carry names a tenant chose.
 fn is_busy_message(stderr: &str) -> bool {
-    stderr.contains(&format!("{UNIT_NAME}.service")) && stderr.contains("already")
+    let head = format!("Failed to start transient service unit: Unit {UNIT_NAME}.service ");
+    stderr
+        .lines()
+        .any(|l| l.starts_with(&head) && l.contains("already"))
 }
 
 /// What the worker process does, from stdin to stdout: the exit code. No async
@@ -320,16 +349,14 @@ mod tests {
             .map(|w| w[1].clone())
     }
 
+    const BUSY_LINE: &str = "Failed to start transient service unit: Unit hyperion-sitescan.service was already loaded or has a fragment file.";
+
     #[test]
     fn unit_args_contain_every_cap() {
         let a = unit_args(4, Path::new("/usr/local/bin/hyperion-agent"));
-        for flag in [
-            "--unit=hyperion-sitescan",
-            "--quiet",
-            "--wait",
-            "--pipe",
-            "--collect",
-        ] {
+        // Not quiet: on a failure stderr says why (oom-kill, ...).
+        assert!(!a.iter().any(|x| x == "--quiet"), "{a:?}");
+        for flag in ["--unit=hyperion-sitescan", "--wait", "--pipe", "--collect"] {
             assert!(a.iter().any(|x| x == flag), "{flag}: {a:?}");
         }
         for prop in [
@@ -346,16 +373,35 @@ mod tests {
             "ReadWritePaths=/var/lib/hyperion/scan",
             "ReadOnlyPaths=/home /var/lib/hyperion/scan/manifests",
             "RuntimeMaxSec=21600",
+            "PrivateDevices=yes",
+            "ProtectKernelTunables=yes",
+            "ProtectKernelModules=yes",
+            "ProtectKernelLogs=yes",
+            "ProtectControlGroups=yes",
+            "ProtectClock=yes",
+            "RestrictNamespaces=yes",
+            "LockPersonality=yes",
+            "RestrictSUIDSGID=yes",
+            "SystemCallArchitectures=native",
+            "MemorySwapMax=0",
+            "ReadOnlyPaths=/run",
+            "SystemCallFilter=@system-service",
+            "SystemCallFilter=~@privileged @mount @debug @raw-io @reboot @swap @module @network-io kill tkill tgkill pidfd_send_signal",
         ] {
-            let key = prop.split('=').next().expect("key");
-            assert_eq!(arg_after(&a, key).as_deref(), Some(prop), "{a:?}");
+            assert!(
+                a.windows(2).any(|w| w[0] == "-p" && w[1] == prop),
+                "{prop}: {a:?}"
+            );
         }
+        // Both rejected by systemd-run 252 or fatal to the unit.
+        assert!(!a.iter().any(|x| x.starts_with("RestrictAddressFamilies=")));
+        assert!(!a.iter().any(|x| x.starts_with("InaccessiblePaths=")));
         // Properties come before the program, and the program is last.
         let n = a.len();
         assert_eq!(a[n - 2], "/usr/local/bin/hyperion-agent");
         assert_eq!(a[n - 1], "scan-worker");
         let first_prog = a.iter().position(|x| x.starts_with('/')).expect("prog");
-        assert!(a[..first_prog].iter().filter(|x| *x == "-p").count() >= 13);
+        assert!(a[..first_prog].iter().filter(|x| *x == "-p").count() >= 27);
     }
 
     #[test]
@@ -394,14 +440,66 @@ mod tests {
 
     #[test]
     fn a_busy_unit_is_told_from_any_other_failure() {
-        assert!(is_busy_message(
-            "Failed to start transient service unit: Unit hyperion-sitescan.service was already loaded or has a fragment file."
-        ));
-        assert!(is_busy_message(
-            "Unit hyperion-sitescan.service already exists."
-        ));
+        assert!(is_busy_message(BUSY_LINE));
+        assert!(is_busy_message(&format!("some noise\n{BUSY_LINE}\n")));
         assert!(!is_busy_message("Failed to connect to bus: No such file"));
-        assert!(!is_busy_message("Unit other.service already exists."));
+        assert!(!is_busy_message(
+            "Failed to start transient service unit: Unit other.service was already loaded"
+        ));
+        // Names a tenant chose can end up on stderr; only systemd-run's own
+        // line at the start of a line counts.
+        assert!(!is_busy_message(
+            "/home/x/Unit hyperion-sitescan.service already exists."
+        ));
+        assert!(!is_busy_message(&format!("path: {BUSY_LINE}")));
+    }
+
+    async fn under_systemd(body: &str) -> WorkerReply {
+        let _g = SCRIPTS.lock().await;
+        let t = tempfile::tempdir().expect("tmp");
+        let fake = script(t.path(), body);
+        run_child(Command::new(fake), &job(), MAX_REPLY_BYTES, true)
+            .await
+            .expect("run")
+    }
+
+    #[tokio::test]
+    async fn a_taken_unit_name_is_busy_only_under_systemd_and_with_no_reply() {
+        let line = format!("echo '{BUSY_LINE}' >&2");
+        assert_eq!(
+            under_systemd(&format!("{line}; exit 1")).await,
+            WorkerReply::Busy
+        );
+        // A reply on stdout beats the message on stderr.
+        let r = under_systemd(&format!("echo '\"Busy\"'; {line}; exit 1")).await;
+        assert!(matches!(r, WorkerReply::Failed(_)), "{r:?}");
+        // The same text from a run that did not fail is not Busy.
+        let r = under_systemd(&format!("{line}; echo '{{\"Failed\":\"x\"}}'")).await;
+        assert_eq!(r, WorkerReply::Failed("x".into()));
+        // Other systemd-run failures are Failed and say why.
+        let WorkerReply::Failed(why) =
+            under_systemd("echo 'Failed to connect to bus' >&2; exit 1").await
+        else {
+            panic!("not busy");
+        };
+        assert!(why.contains("Failed to connect to bus"), "{why}");
+        // Same stderr without systemd is a plain failure.
+        let _g = SCRIPTS.lock().await;
+        let t = tempfile::tempdir().expect("tmp");
+        let fake = script(t.path(), &format!("{line}; exit 1"));
+        let r = run_child(Command::new(fake), &job(), MAX_REPLY_BYTES, false)
+            .await
+            .expect("run");
+        assert!(matches!(r, WorkerReply::Failed(_)), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn a_worker_ended_with_no_reply_is_failed_saying_so() {
+        // SIGTERM to a unit's main process leaves systemd-run exiting 0.
+        let WorkerReply::Failed(why) = under_systemd("exit 0").await else {
+            panic!("an empty stdout is not a result");
+        };
+        assert!(why.contains("no reply"), "{why}");
     }
 
     #[tokio::test]

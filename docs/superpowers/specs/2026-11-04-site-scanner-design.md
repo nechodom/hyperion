@@ -250,13 +250,29 @@ The scan runs as a separate process, the same agent binary with a hidden
 subcommand, in a transient service unit:
 
 ```
-systemd-run --wait --pipe --collect
-  -p MemoryMax=256M -p CPUWeight=10 -p IOWeight=10 -p Nice=19
+systemd-run --unit=hyperion-sitescan --wait --pipe --collect
+  -p MemoryMax=256M -p MemorySwapMax=0 -p CPUWeight=10 -p IOWeight=10 -p Nice=19
   -p IOSchedulingClass=idle -p CPUQuota=<50% on <=2 cores, else 100%>
+  -p RuntimeMaxSec=21600
   -p CapabilityBoundingSet=CAP_DAC_READ_SEARCH -p NoNewPrivileges=yes
   -p PrivateNetwork=yes -p ProtectSystem=strict
   -p ReadWritePaths=/var/lib/hyperion/scan
+  -p "ReadOnlyPaths=/home /var/lib/hyperion/scan/manifests" -p ReadOnlyPaths=/run
+  -p PrivateDevices=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes
+  -p ProtectKernelLogs=yes -p ProtectControlGroups=yes -p ProtectClock=yes
+  -p RestrictNamespaces=yes -p LockPersonality=yes -p RestrictSUIDSGID=yes
+  -p SystemCallArchitectures=native
+  -p SystemCallFilter=@system-service
+  -p "SystemCallFilter=~@privileged @mount @debug @raw-io @reboot @swap @module @network-io kill tkill tgkill pidfd_send_signal"
 ```
+
+The last block is what keeps a worker taken over by a hostile file inside the
+unit: no AF_UNIX to PID 1 (`/run/systemd/private`) or the agent's sockets, no
+`open_by_handle_at` through the writable mount, no devices, kernel knobs or
+cgroup writes, no signalling other processes. A blocked syscall kills the
+worker, which the agent reports as a failed scan. (`RestrictAddressFamilies=none`
+is rejected by systemd-run 252 and `InaccessiblePaths=/run` stops the unit
+starting, so neither is used.)
 
 - It can read every tenant file and write none, which is the point: a root
   process parsing hostile input. Network stays in the agent, which fetches
