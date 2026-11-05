@@ -107,7 +107,21 @@ fn secret_for_insert<'a>(s: &SecretField<'a>) -> Option<&'a str> {
 
 /// Rewrite the operator-set fields of one check. Returns false when it does
 /// not exist. A secret that is `Keep` is left out of the statement.
+///
+/// A check pointed at another ADDRESS is a new check as far as what was
+/// learnt goes: in the same transaction its certificate expiry, the warning
+/// already given for it, the hour's certificate read, its samples, its alert
+/// state and any parked alert are dropped, so nothing about the old address
+/// is judged against the new one. Changing anything else keeps all of it.
 pub async fn update(pool: &SqlitePool, id: i64, f: &Fields<'_>) -> Result<bool, StateError> {
+    let mut tx = pool.begin().await?;
+    let old: Option<(String,)> = sqlx::query_as("SELECT url FROM url_monitors WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((old_url,)) = old else {
+        return Ok(false);
+    };
     let mut sets = vec![
         "url = ?",
         "interval_secs = ?",
@@ -117,6 +131,19 @@ pub async fn update(pool: &SqlitePool, id: i64, f: &Fields<'_>) -> Result<bool, 
         "node_id = ?",
         "node_manual = ?",
     ];
+    let moved = old_url != f.url;
+    if moved {
+        sets.extend([
+            "cert_expires_at = NULL",
+            "cert_alert_day = NULL",
+            "cert_checked_at = 0",
+            "alert_state = 'ok'",
+            "last_alert_at = NULL",
+            "pending_alert = NULL",
+            "pending_error = NULL",
+            "last_sampled_at = 0",
+        ]);
+    }
     if f.slack != SecretField::Keep {
         sets.push("alert_slack_webhook = ?");
     }
@@ -139,7 +166,15 @@ pub async fn update(pool: &SqlitePool, id: i64, f: &Fields<'_>) -> Result<bool, 
             SecretField::Set(v) => q = q.bind(Some(*v)),
         }
     }
-    Ok(q.bind(id).execute(pool).await?.rows_affected() > 0)
+    let changed = q.bind(id).execute(&mut *tx).await?.rows_affected() > 0;
+    if moved {
+        sqlx::query("DELETE FROM url_monitor_samples WHERE monitor_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(changed)
 }
 
 /// Delete a check and its samples. False when it did not exist.

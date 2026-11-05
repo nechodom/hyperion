@@ -59,10 +59,12 @@ pub fn spawn(state: SharedState) {
             // this wake leaves it be.
             if !url_busy.swap(true, std::sync::atomic::Ordering::AcqRel) {
                 let state = state.clone();
-                let busy = url_busy.clone();
+                // Released when the task ends however it ends: a panic in the
+                // pass must not leave the URL checks stopped until a restart.
+                let busy = BusyGuard(url_busy.clone());
                 tokio::spawn(async move {
+                    let _busy = busy;
                     crate::url_watch::pass(&state).await;
-                    busy.store(false, std::sync::atomic::Ordering::Release);
                 });
             }
             if node_pass_due(wake) {
@@ -70,6 +72,15 @@ pub fn spawn(state: SharedState) {
             }
         }
     });
+}
+
+/// Clears the "a URL tick is running" flag when dropped.
+struct BusyGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 /// Is this wake one of those that ask the nodes?
@@ -258,6 +269,19 @@ mod tests {
             code: Some(code),
             stderr: String::new(),
         })
+    }
+
+    #[tokio::test]
+    async fn a_panicking_url_pass_still_frees_the_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = std::sync::Arc::new(AtomicBool::new(true));
+        let guard = BusyGuard(flag.clone());
+        let task = tokio::spawn(async move {
+            let _busy = guard;
+            panic!("the pass blew up");
+        });
+        assert!(task.await.is_err());
+        assert!(!flag.load(Ordering::Acquire));
     }
 
     #[test]

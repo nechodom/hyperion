@@ -1149,3 +1149,116 @@ async fn changes_are_audited_by_name() {
     .expect("audit");
     assert_eq!(who, "agent");
 }
+
+/// What was learnt about an address is not true of another one.
+#[tokio::test]
+async fn changing_the_address_drops_what_was_learnt_about_the_old_one() {
+    let (s, pool) = url_master().await;
+    let id = s
+        .url_monitor_set(input("https://old.example.test/"))
+        .await
+        .expect("set");
+    let day = 86_400;
+    let now = now_secs();
+    // The old address has a certificate 20 days out that was warned about at
+    // 14, a bad run behind it, a parked alert and old samples.
+    sqlx::query(
+        "UPDATE url_monitors SET cert_expires_at = ?, cert_alert_day = 14, cert_checked_at = ? \
+         WHERE id = ?",
+    )
+    .bind(now + 2 * day)
+    .bind(now)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .expect("seed cert");
+    for i in 0..3 {
+        s.url_apply_sample(
+            id,
+            &result(false, Some(500), Some("HTTP 500"), true),
+            now - 300 + i * 60,
+        )
+        .await
+        .expect("sample");
+    }
+    let row = hyperion_state::url_monitors::get(&pool, id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.alert_state, "alerting");
+    assert_eq!(row.pending_alert.as_deref(), Some("down"));
+
+    // Editing other fields keeps all of it.
+    let mut same = input("https://old.example.test/");
+    same.id = Some(id);
+    same.interval_secs = 120;
+    s.url_monitor_set(same).await.expect("same address");
+    let kept = hyperion_state::url_monitors::get(&pool, id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(kept.interval_secs, 120);
+    assert_eq!(kept.cert_expires_at, Some(now + 2 * day));
+    assert_eq!(kept.cert_alert_day, Some(14));
+    assert_eq!(kept.alert_state, "alerting");
+    assert_eq!(kept.pending_alert.as_deref(), Some("down"));
+    assert_eq!(
+        hyperion_state::url_monitors::sample_count(&pool, id)
+            .await
+            .expect("count"),
+        3
+    );
+
+    // A new address starts clean.
+    let mut moved = input("https://new.example.test/");
+    moved.id = Some(id);
+    s.url_monitor_set(moved).await.expect("new address");
+    let fresh = hyperion_state::url_monitors::get(&pool, id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(fresh.cert_expires_at, None);
+    assert_eq!(fresh.cert_alert_day, None);
+    assert_eq!(fresh.cert_checked_at, 0, "its certificate is read at once");
+    assert_eq!(fresh.alert_state, "ok");
+    assert_eq!(fresh.pending_alert, None);
+    assert_eq!(fresh.pending_error, None);
+    assert_eq!(fresh.last_sampled_at, 0, "due on the next tick");
+    assert_eq!(
+        hyperion_state::url_monitors::sample_count(&pool, id)
+            .await
+            .expect("count"),
+        0
+    );
+    let v = &s.url_monitor_list().await.expect("list").monitors[0];
+    assert_eq!((v.samples_24h, v.success_pct_24h), (0, 0));
+    assert_eq!(v.alert_state, "unknown");
+    assert_eq!(v.last_error, None);
+    assert!(s.url_monitor_tick().await.is_ok());
+    // No false warning for the new address from the old one's expiry.
+    s.url_cert_alerts(now).await.expect("pass");
+    assert!(
+        url_bells(&pool).await.is_empty(),
+        "{:?}",
+        url_bells(&pool).await
+    );
+}
+
+/// An expiry left on a check that is not https is not a fact about it.
+#[tokio::test]
+async fn a_certificate_on_a_plain_http_check_never_warns() {
+    let (s, pool) = url_master().await;
+    let id = s
+        .url_monitor_set(input("http://plain.example.test/"))
+        .await
+        .expect("set");
+    let now = now_secs();
+    sqlx::query("UPDATE url_monitors SET cert_expires_at = ? WHERE id = ?")
+        .bind(now + 86_400)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect("stale expiry");
+    s.url_cert_alerts(now).await.expect("pass");
+    assert!(url_bells(&pool).await.is_empty());
+}

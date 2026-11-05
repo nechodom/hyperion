@@ -666,6 +666,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| db_err("url_cert_alerts", e))?;
         for row in rows {
+            // A certificate is only read from https; an expiry on a check
+            // that is not (any more) is not a fact about it.
+            if !row.url.starts_with("https://") {
+                continue;
+            }
             let Some(expires) = row.cert_expires_at else {
                 continue;
             };
