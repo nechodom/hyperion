@@ -103,6 +103,11 @@ pub fn unit_args_for(unit: &str, cores: usize, exe: &Path) -> Vec<String> {
     args.extend(["--wait", "--pipe", "--collect"].map(String::from));
     let props = [
         "MemoryMax=256M".to_string(),
+        // A stat walk's inode and dentry cache is charged here too, about 415 MB
+        // over 300k files, and reclaiming it at the limit can fail with the worker
+        // using a quarter of it: 38 of 40 repeat scans were killed. Under this
+        // limit it is reclaimed on the way, and 0 of 40 were.
+        "MemoryHigh=200M".to_string(),
         "CPUWeight=10".to_string(),
         "IOWeight=10".to_string(),
         "Nice=19".to_string(),
@@ -527,6 +532,7 @@ mod tests {
         }
         for prop in [
             "MemoryMax=256M",
+            "MemoryHigh=200M",
             "CPUWeight=10",
             "IOWeight=10",
             "Nice=19",

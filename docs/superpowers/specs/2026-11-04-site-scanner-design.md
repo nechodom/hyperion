@@ -254,7 +254,7 @@ subcommand, in a transient service unit:
 
 ```
 systemd-run --unit=hyperion-sitescan --wait --pipe --collect
-  -p MemoryMax=256M -p MemorySwapMax=0 -p CPUWeight=10 -p IOWeight=10 -p Nice=19
+  -p MemoryMax=256M -p MemoryHigh=200M -p MemorySwapMax=0 -p CPUWeight=10 -p IOWeight=10 -p Nice=19
   -p IOSchedulingClass=idle -p CPUQuota=<50% on <=2 cores, else 100%>
   -p RuntimeMaxSec=21600
   -p CapabilityBoundingSet=CAP_DAC_READ_SEARCH -p NoNewPrivileges=yes
