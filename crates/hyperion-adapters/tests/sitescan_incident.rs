@@ -64,6 +64,8 @@ struct Site {
     own_expected: std::cell::RefCell<BTreeMap<String, [u8; 32]>>,
     /// When the running agent started, for the grace on Hyperion's own files.
     own_files_since: Cell<i64>,
+    /// What the last run listed, which the agent may carry.
+    carried: std::cell::RefCell<Vec<String>>,
 }
 
 impl Site {
@@ -81,6 +83,7 @@ impl Site {
             accepted: Default::default(),
             own_expected: Default::default(),
             own_files_since: Cell::new(0),
+            carried: Default::default(),
             _t: t,
         }
     }
@@ -253,6 +256,7 @@ impl Site {
             own_expected: self.own_expected.borrow().clone(),
             own_files_since: self.own_files_since.get(),
             trusted: self.trusted.borrow().clone(),
+            carried_rels: self.carried.borrow().clone(),
         };
         scan_site(&input, pause).expect("scan")
     }
@@ -1869,6 +1873,7 @@ fn a_root_that_cannot_be_opened_is_an_error_not_a_clean_scan() {
         own_expected: BTreeMap::new(),
         own_files_since: 0,
         trusted: BTreeMap::new(),
+        carried_rels: Vec::new(),
     };
     assert!(scan_site(&input, &|| false).is_err());
 }
@@ -2518,6 +2523,44 @@ fn trusted_paths_with_nothing_there_are_named() {
     let stopped = s.scan_with(ScanMode::FullRehash, &|| true);
     assert!(stopped.stopped);
     assert!(stopped.trust_gone.is_empty());
+}
+
+/// What the agent may carry from the last run is looked up by name, however
+/// far the walk got: a name with nothing at it is said to be gone. A name the
+/// scan can't look up, or one under a directory it can't enter, is not.
+#[test]
+fn carried_names_with_nothing_there_are_named_even_when_stopped() {
+    let s = Site::new();
+    s.wordpress();
+    s.write("wp-content/uploads/here.php", "<?php\n");
+    s.write("wp-content/uploads/file", "x");
+    // Enough for a pause to come before the walk ends.
+    for i in 0..300 {
+        s.write(&format!("app/f{i}.php"), format!("<?php // {i}\n"));
+    }
+    std::os::unix::fs::symlink("uploads", s.path("wp-content/linked")).expect("symlink");
+    *s.carried.borrow_mut() = [
+        "wp-content/linked/here.php",
+        "wp-content/linked/nothing.php",
+        "wp-content/uploads/here.php",
+        "wp-content/uploads/gone.php",
+        "wp-content/nodir/gone.php",
+        "wp-content/uploads/file/under-a-file.php",
+        "wp-content/uploads",
+        "../escape.php",
+        ".",
+    ]
+    .map(String::from)
+    .to_vec();
+    let gone = [
+        "wp-content/uploads/gone.php",
+        "wp-content/nodir/gone.php",
+        "wp-content/uploads/file/under-a-file.php",
+    ];
+    assert_eq!(s.scan().absent_carried, gone);
+    let stopped = s.scan_with(ScanMode::FullRehash, &|| true);
+    assert!(stopped.stopped);
+    assert_eq!(stopped.absent_carried, gone);
 }
 
 #[test]

@@ -14,7 +14,7 @@ use hyperion_adapters::sitescan::discover::Discovery;
 use hyperion_adapters::sitescan::manifest::{ComponentKey, ComponentKind};
 use hyperion_adapters::sitescan::runner::{WorkerJob, WorkerReply};
 use hyperion_adapters::sitescan::scan::{
-    ScanInput, ScanMode, SiteScanOutcome, WriterAccepted, WriterKind,
+    ScanInput, ScanMode, SiteScanOutcome, WriterAccepted, WriterKind, MAX_CARRIED_RELS,
 };
 use hyperion_adapters::sitescan::vendor::{self, VendorError};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -1298,8 +1298,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Read before the scan starts: a writer that finishes meanwhile leaves a
         // newer list, which this scan hasn't seen and which stays.
         let accepted = self.scan_accepted(detail.id.as_str(), now).await;
+        let carried = prior.map(|p| carried_rels(&p.result)).unwrap_or_default();
         let outcome = match self
-            .native_site_scan(detail, mode, now, accepted.as_ref().map(|(a, _)| a.clone()))
+            .native_site_scan(
+                detail,
+                mode,
+                now,
+                accepted.as_ref().map(|(a, _)| a.clone()),
+                carried,
+            )
             .await
         {
             NativeScan::Busy => return SiteScanRun::Busy,
@@ -1390,6 +1397,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         mode: ScanMode,
         now: i64,
         accepted: Option<WriterAccepted>,
+        carried_rels: Vec<String>,
     ) -> NativeScan {
         let root = PathBuf::from(&detail.root_dir);
         let job = WorkerJob::Discover { root: root.clone() };
@@ -1420,6 +1428,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             own_expected: self.scan_own_expected(detail).await,
             own_files_since: self.site_scan.started_at,
             trusted: self.scan_trust_map(detail.id.as_str()).await,
+            carried_rels,
         });
         let mut outcome = match self.adapters.site_scan_worker(job).await {
             WorkerReply::Scan(o) => o,
@@ -2086,10 +2095,19 @@ fn stored_from_outcome(
     let stopped = outcome.stopped;
     let capped = outcome.capped;
     let themes_unknown = std::mem::take(&mut outcome.upstream.themes_unknown);
+    let absent: HashSet<String> = std::mem::take(&mut outcome.absent_carried)
+        .into_iter()
+        .collect();
     let mut result =
         assemble_integrity_result(outcome, clamav.malware, clamav.available, report_only);
     if let Some(p) = prior {
-        carry_standing_findings(&mut result, &p.result, stopped || capped, &themes_unknown);
+        carry_standing_findings(
+            &mut result,
+            &p.result,
+            stopped || capped,
+            &themes_unknown,
+            &absent,
+        );
     }
     result.scanned_at = now;
     result.clamav_at = clamav.at;
@@ -2197,11 +2215,15 @@ pub(super) fn scan_not_stored_result(
 /// Otherwise that's core when it wasn't compared, and each plugin or theme with no
 /// manifest this time, however that came about. A site that has no WordPress any
 /// more has nothing upstream left to carry.
+///
+/// A file is listed once: what this run said about it wins over what the last
+/// one did. One in `absent` (the worker found nothing there) isn't carried.
 fn carry_standing_findings(
     result: &mut hyperion_types::WpIntegrityScanResult,
     prior: &hyperion_types::WpIntegrityScanResult,
     everything: bool,
     themes_unknown: &[String],
+    absent: &HashSet<String>,
 ) {
     use hyperion_types::FindingKind as Kind;
     let upstream_applies = !result.coverage.no_upstream;
@@ -2210,12 +2232,25 @@ fn carry_standing_findings(
         for (into, from) in [
             (&mut result.core_modified, &prior.core_modified),
             (&mut result.core_unexpected, &prior.core_unexpected),
-            (&mut result.core_missing, &prior.core_missing),
         ] {
-            union_into(into, from);
+            let present: Vec<String> = from
+                .iter()
+                .filter(|rel| !absent.contains(*rel))
+                .cloned()
+                .collect();
+            union_into(into, &present);
             into.truncate(MAX_ITEMS);
         }
+        union_into(&mut result.core_missing, &prior.core_missing);
+        result.core_missing.truncate(MAX_ITEMS);
     }
+    // A plugin's or theme's line for a file the worker found gone.
+    let gone_issue = |slug: &str, path: &str| {
+        prior
+            .findings
+            .iter()
+            .any(|f| absent.contains(&f.rel) && f.is_issue(slug, path))
+    };
     let unverified: HashSet<String> = result
         .plugins_unknown
         .iter()
@@ -2241,9 +2276,22 @@ fn carry_standing_findings(
             for old in from.iter().filter(|p| {
                 carried_component(&p.slug) && (everything || !is_vendor(p.source.as_deref()))
             }) {
+                let issues = old
+                    .issues
+                    .iter()
+                    .filter(|i| !gone_issue(&old.slug, &i.path));
                 match into.iter_mut().find(|p| p.slug == old.slug) {
-                    Some(p) => union_into(&mut p.issues, &old.issues),
-                    None => into.push(old.clone()),
+                    Some(p) => {
+                        let fresh: Vec<_> = issues
+                            .filter(|i| !p.issues.iter().any(|n| n.path == i.path))
+                            .cloned()
+                            .collect();
+                        p.issues.extend(fresh);
+                    }
+                    None => into.push(hyperion_types::WpIntegrityPluginResult {
+                        issues: issues.cloned().collect(),
+                        ..old.clone()
+                    }),
                 }
             }
             clamp_failed(into);
@@ -2263,15 +2311,43 @@ fn carry_standing_findings(
         })
         .cloned()
         .collect();
-    union_into(&mut result.findings, &carried_findings);
-    result.findings.truncate(MAX_ITEMS);
+    // Every name this run listed, and then each one carried: one item per file.
+    let mut listed: HashSet<String> = result
+        .findings
+        .iter()
+        .chain(&result.review)
+        .map(|f| f.rel.clone())
+        .collect();
+    let mut carry = |into: &mut Vec<hyperion_types::SiteFileFinding>,
+                     from: &[hyperion_types::SiteFileFinding]| {
+        for f in from {
+            if !absent.contains(&f.rel) && listed.insert(f.rel.clone()) {
+                into.push(f.clone());
+            }
+        }
+        into.truncate(MAX_ITEMS);
+    };
+    carry(&mut result.findings, &carried_findings);
     if everything {
-        union_into(&mut result.review, &prior.review);
-        result.review.truncate(MAX_ITEMS);
+        carry(&mut result.review, &prior.review);
     }
     // Worked out again: what was carried counts.
     result.core_ok =
         result.wp_cli_ok && result.core_modified.is_empty() && result.core_unexpected.is_empty();
+}
+
+/// The names the last run listed that this one may carry, for the worker to
+/// look up. A missing file is gone by definition and isn't asked about.
+fn carried_rels(prior: &hyperion_types::WpIntegrityScanResult) -> Vec<String> {
+    let mut seen = HashSet::new();
+    prior
+        .findings
+        .iter()
+        .chain(&prior.review)
+        .filter(|f| f.names_a_present_path() && seen.insert(f.rel.as_str()))
+        .map(|f| f.rel.clone())
+        .take(MAX_CARRIED_RELS)
+        .collect()
 }
 
 fn union_into<T: Clone + PartialEq>(into: &mut Vec<T>, from: &[T]) {
@@ -2370,6 +2446,7 @@ pub(super) fn clamp_scan_outcome(o: &mut SiteScanOutcome) {
     }
     clip_list(&mut o.auto_accepted, MAX_AUTO_ACCEPTED, MAX_PATH_BYTES);
     clip_list(&mut o.trust_gone, MAX_TRUST_GONE, MAX_PATH_BYTES);
+    clip_list(&mut o.absent_carried, MAX_CARRIED_RELS, MAX_PATH_BYTES);
 
     let c = &mut o.coverage;
     for n in [

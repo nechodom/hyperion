@@ -145,6 +145,7 @@ async fn scan(root: &str, dir: &str, id: &str, mode: &str, exe: &str) -> Res<Val
         own_expected: Default::default(),
         own_files_since: 0,
         trusted: Default::default(),
+        carried_rels: Vec::new(),
     });
     let started = Instant::now();
     let reply = run_worker(&job, Path::new(exe)).await?;

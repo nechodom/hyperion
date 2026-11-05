@@ -202,7 +202,15 @@ pub struct ScanInput {
     /// [`metadata_hash`]. The agent keeps this list; a worker has no say in it.
     #[serde(default)]
     pub trusted: BTreeMap<String, [u8; 32]>,
+    /// What the last run listed that this one may carry, should it stop or hit
+    /// its cap. Each is looked up by name after the walk; at most
+    /// [`MAX_CARRIED_RELS`] are.
+    #[serde(default)]
+    pub carried_rels: Vec<String>,
 }
+
+/// The most `carried_rels` a scan looks up.
+pub const MAX_CARRIED_RELS: usize = 2000;
 
 /// What the comparison with upstream said, in the shape the stored result has.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +265,10 @@ pub struct SiteScanOutcome {
     /// in the list any more.
     #[serde(default)]
     pub trust_gone: Vec<String>,
+    /// `carried_rels` with nothing at them, however far the walk got: what the
+    /// last run said about them can't stand.
+    #[serde(default)]
+    pub absent_carried: Vec<String>,
 }
 
 /// Scan one site. `pause` is called every few hundred files and during long
@@ -283,7 +295,15 @@ fn scan_with_limits(
         prune: Vec::new(),
     };
     let stats = root.walk_until(&opts, |ev| scan.on_event(ev))?;
-    Ok(scan.finish(stats))
+    let mut outcome = scan.finish(stats);
+    outcome.absent_carried = input
+        .carried_rels
+        .iter()
+        .take(MAX_CARRIED_RELS)
+        .filter(|rel| root.is_gone(rel))
+        .cloned()
+        .collect();
+    Ok(outcome)
 }
 
 /// One component of the site and what the walk found in it. Items wait here
@@ -2116,6 +2136,7 @@ impl<'a> Scan<'a> {
             stopped: self.stopped,
             capped: stats.capped,
             trust_gone,
+            absent_carried: Vec::new(),
         }
     }
 }
@@ -2163,6 +2184,7 @@ mod tests {
             own_expected: BTreeMap::new(),
             own_files_since: 0,
             trusted: BTreeMap::new(),
+            carried_rels: Vec::new(),
         }
     }
 

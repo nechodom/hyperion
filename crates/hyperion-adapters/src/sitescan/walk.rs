@@ -328,6 +328,39 @@ impl TenantRoot {
         Ok(File::from(fd))
     }
 
+    /// Is there nothing at `rel`? Looked up one `O_NOFOLLOW` step at a time from
+    /// the root. Only a name that isn't there, or a file where a directory on the
+    /// way was, is gone. A symlink on the way, or a name that can't be looked up
+    /// (refused, unreadable, invalid), is not: nobody can say.
+    pub fn is_gone(&self, rel: &str) -> bool {
+        let Ok(comps) = split_rel(rel, false) else {
+            return false;
+        };
+        let Ok(mut dir) = open_dir(&self.fd, ".") else {
+            return false;
+        };
+        for (i, c) in comps.iter().enumerate() {
+            let st = match statat(&dir, *c, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(st) => st,
+                Err(Errno::NOENT) => return true,
+                Err(_) => return false,
+            };
+            if i + 1 == comps.len() {
+                return false;
+            }
+            match FileType::from_raw_mode(st.st_mode) {
+                FileType::Directory => {}
+                FileType::Symlink => return false,
+                _ => return true,
+            }
+            dir = match open_dir(&dir, *c) {
+                Ok(d) => d,
+                Err(_) => return false,
+            };
+        }
+        false
+    }
+
     /// Remove the name `rel`, reached like `open_file` reaches a file, if it is
     /// still the file `same_as` has open. Anything else put there since stays, and
     /// that is `PermissionDenied`. The check and the unlink can't be one step, but

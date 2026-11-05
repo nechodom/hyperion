@@ -2603,6 +2603,115 @@ mod site_scan {
         assert!(rec.result.themes_failed.is_empty());
     }
 
+    /// A run cut short carries what the last one listed, once per file: the new
+    /// run's item wins, and a file the worker found gone isn't carried. The
+    /// worker is told which names those are.
+    #[tokio::test]
+    async fn a_capped_run_carries_each_file_once_and_never_a_deleted_one() {
+        let pool = open_memory().await.expect("open");
+        let reply = Arc::new(StdMutex::new(upstream_verified(2)));
+        let current = reply.clone();
+        let asked: Arc<StdMutex<Vec<Vec<String>>>> = Arc::default();
+        let seen = asked.clone();
+        let mut a = happy_mocks();
+        a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
+            WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
+            WorkerJob::Scan(input) => {
+                seen.lock().expect("lock").push(input.carried_rels.clone());
+                WorkerReply::Scan(current.lock().expect("lock").clone())
+            }
+        });
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        let s = svc(pool.clone(), a);
+        let site = site_named(&s, "kos.cz").await;
+        let t0 = monday_at(0, 12, 0);
+        let hit = |rel: &str, sha: &str| hyperion_types::SiteFileFinding {
+            rel: rel.into(),
+            kind: hyperion_types::FindingKind::RuleHit,
+            severity: "high".into(),
+            rule_id: Some("php.eval".into()),
+            sha256: sha.into(),
+            ..Default::default()
+        };
+
+        let mut first = upstream_verified(2);
+        first.upstream.plugins_failed = vec![tampered_plugin("p")];
+        first.findings = vec![
+            hit("wp-content/uploads/a.php", "aa"),
+            hit("wp-content/uploads/gone.php", "cc"),
+            hyperion_types::SiteFileFinding {
+                rel: "wp-content/plugins/p/x.php".into(),
+                kind: hyperion_types::FindingKind::UpstreamModified,
+                severity: "high".into(),
+                sha256: "dd".into(),
+                component: Some("p".into()),
+                ..Default::default()
+            },
+            hyperion_types::SiteFileFinding {
+                rel: "wp-includes/gone.php".into(),
+                kind: hyperion_types::FindingKind::CoreMissing,
+                severity: "high".into(),
+                ..Default::default()
+            },
+        ];
+        first.review = vec![hyperion_types::SiteFileFinding {
+            rel: "wp-content/b.php".into(),
+            sha256: "ee".into(),
+            ..Default::default()
+        }];
+        *reply.lock().expect("lock") = first;
+        s.site_scan_tick_at(&chrono::Utc, t0).await.expect("tick");
+
+        let mut capped = upstream_verified(2);
+        capped.capped = true;
+        capped.findings = vec![hit("wp-content/uploads/a.php", "bb")];
+        capped.absent_carried = vec![
+            "wp-content/uploads/gone.php".into(),
+            "wp-content/plugins/p/x.php".into(),
+        ];
+        *reply.lock().expect("lock") = capped;
+        let t1 = t0 + 6 * HOUR;
+        s.site_scan_tick_at(&chrono::Utc, t1).await.expect("tick");
+
+        let asked = asked.lock().expect("lock");
+        assert!(asked[0].is_empty(), "nothing stood before the first run");
+        let mut second = asked[1].clone();
+        second.sort();
+        // A missing file is never asked about: it's gone by definition.
+        assert_eq!(
+            second,
+            vec![
+                "wp-content/b.php",
+                "wp-content/plugins/p/x.php",
+                "wp-content/uploads/a.php",
+                "wp-content/uploads/gone.php",
+            ]
+        );
+        let rec = s
+            .stored_integrity_scan(site.id.as_str())
+            .await
+            .expect("record");
+        let found: Vec<(&str, &str)> = rec
+            .result
+            .findings
+            .iter()
+            .map(|f| (f.rel.as_str(), f.sha256.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("wp-content/uploads/a.php", "bb"),
+                ("wp-includes/gone.php", "")
+            ]
+        );
+        assert!(rec.result.plugins_failed.is_empty(), "its one file is gone");
+        assert_eq!(rec.result.review.len(), 1, "b.php is still there");
+    }
+
     // ---- ClamAV: one weekly pass for the node, beside its lock ----
 
     const GIB: u64 = 1 << 30;

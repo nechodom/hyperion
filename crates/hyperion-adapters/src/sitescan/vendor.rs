@@ -2881,6 +2881,7 @@ $table_prefix  = 'wp_x1_';
                 own_expected: BTreeMap::new(),
                 own_files_since: 0,
                 trusted: BTreeMap::new(),
+                carried_rels: Vec::new(),
             };
             scan_site(&input, &|| false).expect("scan")
         }

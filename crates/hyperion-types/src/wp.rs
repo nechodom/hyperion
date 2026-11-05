@@ -494,7 +494,22 @@ impl SiteFileFinding {
         !self.sha256.is_empty()
             && self.rel != "."
             && self.component_wide().is_none()
-            && !(self.rel.ends_with(CUT_NAME_MARK) && self.rel.len() >= CUT_NAME_MIN_BYTES)
+            && !self.name_is_cut()
+    }
+
+    fn name_is_cut(&self) -> bool {
+        self.rel.ends_with(CUT_NAME_MARK) && self.rel.len() >= CUT_NAME_MIN_BYTES
+    }
+
+    /// Is `rel` a name there is something at while this stands? Not a file
+    /// reported missing, not core as a whole, and not a name the scan had to cut.
+    pub fn names_a_present_path(&self) -> bool {
+        self.rel != "."
+            && !self.name_is_cut()
+            && !matches!(
+                self.kind,
+                FindingKind::CoreMissing | FindingKind::UpstreamMissing
+            )
     }
 
     /// Trust is for what nothing else can speak for. A file that fails its

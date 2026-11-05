@@ -64,6 +64,7 @@ async fn a_scan_job_comes_back_as_an_outcome_and_writes_the_baseline() {
         own_expected: Default::default(),
         own_files_since: 0,
         trusted: Default::default(),
+        carried_rels: Vec::new(),
     });
     let reply = run_direct(&job, Path::new(AGENT), MAX_REPLY_BYTES)
         .await
