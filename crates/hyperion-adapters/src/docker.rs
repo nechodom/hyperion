@@ -779,8 +779,6 @@ mod tests {
         }
     }
 
-    /// Every read that is asked for JSON asks with the template, which also
-    /// older CLIs know; the bare word `json` needs a 23.0 CLI.
     /// A killed process that is not collected does not hold the read up.
     #[tokio::test]
     async fn waiting_for_a_killed_child_is_bounded() {
@@ -793,6 +791,8 @@ mod tests {
         assert_eq!(got, Some(7));
     }
 
+    /// Every read that is asked for JSON asks with the template, which also
+    /// older CLIs know; the bare word `json` needs a 23.0 CLI.
     #[test]
     fn json_is_asked_for_with_the_template_not_the_bare_word() {
         let mut formats = 0;

@@ -205,7 +205,6 @@ pub(crate) async fn remote_target<'a>(
     }
 }
 
-/// Is `node_id` the master's own hostname (as its rows store it)?
 /// Requests that repeat so often that logging each dispatch at INFO would
 /// bury the operator actions in the journal. They go to DEBUG.
 fn is_chatty(req: &Request) -> bool {
@@ -220,6 +219,7 @@ fn is_chatty(req: &Request) -> bool {
     )
 }
 
+/// Is `node_id` the master's own hostname (as its rows store it)?
 pub(crate) async fn is_master_hostname(state: &SharedState, node_id: &str) -> bool {
     match cached_agent_config(state).await {
         Ok(c) => !c.hostname.is_empty() && c.hostname == node_id,
