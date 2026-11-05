@@ -23,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hyperion_types::{
     FindingKind, ScanCoverage, SiteFileFinding, WpIntegrityFileIssue, WpIntegrityPluginResult,
-    HARD_LINKED_SNIPPET,
+    HARD_LINKED_SNIPPET, PACKAGES_DISAGREE_LABEL, VENDOR_PACKAGE_LABEL,
 };
 use md5::Md5;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,8 @@ use sha2::{Digest as _, Sha256};
 use super::baseline::{classify, Baseline, BaselineEntry, Change, Loaded};
 use super::discover::{Component, Discovery};
 use super::manifest::{
-    cache_path_for, is_soft_file, ComponentKey, ComponentKind, Digest, Manifest, ManifestSource,
+    cache_path_for, is_soft_file, vendor_disputed_path, ComponentKey, ComponentKind, Digest,
+    Manifest, ManifestSource,
 };
 use super::rules::{
     inspect, inspect_as_php, is_php_like, RuleHit, Severity, INSPECT_MAX_BYTES, RULE_PACK_VERSION,
@@ -287,6 +288,8 @@ fn scan_with_limits(
 struct Comp<'a> {
     c: &'a Component,
     manifest: Option<Manifest>,
+    /// A vendor manifest whose version has a `disputed` marker beside it.
+    disputed: bool,
     /// Recorded next to each verified file. Says which manifest vouched, so a
     /// better one arriving later compares again.
     id: String,
@@ -312,14 +315,30 @@ impl Comp<'_> {
         self.c.key.kind == ComponentKind::Core
     }
 
-    fn source_label(&self) -> Option<String> {
+    /// What was compared with, as the words for it.
+    fn reference_label(&self) -> Option<String> {
         self.manifest.as_ref().map(|m| {
             match m.source {
                 ManifestSource::WordPressOrg => "wordpress.org",
-                ManifestSource::VendorPackage => "vendor package",
+                ManifestSource::VendorPackage => VENDOR_PACKAGE_LABEL,
             }
             .to_string()
         })
+    }
+
+    /// The label on its findings. Packages for this version were seen to differ, so
+    /// nobody can say this one was the vendor's: the agent holds these for review.
+    fn source_label(&self) -> Option<String> {
+        if self.disputed {
+            return Some(PACKAGES_DISAGREE_LABEL.to_string());
+        }
+        self.reference_label()
+    }
+
+    fn is_vendor_verified(&self) -> bool {
+        self.manifest
+            .as_ref()
+            .is_some_and(|m| m.source == ManifestSource::VendorPackage)
     }
 
     /// The manifest's files this site is answerable for: `(key, rel)`.
@@ -717,8 +736,12 @@ fn manifest_id(key: &ComponentKey, m: &Manifest) -> String {
         id.push('~');
         id.push_str(l);
     }
+    // A vendor's can be forgotten and come back different under the same version,
+    // and what the old one verified must not count for the new one.
     if m.source == ManifestSource::VendorPackage {
-        id.push_str("#vendor");
+        id.push_str("#vendor-");
+        let files = serde_json::to_vec(&m.files).unwrap_or_default();
+        id.push_str(&hex::encode(&Sha256::digest(&files)[..8]));
     }
     id
 }
@@ -845,6 +868,11 @@ impl<'a> Scan<'a> {
         let mut core = None;
         for c in &input.discovery.components {
             let manifest = load_manifest(&input.manifests_dir, &c.key, &mut reasons);
+            let disputed = manifest
+                .as_ref()
+                .is_some_and(|m| m.source == ManifestSource::VendorPackage)
+                && cache_path_for(&input.manifests_dir, &c.key, ManifestSource::VendorPackage)
+                    .is_ok_and(|p| vendor_disputed_path(&p).exists());
             let i = comps.len();
             if c.key.kind == ComponentKind::Core {
                 if manifest.is_some() {
@@ -870,6 +898,7 @@ impl<'a> Scan<'a> {
                     .is_some_and(|old| *old != c.key.version);
             comps.push(Comp {
                 c,
+                disputed,
                 id: manifest
                     .as_ref()
                     .map_or_else(String::new, |m| manifest_id(&c.key, m)),
@@ -1782,7 +1811,7 @@ impl<'a> Scan<'a> {
             if !most_differ && !many_added {
                 continue;
             }
-            let label = comp.source_label().unwrap_or_default();
+            let label = comp.reference_label().unwrap_or_default();
             let mut item = SiteFileFinding {
                 rel: if comp.is_core() {
                     ".".to_string()
@@ -1868,6 +1897,7 @@ impl<'a> Scan<'a> {
                     slug: comp.slug().to_string(),
                     issues,
                     version: comp.c.key.version.clone(),
+                    source: comp.source_label(),
                 };
                 match kind {
                     ComponentKind::Theme => up.themes_failed.push(failed),
@@ -2033,8 +2063,18 @@ impl<'a> Scan<'a> {
                 .count();
             i64::try_from(n).unwrap_or(i64::MAX)
         };
+        let vendor_verified = |kind: ComponentKind| -> i64 {
+            let n = self
+                .comps
+                .iter()
+                .filter(|c| c.c.key.kind == kind && c.is_vendor_verified())
+                .count();
+            i64::try_from(n).unwrap_or(i64::MAX)
+        };
         let coverage = ScanCoverage {
             plugins_verified: count(ComponentKind::Plugin, true),
+            plugins_vendor_verified: vendor_verified(ComponentKind::Plugin),
+            themes_vendor_verified: vendor_verified(ComponentKind::Theme),
             plugins_total: count(ComponentKind::Plugin, false),
             themes_verified: count(ComponentKind::Theme, true),
             themes_total: count(ComponentKind::Theme, false),

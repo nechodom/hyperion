@@ -235,23 +235,29 @@ pub trait AdapterPort: Send + Sync {
     }
 
     /// An update transient from a database the caller has confirmed the hosting
-    /// owns.
+    /// owns, read as the hosting's own login.
     async fn site_scan_read_option(
         &self,
         _db: &str,
         _prefix: &str,
         _option: &str,
+        _user: &str,
+        _password: &str,
     ) -> Result<Option<String>, AdapterError> {
         Err(AdapterError::Other("no database here".into()))
     }
 
-    /// Download a vendor's package and cache its manifest. The agent does this, not
-    /// the worker, which has no network.
+    /// Download a vendor's package, then cache its manifest or compare it with the
+    /// one cached. The agent does this, not the worker, which has no network.
     async fn site_scan_vendor_fetch(
         &self,
         _package: &hyperion_adapters::sitescan::vendor::PlannedPackage,
+        _hosting_id: &str,
         _cache_dir: &std::path::Path,
-    ) -> Result<(), hyperion_adapters::sitescan::vendor::VendorError> {
+    ) -> Result<
+        hyperion_adapters::sitescan::vendor::VendorFetched,
+        hyperion_adapters::sitescan::vendor::VendorError,
+    > {
         Err(hyperion_adapters::sitescan::vendor::VendorError::Local)
     }
 
@@ -891,8 +897,6 @@ pub struct SiteScanShared {
     pub(crate) record: tokio::sync::Mutex<()>,
     /// Someone asked for a scan: the tick needn't wait out its ten minutes.
     pub(crate) wake: tokio::sync::Notify,
-    /// Vendor packages left to download until the next tick starts.
-    pub(crate) vendor_budget: std::sync::atomic::AtomicU32,
 }
 
 impl Default for SiteScanShared {
@@ -903,7 +907,6 @@ impl Default for SiteScanShared {
             clamav: Default::default(),
             record: Default::default(),
             wake: Default::default(),
-            vendor_budget: scan_queue::MAX_VENDOR_PER_TICK.into(),
         }
     }
 }
@@ -1149,6 +1152,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// [`read_new_layers_live`].
     pub fn site_scan_new_layers_live(&self) -> bool {
         read_new_layers_live(self.agent_config_path.as_deref())
+    }
+
+    /// [`read_vendor_refs_live`].
+    pub fn site_scan_vendor_refs_live(&self) -> bool {
+        read_vendor_refs_live(self.agent_config_path.as_deref())
     }
 
     pub fn is_worker_node(&self) -> bool {

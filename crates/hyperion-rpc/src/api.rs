@@ -604,6 +604,16 @@ pub trait AgentApi: Send + Sync + 'static {
         hosting: HostingSelector,
         actor: String,
     ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError>;
+    /// Delete this node's reference copy of one vendor package version, and any
+    /// dispute about it. Operators only, by the web layer.
+    async fn scan_vendor_forget(
+        &self,
+        hosting: HostingSelector,
+        theme: bool,
+        slug: String,
+        version: String,
+        actor: String,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError>;
     /// What a hosting holds in quarantine: metadata only.
     async fn scan_quarantine_list(
         &self,

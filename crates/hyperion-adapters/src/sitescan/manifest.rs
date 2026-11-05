@@ -279,6 +279,17 @@ pub fn cache_path_for(
         .join(format!("{name}.json")))
 }
 
+/// The marker that says packages for a vendor manifest's version disagree. The
+/// worker reads it through its read-only view; only the agent writes it.
+pub fn vendor_disputed_path(manifest_path: &Path) -> PathBuf {
+    manifest_path.with_extension("disputed")
+}
+
+/// Who a vendor manifest came from, beside it.
+pub(crate) fn vendor_provenance_path(manifest_path: &Path) -> PathBuf {
+    manifest_path.with_extension("provenance")
+}
+
 /// The marker left when wordpress.org had nothing for `key`.
 fn miss_path(manifest_path: &Path) -> PathBuf {
     manifest_path.with_extension("404")
@@ -910,7 +921,23 @@ pub fn cached_wporg_manifest(key: &ComponentKey, cache_dir: &Path) -> Option<Opt
     let Ok(path) = cache_path(cache_dir, key) else {
         return Some(None);
     };
-    local_answer(key, &path, SystemTime::now())
+    let now = SystemTime::now();
+    if let Ok(vendor) = cache_path_for(cache_dir, key, ManifestSource::VendorPackage) {
+        mark_vendor_read(&vendor, now);
+    }
+    local_answer(key, &path, now)
+}
+
+/// A site runs this version: keep its vendor manifest off the eviction list.
+fn mark_vendor_read(path: &Path, now: SystemTime) {
+    let due = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| now.duration_since(at).ok())
+        .is_some_and(|age| age >= MARK_READ_EVERY);
+    if due {
+        mark_read(path, now);
+    }
 }
 
 /// The cached answer that is still good, and the mark that keeps it cached. A
@@ -939,17 +966,54 @@ fn mark_read(path: &Path, now: SystemTime) {
 }
 
 /// Drop what nothing has read for [`EVICT_AFTER`], with folders left empty.
-/// Returns the number of files removed. Vendor packages stay: nothing can fetch
-/// those again.
+/// Returns the number of files removed. A vendor manifest goes the same way once
+/// no site runs that version, with what lies beside it.
 pub fn evict_stale_manifests(cache_dir: &Path, now: SystemTime) -> usize {
     let Ok(entries) = std::fs::read_dir(cache_dir) else {
         return 0;
     };
-    entries
+    let swept: usize = entries
         .flatten()
         .filter(|e| e.file_name() != "vendor")
         .map(|e| evict_entry(&e.path(), now, CACHE_DEPTH))
-        .sum()
+        .sum();
+    swept + evict_vendor(&cache_dir.join("vendor"), now)
+}
+
+/// `vendor/<kind>/<slug>/<version>.json`, by the manifest's own age: the marks beside
+/// it never get touched. `tmp` and `failed` have their own sweep.
+fn evict_vendor(vendor: &Path, now: SystemTime) -> usize {
+    let mut removed = 0;
+    for kind in [ComponentKind::Plugin, ComponentKind::Theme] {
+        let kind_dir = vendor.join(kind.as_str());
+        let Ok(slugs) = std::fs::read_dir(&kind_dir) else {
+            continue;
+        };
+        for slug in slugs.flatten() {
+            let Ok(files) = std::fs::read_dir(slug.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let stale = std::fs::symlink_metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|at| now.duration_since(at).ok())
+                    .is_some_and(|age| age >= EVICT_AFTER);
+                if stale && std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                    let _ = std::fs::remove_file(vendor_provenance_path(&path));
+                    let _ = std::fs::remove_file(vendor_disputed_path(&path));
+                }
+            }
+            // Fails unless it's empty, which is the point.
+            let _ = std::fs::remove_dir(slug.path());
+        }
+    }
+    removed
 }
 
 fn evict_entry(path: &Path, now: SystemTime, depth: usize) -> usize {
@@ -1219,6 +1283,31 @@ mod tests {
     }
 
     const PLUGIN_HEAD: &[u8] = b"<?php\n/*\nPlugin Name: Demo\nVersion: 1.2.3\n*/\n";
+
+    /// The agent's lookup before each scan is what says a site still runs it.
+    #[test]
+    fn a_lookup_keeps_a_vendor_manifest_from_eviction() {
+        let t = tempfile::tempdir().expect("tmp");
+        let key = ComponentKey {
+            kind: ComponentKind::Plugin,
+            slug: "pro".into(),
+            version: "1.0".into(),
+            locale: None,
+        };
+        let path = cache_path_for(t.path(), &key, ManifestSource::VendorPackage).expect("path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, b"{}").expect("write");
+        let long_ago = SystemTime::now() - Duration::from_secs(89 * 24 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|f| f.set_modified(long_ago))
+            .expect("age");
+        let _ = cached_wporg_manifest(&key, t.path());
+        let soon = SystemTime::now() + Duration::from_secs(2 * 24 * 3600);
+        assert_eq!(evict_stale_manifests(t.path(), soon), 0);
+        assert!(path.exists());
+    }
 
     #[test]
     fn core_falls_back_to_en_us_when_locale_has_no_checksums() {
@@ -1683,17 +1772,24 @@ mod tests {
         let stale_temp = write(".tmpABC", old);
         let fresh = write("plugin/live/2.0.json", now);
         let bought = write("vendor/plugin/pro/1.0.json", old);
+        let bought_record = write("vendor/plugin/pro/1.0.provenance", old);
+        let bought_dispute = write("vendor/plugin/pro/1.0.disputed", old);
+        let in_use = write("vendor/plugin/live/2.0.json", now);
+        // The mark beside a manifest in use is as old as its first download.
+        let in_use_record = write("vendor/plugin/live/2.0.provenance", old);
 
-        assert_eq!(evict_stale_manifests(t.path(), now), 4);
+        assert_eq!(evict_stale_manifests(t.path(), now), 5);
 
         for gone in [&stale, &stale_miss, &stale_slug, &stale_temp] {
             assert!(!gone.exists(), "{}", gone.display());
         }
         assert!(fresh.exists());
-        assert!(
-            bought.exists(),
-            "a vendor package can't be fetched again: not this sweep's to drop"
-        );
+        for gone in [&bought, &bought_record, &bought_dispute] {
+            assert!(!gone.exists(), "no site uses it: {}", gone.display());
+        }
+        assert!(!t.path().join("vendor/plugin/pro").exists());
+        assert!(in_use.exists());
+        assert!(in_use_record.exists());
         assert!(
             !t.path().join("plugin/old").exists(),
             "emptied folders go too"

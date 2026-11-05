@@ -11,7 +11,7 @@ use super::*;
 use chrono::{Datelike, Timelike};
 use hyperion_adapters::sitescan::accept::{self, WriterPaths};
 use hyperion_adapters::sitescan::discover::Discovery;
-use hyperion_adapters::sitescan::manifest::ComponentKind;
+use hyperion_adapters::sitescan::manifest::{ComponentKey, ComponentKind};
 use hyperion_adapters::sitescan::runner::{WorkerJob, WorkerReply};
 use hyperion_adapters::sitescan::scan::{
     ScanInput, ScanMode, SiteScanOutcome, WriterAccepted, WriterKind,
@@ -60,15 +60,26 @@ const CORE_HTTP_COST: u32 = 2;
 /// held meanwhile, and each attempt can take a minute to give up.
 const NETWORK_GIVE_UP: u32 = 3;
 
-/// Vendor packages one site's scan may download. Each can take five minutes, with
-/// the node's lock held.
-const MAX_VENDOR_PER_SITE: u32 = 3;
-/// And all sites together, from one tick to the next.
-pub(super) const MAX_VENDOR_PER_TICK: u32 = 10;
+/// Vendor packages one hosting's pass may download.
+const MAX_VENDOR_PER_SITE: usize = 3;
+/// And all of this node together, by the clock: nothing refills it early.
+const MAX_VENDOR_PER_HOUR: u32 = 10;
+/// `node_kv` key: when this hour's vendor downloads began, and how many so far.
+const VENDOR_BUDGET_KV: &str = "site_scan_vendor_budget";
+/// `hosting_kv` key: what the last scan left for the vendor sweep.
+const VENDOR_SITE_KV_KEY: &str = "scan_vendor_site";
+/// A hosting's transients are looked at this often, unless a scan changed something.
+const VENDOR_PASS_EVERY_SECS: i64 = 6 * HOUR_SECS;
+/// Candidates kept per hosting. Folder names are the tenant's to multiply.
+const MAX_VENDOR_CANDIDATES: usize = 500;
+/// Packages named on the card for one scan.
+const MAX_VENDOR_PACKAGES_SHOWN: usize = 50;
 
 pub(super) const VENDOR_NO_CONFIG: &str = "wp-config.php couldn't be read here, so premium plugins and themes weren't compared with their vendors' packages";
 pub(super) const VENDOR_NOT_OWN_DB: &str = "wp-config.php doesn't name a database of this site's own, so premium plugins and themes weren't compared with their vendors' packages";
-pub(super) const VENDOR_DB_UNREADABLE: &str = "the site's database couldn't be read, so premium plugins and themes weren't compared with their vendors' packages";
+pub(super) const VENDOR_NO_LOGIN: &str = "this site's own database login isn't available, so premium plugins and themes weren't compared with their vendors' packages";
+pub(super) const VENDOR_DB_UNREADABLE: &str = "the site's database couldn't be read with its own login, so premium plugins and themes weren't compared with their vendors' packages";
+pub(super) const VENDOR_NO_UPDATE_DATA: &str = "the site's database holds no update data (a multisite or an external object cache keeps it elsewhere, or WordPress hasn't checked yet), so premium plugins and themes weren't compared with their vendors' packages";
 
 // What a reply may hold. An honest worker stays under these by its own limits.
 const MAX_ITEMS: usize = 1000;
@@ -178,11 +189,47 @@ pub(super) struct ManifestPass {
     pub(super) reasons: Vec<String>,
 }
 
-/// What trying the vendors' packages left for the coverage.
+/// What the last scan left for the vendor sweep, and what the sweep left for the
+/// next scan's coverage. Kept apart from the scan record: the sweep runs outside the
+/// node's lock.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct VendorSite {
+    /// What wordpress.org doesn't know on this site, by the running version.
+    #[serde(default)]
+    pub(super) candidates: Vec<ComponentKey>,
+    /// Slugs with a difference from their vendor manifest.
+    #[serde(default)]
+    pub(super) differing: BTreeSet<String>,
+    /// Unix seconds of the last finished pass. 0 is "go ahead".
+    #[serde(default)]
+    pub(super) pass_at: i64,
+    #[serde(default)]
+    pub(super) unknown_hosts: Vec<String>,
+    #[serde(default)]
+    pub(super) note: Option<String>,
+}
+
+/// Why a hosting's pass stopped where it did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum VendorStop {
+    #[default]
+    Done,
+    /// This hosting's share of one pass. It goes on next tick.
+    SiteCap,
+    /// This hour's downloads are spent.
+    OutOfBudget,
+    /// A vendor was too slow, so nothing more is tried this tick.
+    TimedOut,
+}
+
+/// What one hosting's pass came to.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct VendorPass {
     pub(super) unknown_hosts: Vec<String>,
     pub(super) note: Option<String>,
+    pub(super) stop: VendorStop,
+    /// Keys whose manifest appeared or came into dispute: sites on them rescan.
+    pub(super) changed: Vec<ComponentKey>,
 }
 
 impl<A: AdapterPort + 'static> HostingService<A> {
@@ -208,9 +255,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         now: i64,
     ) -> Result<i64, RpcError> {
         self.site_scan_evict_daily(now).await;
-        self.site_scan
-            .vendor_budget
-            .store(MAX_VENDOR_PER_TICK, std::sync::atomic::Ordering::SeqCst);
         let started = std::time::Instant::now();
         let mut queue = self.site_scan_due_queue(tz, now).await?;
         // What this tick has answered, so a request that can't be cleared (a
@@ -432,6 +476,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .ok()
             .flatten()
+    }
+
+    #[cfg(test)]
+    pub(super) async fn vendor_site_for_test(&self, hosting_id: &str) -> VendorSite {
+        self.vendor_site(hosting_id).await.unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(super) async fn clear_scan_request_for_test(&self, hosting_id: &str) {
+        self.clear_scan_request(hosting_id).await;
     }
 
     async fn clear_scan_request(&self, hosting_id: &str) {
@@ -772,14 +826,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let pass = self
             .site_scan_fetch_manifests(&discovery, &manifests_dir)
             .await;
-        let vendor_pass = self
-            .site_scan_vendor_pass(
-                detail,
-                &discovery,
-                &manifests_dir,
-                pass.known_slugs.as_ref(),
-            )
-            .await;
+        let candidates = pass
+            .known_slugs
+            .as_ref()
+            .map(|known| vendor::vendor_candidates(&discovery, known));
         let job = WorkerJob::Scan(ScanInput {
             root,
             discovery,
@@ -801,9 +851,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut reasons = pass.reasons;
         reasons.append(&mut outcome.coverage.partial_reasons);
         outcome.coverage.partial_reasons = reasons;
+        hold_vendor_differences(&mut outcome, self.site_scan_vendor_refs_live());
+        let site = self
+            .vendor_site_after_scan(detail, candidates, &outcome, now)
+            .await;
         // The worker has no say in these: it never saw any of this.
-        outcome.coverage.unknown_vendor_hosts = vendor_pass.unknown_hosts;
-        outcome.coverage.vendor_note = vendor_pass.note;
+        outcome.coverage.unknown_vendor_hosts = site.unknown_hosts.clone();
+        outcome.coverage.vendor_note = site.note.clone();
+        outcome.coverage.vendor_packages =
+            vendor_packages_behind(&outcome, &site, &self.vendor_cache_dir()).await;
         clamp_scan_outcome(&mut outcome);
         NativeScan::Ran(outcome)
     }
@@ -953,33 +1009,159 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
-    /// Try to get a reference for what wordpress.org doesn't know, from the package
-    /// links WordPress holds for it. What this can't do leaves those components on
-    /// the baseline, and the scan goes on either way.
+    fn vendor_cache_dir(&self) -> PathBuf {
+        Path::new(&self.paths.scan_dir).join("manifests")
+    }
+
+    /// What this scan means for the vendor sweep. A candidate list or a difference
+    /// that's new goes ahead of the sweep's six hours. Without a word on what
+    /// wordpress.org knows, the last list stands.
+    async fn vendor_site_after_scan(
+        &self,
+        detail: &HostingDetail,
+        candidates: Option<Vec<ComponentKey>>,
+        outcome: &SiteScanOutcome,
+        now: i64,
+    ) -> VendorSite {
+        let id = detail.id.as_str();
+        let _record = self.site_scan.record.lock().await;
+        let mut site = self.vendor_site(id).await.unwrap_or_default();
+        let before = site.clone();
+        if let Some(mut c) = candidates {
+            c.truncate(MAX_VENDOR_CANDIDATES);
+            site.candidates = c;
+        }
+        site.differing = vendor_differing_slugs(outcome);
+        if site.candidates != before.candidates || !site.differing.is_subset(&before.differing) {
+            site.pass_at = 0;
+        }
+        if site != before {
+            self.put_vendor_site(id, &site, now).await;
+        }
+        site
+    }
+
+    async fn vendor_site(&self, hosting_id: &str) -> Option<VendorSite> {
+        let raw = hyperion_state::hosting_kv::get(&self.pool, hosting_id, VENDOR_SITE_KV_KEY)
+            .await
+            .ok()
+            .flatten()?;
+        serde_json::from_str(&raw).ok()
+    }
+
+    async fn put_vendor_site(&self, hosting_id: &str, site: &VendorSite, now: i64) {
+        let Ok(raw) = serde_json::to_string(site) else {
+            return;
+        };
+        if let Err(e) =
+            hyperion_state::hosting_kv::set(&self.pool, hosting_id, VENDOR_SITE_KV_KEY, &raw, now)
+                .await
+        {
+            tracing::warn!(error = %e, "site scan: vendor state not stored");
+        }
+    }
+
+    /// Premium plugins' reference copies, beside the site scan rather than in it: a
+    /// vendor can take minutes per package, and a "Scan now" must not wait behind
+    /// one. Works from what each hosting's last scan left, one at a time. A manifest
+    /// that appears asks for a scan of every site on that version.
+    pub async fn site_scan_vendor_tick(&self) -> Result<(), RpcError> {
+        self.site_scan_vendor_tick_at(now_secs()).await
+    }
+
+    pub(super) async fn site_scan_vendor_tick_at(&self, now: i64) -> Result<(), RpcError> {
+        let rows = hyperion_state::hosting_kv::list_by_key(&self.pool, VENDOR_SITE_KV_KEY)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("vendor sites: {e}")))?;
+        let cache_dir = self.vendor_cache_dir();
+        for (id, raw) in rows {
+            let Ok(site) = serde_json::from_str::<VendorSite>(&raw) else {
+                continue;
+            };
+            let recent = site.pass_at > 0
+                && !stamped_ahead(site.pass_at, now)
+                && now - site.pass_at < VENDOR_PASS_EVERY_SECS;
+            if site.candidates.is_empty() || recent {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(HostingId(id.clone()))).await else {
+                continue;
+            };
+            if detail.state != HostingState::Active
+                || !kind_has_files(&detail.kind)
+                || !self.integrity_scan_enabled(&id).await
+            {
+                continue;
+            }
+            let pass = self
+                .site_scan_vendor_pass(&detail, &site, &cache_dir, now)
+                .await;
+            self.vendor_pass_done(&id, &site, &pass, now).await;
+            for key in &pass.changed {
+                self.rescan_sites_on(key).await;
+            }
+            // Not again until the clock says, or the slow vendor has had a rest.
+            if matches!(pass.stop, VendorStop::OutOfBudget | VendorStop::TimedOut) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Store what a pass said, over whatever a scan stored meanwhile. Cut short by a
+    /// budget, it's still due, and so is one that a scan has since given more to do.
+    async fn vendor_pass_done(
+        &self,
+        hosting_id: &str,
+        asked: &VendorSite,
+        pass: &VendorPass,
+        now: i64,
+    ) {
+        let _record = self.site_scan.record.lock().await;
+        let mut site = self.vendor_site(hosting_id).await.unwrap_or_default();
+        site.unknown_hosts.clone_from(&pass.unknown_hosts);
+        site.note.clone_from(&pass.note);
+        let same_work = site.candidates == asked.candidates && site.differing == asked.differing;
+        if same_work && matches!(pass.stop, VendorStop::Done | VendorStop::TimedOut) {
+            site.pass_at = now;
+        }
+        self.put_vendor_site(hosting_id, &site, now).await;
+    }
+
+    /// Ask for a scan of every hosting running this slug and version.
+    pub(super) async fn rescan_sites_on(&self, key: &ComponentKey) {
+        let Ok(rows) =
+            hyperion_state::hosting_kv::list_by_key(&self.pool, VENDOR_SITE_KV_KEY).await
+        else {
+            return;
+        };
+        for (id, raw) in rows {
+            let on_it = serde_json::from_str::<VendorSite>(&raw)
+                .is_ok_and(|site| site.candidates.contains(key));
+            if on_it {
+                self.request_rescan(&id).await;
+            }
+        }
+    }
+
+    /// One hosting's try at a reference for what wordpress.org doesn't know, from
+    /// the package links WordPress holds. What this can't do leaves those components
+    /// on the baseline, and says why on this site's card alone.
     ///
-    /// The database is the only thing here that crosses from a tenant's text to
-    /// root's reach: `wp-config.php` can name anyone's database, so the name counts
-    /// only if it's one this hosting owns.
+    /// `wp-config.php` can name anyone's database, so the name counts only if it's
+    /// one this hosting owns, and even then it's read with that hosting's login.
     pub(super) async fn site_scan_vendor_pass(
         &self,
         detail: &HostingDetail,
-        discovery: &Discovery,
+        site: &VendorSite,
         cache_dir: &Path,
-        wporg_known: Option<&BTreeSet<String>>,
+        now: i64,
     ) -> VendorPass {
-        // Not knowing what wordpress.org knows is not knowing what's premium.
-        let Some(known) = wporg_known else {
-            return VendorPass::default();
-        };
-        let candidates = vendor::vendor_candidates(discovery, known);
-        if candidates.is_empty() {
-            return VendorPass::default();
-        }
         let refused = |why: &str| VendorPass {
             note: Some(why.to_string()),
             ..Default::default()
         };
-        let own = match databases::mariadb_names_for_hosting(&self.pool, &detail.id).await {
+        let logins = match databases::mariadb_logins_for_hosting(&self.pool, &detail.id).await {
             Ok(own) if !own.is_empty() => own,
             Ok(_) => return refused(VENDOR_NOT_OWN_DB),
             Err(e) => {
@@ -994,11 +1176,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         else {
             return refused(VENDOR_NO_CONFIG);
         };
-        if !own.contains(&db) {
+        let Some((_, user, secret_id)) = logins.iter().find(|(name, _, _)| *name == db) else {
             return refused(VENDOR_NOT_OWN_DB);
-        }
+        };
+        let secret: Option<serde_json::Value> = self.secrets.get(secret_id).await.ok();
+        let Some(password) = secret
+            .as_ref()
+            .and_then(|s| s.get("password"))
+            .and_then(|p| p.as_str())
+        else {
+            return refused(VENDOR_NO_LOGIN);
+        };
 
         let mut refs = Vec::new();
+        let mut any_row = false;
         for (option, kind) in [
             (
                 hyperion_adapters::mariadb::UPDATE_PLUGINS_OPTION,
@@ -1011,10 +1202,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         ] {
             match self
                 .adapters
-                .site_scan_read_option(&db, &prefix, option)
+                .site_scan_read_option(&db, &prefix, option, user, password)
                 .await
             {
-                Ok(Some(value)) => refs.extend(vendor::parse_update_transient(&value, kind)),
+                Ok(Some(value)) => {
+                    any_row = true;
+                    refs.extend(vendor::parse_update_transient(&value, kind));
+                }
                 Ok(None) => {}
                 Err(e) => {
                     tracing::debug!(domain = %detail.domain, error = %e, "site scan: option unreadable");
@@ -1022,30 +1216,54 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
         }
+        if !any_row {
+            return refused(VENDOR_NO_UPDATE_DATA);
+        }
 
-        let dir = cache_dir.to_path_buf();
+        let (candidates, differing) = (site.candidates.clone(), site.differing.clone());
+        let (dir, hosting) = (cache_dir.to_path_buf(), detail.id.as_str().to_string());
         let plan = tokio::task::spawn_blocking(move || {
-            vendor::plan_downloads(refs, &candidates, &dir, std::time::SystemTime::now())
+            let at = std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(u64::try_from(now).unwrap_or(0));
+            vendor::plan_downloads(refs, &candidates, &differing, &hosting, &dir, at)
         })
         .await
         .unwrap_or_default();
+
+        let mut pass = VendorPass::default();
         let mut hosts: BTreeSet<String> = plan.unknown_hosts.into_iter().collect();
-        let mut left = MAX_VENDOR_PER_SITE;
-        for package in &plan.fetch {
-            if left == 0 || !self.take_vendor_download() {
-                tracing::debug!(domain = %detail.domain, "site scan: vendor downloads over budget; a later scan continues");
+        for (done, package) in plan.fetch.iter().enumerate() {
+            if done >= MAX_VENDOR_PER_SITE {
+                pass.stop = VendorStop::SiteCap;
                 break;
             }
-            left -= 1;
+            if !self.take_vendor_download(now).await {
+                tracing::debug!("site scan: this hour's vendor downloads are spent");
+                pass.stop = VendorStop::OutOfBudget;
+                break;
+            }
+            let key = ComponentKey {
+                kind: package.kind,
+                slug: package.slug.clone(),
+                version: package.version.clone(),
+                locale: None,
+            };
             match self
                 .adapters
-                .site_scan_vendor_fetch(package, cache_dir)
+                .site_scan_vendor_fetch(package, detail.id.as_str(), cache_dir)
                 .await
             {
-                Ok(()) => {}
+                Ok(vendor::VendorFetched::New | vendor::VendorFetched::Disputed) => {
+                    pass.changed.push(key);
+                }
+                Ok(vendor::VendorFetched::Confirmed) => {}
                 // A vendor's redirect to somewhere nobody listed.
                 Err(VendorError::UnknownHost(host)) => {
                     hosts.insert(host);
+                }
+                Err(VendorError::TimedOut) => {
+                    pass.stop = VendorStop::TimedOut;
+                    break;
                 }
                 Err(e) => {
                     tracing::debug!(domain = %detail.domain, error = %e, "site scan: vendor package failed");
@@ -1055,18 +1273,38 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         for host in &hosts {
             tracing::info!(domain = %detail.domain, %host, "site scan: package URL on a host not on the vendor list");
         }
-        VendorPass {
-            unknown_hosts: hosts.into_iter().take(vendor::MAX_UNKNOWN_HOSTS).collect(),
-            note: None,
-        }
+        pass.unknown_hosts = hosts.into_iter().take(vendor::MAX_UNKNOWN_HOSTS).collect();
+        pass
     }
 
-    fn take_vendor_download(&self) -> bool {
-        use std::sync::atomic::Ordering::SeqCst;
-        self.site_scan
-            .vendor_budget
-            .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
-            .is_ok()
+    /// One download from this hour's ten, stamped in `node_kv` so neither a wake nor
+    /// a restart hands out more. If that can't be read or written, none.
+    async fn take_vendor_download(&self, now: i64) -> bool {
+        let stored = match hyperion_state::node_kv::get(&self.pool, VENDOR_BUDGET_KV).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "site scan: vendor budget unreadable");
+                return false;
+            }
+        };
+        let (mut start, mut spent) = stored
+            .as_deref()
+            .and_then(|v| v.split_once(' '))
+            .and_then(|(s, n)| Some((s.parse::<i64>().ok()?, n.parse::<u32>().ok()?)))
+            .unwrap_or((now, 0));
+        if stamped_ahead(start, now) || now - start >= HOUR_SECS {
+            (start, spent) = (now, 0);
+        }
+        if spent >= MAX_VENDOR_PER_HOUR {
+            return false;
+        }
+        let next = format!("{start} {}", spent + 1);
+        if let Err(e) = hyperion_state::node_kv::set(&self.pool, VENDOR_BUDGET_KV, &next, now).await
+        {
+            tracing::warn!(error = %e, "site scan: vendor budget not stored");
+            return false;
+        }
+        true
     }
 
     /// Sweep the manifest cache, under the lock so never beneath a running worker,
@@ -1110,6 +1348,85 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             tracing::info!(removed, "site scan: purged old quarantined files");
         }
     }
+}
+
+/// Where a difference from a vendor's package isn't yet to be believed, it's a change
+/// to review with no alert behind it: through the pilot, and for a version whose
+/// packages disagree. A rule hit is the rule's own and stays a finding either way.
+pub(super) fn hold_vendor_differences(o: &mut SiteScanOutcome, live: bool) {
+    let held = |label: Option<&str>| match label {
+        Some(hyperion_types::PACKAGES_DISAGREE_LABEL) => true,
+        Some(hyperion_types::VENDOR_PACKAGE_LABEL) => !live,
+        _ => false,
+    };
+    o.upstream
+        .plugins_failed
+        .retain(|p| !held(p.source.as_deref()));
+    o.upstream
+        .themes_failed
+        .retain(|p| !held(p.source.as_deref()));
+    let (mut moved, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut o.findings)
+        .into_iter()
+        .partition(|f| f.is_comparison() && f.rule_id.is_none() && held(f.source_label.as_deref()));
+    o.findings = kept;
+    for f in &mut moved {
+        f.severity = "medium".to_string();
+    }
+    o.review.append(&mut moved);
+}
+
+/// Slugs this scan found different from their vendor's package. Not those already
+/// disputed: there's nothing more a comparison could settle.
+fn vendor_differing_slugs(o: &SiteScanOutcome) -> BTreeSet<String> {
+    o.findings
+        .iter()
+        .chain(&o.review)
+        .filter(|f| {
+            f.is_comparison()
+                && f.source_label.as_deref() == Some(hyperion_types::VENDOR_PACKAGE_LABEL)
+        })
+        .filter_map(|f| f.component.clone())
+        .collect()
+}
+
+/// Where the manifests behind this scan's vendor differences came from.
+async fn vendor_packages_behind(
+    o: &SiteScanOutcome,
+    site: &VendorSite,
+    cache_dir: &Path,
+) -> Vec<hyperion_types::VendorPackageInfo> {
+    let slugs: BTreeSet<&str> = o
+        .findings
+        .iter()
+        .chain(&o.review)
+        .filter(|f| {
+            f.is_comparison()
+                && matches!(
+                    f.source_label.as_deref(),
+                    Some(hyperion_types::VENDOR_PACKAGE_LABEL)
+                        | Some(hyperion_types::PACKAGES_DISAGREE_LABEL)
+                )
+        })
+        .filter_map(|f| f.component.as_deref())
+        .collect();
+    let keys: Vec<ComponentKey> = site
+        .candidates
+        .iter()
+        .filter(|k| slugs.contains(k.slug.as_str()))
+        .take(MAX_VENDOR_PACKAGES_SHOWN)
+        .cloned()
+        .collect();
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let dir = cache_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        keys.iter()
+            .filter_map(|k| vendor::package_info(&dir, k))
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// The night of the week a site's full re-hash belongs to, 0 = Monday. FNV-1a by
@@ -1337,12 +1654,24 @@ fn carry_standing_findings(
         .cloned()
         .collect();
     let carried_component = |slug: &str| everything || unverified.contains(slug);
+    // wordpress.org out of reach is why its findings are carried. A vendor manifest
+    // that isn't there this time was forgotten, or nothing runs it any more, and what
+    // it said goes with it.
+    let is_vendor = |label: Option<&str>| {
+        matches!(
+            label,
+            Some(hyperion_types::VENDOR_PACKAGE_LABEL)
+                | Some(hyperion_types::PACKAGES_DISAGREE_LABEL)
+        )
+    };
     if upstream_applies {
         for (into, from) in [
             (&mut result.plugins_failed, &prior.plugins_failed),
             (&mut result.themes_failed, &prior.themes_failed),
         ] {
-            for old in from.iter().filter(|p| carried_component(&p.slug)) {
+            for old in from.iter().filter(|p| {
+                carried_component(&p.slug) && (everything || !is_vendor(p.source.as_deref()))
+            }) {
                 match into.iter_mut().find(|p| p.slug == old.slug) {
                     Some(p) => union_into(&mut p.issues, &old.issues),
                     None => into.push(old.clone()),
@@ -1357,7 +1686,9 @@ fn carry_standing_findings(
         .filter(|f| match f.kind {
             Kind::CoreModified | Kind::CoreUnexpected | Kind::CoreMissing => carry_core,
             Kind::UpstreamModified | Kind::UpstreamAdded | Kind::UpstreamMissing => {
-                upstream_applies && carried_component(f.component.as_deref().unwrap_or(""))
+                upstream_applies
+                    && carried_component(f.component.as_deref().unwrap_or(""))
+                    && (everything || !is_vendor(f.source_label.as_deref()))
             }
             _ => everything,
         })
@@ -1426,6 +1757,7 @@ fn clamp_failed(list: &mut Vec<hyperion_types::WpIntegrityPluginResult>) {
     for p in list.iter_mut() {
         clip(&mut p.slug, MAX_NAME_BYTES);
         clip(&mut p.version, MAX_ID_BYTES);
+        clip_opt(&mut p.source, MAX_ID_BYTES);
         p.issues.truncate(left);
         left -= p.issues.len();
         for i in &mut p.issues {
@@ -1480,6 +1812,8 @@ pub(super) fn clamp_scan_outcome(o: &mut SiteScanOutcome) {
         &mut c.watching_since,
         &mut c.files_partly_inspected,
         &mut c.symlinks_skipped,
+        &mut c.plugins_vendor_verified,
+        &mut c.themes_vendor_verified,
     ] {
         *n = (*n).max(0);
     }

@@ -320,6 +320,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/integrity/trust-all",
             post(handlers::hostings::post_integrity_trust_all),
         )
+        .route(
+            "/hostings/integrity/vendor-forget",
+            post(handlers::hostings::post_integrity_vendor_forget),
+        )
         .route("/hostings/ban", post(handlers::hostings::post_ban))
         .route(
             "/hostings/:selector/bans-panel",

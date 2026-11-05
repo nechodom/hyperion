@@ -283,7 +283,15 @@ pub struct WpIntegrityPluginResult {
     /// The version that was compared. Empty on a record from before this field.
     #[serde(default)]
     pub version: String,
+    /// What it was compared with: the same label as its findings'.
+    #[serde(default)]
+    pub source: Option<String>,
 }
+
+/// `source_label` on a comparison with a vendor's package.
+pub const VENDOR_PACKAGE_LABEL: &str = "vendor package";
+/// `source_label` when packages for one slug and version were seen to differ.
+pub const PACKAGES_DISAGREE_LABEL: &str = "packages for this version disagree";
 
 /// One ClamAV detection: the file, and the signature that matched it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -496,6 +504,21 @@ impl SiteFileFinding {
             )
     }
 
+    /// A difference from a vendor's package held for review, in the card's words:
+    /// the pilot's, or a version whose packages disagree. Quarantine isn't offered
+    /// next to one, since nothing has shown the reference is right. A rule hit isn't
+    /// held, and speaks for itself.
+    pub fn held_vendor_note(&self) -> Option<&'static str> {
+        if !self.is_comparison() || self.rule_id.is_some() {
+            return None;
+        }
+        match self.source_label.as_deref() {
+            Some(VENDOR_PACKAGE_LABEL) => Some("differs from the vendor's package, not confirmed"),
+            Some(PACKAGES_DISAGREE_LABEL) => Some(PACKAGES_DISAGREE_LABEL),
+            _ => None,
+        }
+    }
+
     /// Would moving this file away likely stop the site loading? Core and
     /// component files, and the ones WordPress or PHP load by name.
     pub fn looks_loaded_by_site(&self) -> bool {
@@ -635,6 +658,48 @@ pub struct ScanCoverage {
     /// watched like any custom code, and aren't counted as verified.
     #[serde(default)]
     pub vendor_note: Option<String>,
+    /// Of `plugins_verified`, those compared with a vendor's package.
+    #[serde(default)]
+    pub plugins_vendor_verified: i64,
+    /// Of `themes_verified`, those compared with a vendor's package.
+    #[serde(default)]
+    pub themes_vendor_verified: i64,
+    /// The vendor packages behind this scan's differences, for the operator.
+    #[serde(default)]
+    pub vendor_packages: Vec<VendorPackageInfo>,
+}
+
+impl ScanCoverage {
+    pub fn any_vendor_verified(&self) -> bool {
+        self.plugins_vendor_verified > 0 || self.themes_vendor_verified > 0
+    }
+
+    pub fn themes_wporg_verified(&self) -> i64 {
+        (self.themes_verified - self.themes_vendor_verified).max(0)
+    }
+}
+
+/// Where a cached vendor manifest came from. Never a URL. Names other hostings, so
+/// it's for operators only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct VendorPackageInfo {
+    #[serde(default)]
+    pub theme: bool,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub version: String,
+    /// The host the package finally came from.
+    #[serde(default)]
+    pub final_host: String,
+    /// Who produced it, then who downloaded the same thing.
+    #[serde(default)]
+    pub hostings: Vec<String>,
+    /// Unix seconds it was first cached.
+    #[serde(default)]
+    pub at: i64,
+    #[serde(default)]
+    pub disputed: bool,
 }
 
 /// Result of a WordPress **integrity** scan — the sibling of
@@ -767,6 +832,11 @@ impl WpIntegrityScanResult {
         self.core_issue_count() + self.plugin_issue_count() + self.malware.len()
     }
 
+    /// Plugins compared with wordpress.org, apart from those compared with a vendor.
+    pub fn plugins_wporg_checked(&self) -> i64 {
+        (self.plugins_checked - self.coverage.plugins_vendor_verified).max(0)
+    }
+
     /// The label the scan put on a plugin or theme's findings.
     pub fn source_label_of(&self, slug: &str) -> Option<&str> {
         self.findings
@@ -781,7 +851,7 @@ impl WpIntegrityScanResult {
     /// wordpress.org; on a native record the list was cut short and nobody knows.
     pub fn reference_of(&self, slug: &str) -> &str {
         match self.source_label_of(slug) {
-            Some("vendor package") => "the vendor's package",
+            Some(VENDOR_PACKAGE_LABEL) => "the vendor's package",
             Some(l) => l,
             None if self.native_scan_ran => "its source",
             None => "wordpress.org",
@@ -844,20 +914,7 @@ impl WpIntegrityScanResult {
     pub fn listed_findings(&self) -> impl Iterator<Item = &SiteFileFinding> {
         self.findings
             .iter()
-            .filter(|f| !f.is_comparison() || f.rule_id.is_some() || self.held_back(f))
-    }
-
-    /// A plugin's difference from its vendor's package during the pilot: the new
-    /// layer's, so the plugin section (which alerts and reports read) doesn't hold
-    /// it and this list has to. A theme's section is the panel's alone and keeps its.
-    fn held_back(&self, f: &SiteFileFinding) -> bool {
-        self.report_only
-            && f.is_comparison()
-            && f.source_label.as_deref() == Some("vendor package")
-            && !self
-                .themes_failed
-                .iter()
-                .any(|t| f.component.as_deref() == Some(t.slug.as_str()))
+            .filter(|f| !f.is_comparison() || f.rule_id.is_some())
     }
 
     /// The number in the headline: `shown_finding_count`, but never below what
@@ -875,7 +932,7 @@ impl WpIntegrityScanResult {
             + self.theme_issue_count()
             + self
                 .listed_findings()
-                .filter(|f| !f.is_comparison() || self.held_back(f))
+                .filter(|f| !f.is_comparison())
                 .count()
     }
 
@@ -1123,42 +1180,6 @@ mod tests {
     }
 
     #[test]
-    fn a_vendor_difference_in_the_pilot_is_counted_once_on_the_card() {
-        let vendor = |rel: &str, component: &str| SiteFileFinding {
-            rel: rel.into(),
-            kind: FindingKind::UpstreamModified,
-            component: Some(component.into()),
-            source_label: Some("vendor package".into()),
-            ..Default::default()
-        };
-        let mut r = WpIntegrityScanResult {
-            native_scan_ran: true,
-            wp_cli_ok: true,
-            report_only: true,
-            findings: vec![vendor("a.php", "pro"), vendor("t.php", "divi")],
-            themes_failed: vec![WpIntegrityPluginResult {
-                slug: "divi".into(),
-                version: "1".into(),
-                issues: vec![WpIntegrityFileIssue {
-                    path: "t.php".into(),
-                    message: "x".into(),
-                }],
-            }],
-            ..Default::default()
-        };
-        // The theme's section shows its own, the list shows the plugin's.
-        let listed: Vec<&str> = r.listed_findings().map(|f| f.rel.as_str()).collect();
-        assert_eq!(listed, ["a.php"]);
-        assert_eq!(r.shown_finding_count(), 2);
-        assert_eq!(r.headline_count(), 2);
-        assert_eq!(r.verdict(), ScanVerdict::Findings);
-        assert_eq!(r.total_findings(), 0, "what alerts and reports read");
-        // Once live it's in the plugin section instead, like any comparison.
-        r.report_only = false;
-        assert_eq!(r.listed_findings().count(), 0);
-    }
-
-    #[test]
     fn is_clean_needs_a_scan_that_covered_the_site() {
         let mut r = WpIntegrityScanResult {
             wp_cli_ok: true,
@@ -1216,6 +1237,7 @@ mod tests {
 
         let mut r = native();
         r.themes_failed = vec![WpIntegrityPluginResult {
+            source: None,
             slug: "t".into(),
             issues: vec![WpIntegrityFileIssue::default()],
             ..Default::default()

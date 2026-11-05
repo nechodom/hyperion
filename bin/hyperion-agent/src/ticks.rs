@@ -61,6 +61,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_wp_system_cron(svc);
     spawn_site_scan(svc);
     spawn_clamav_sweep(svc);
+    spawn_vendor_sweep(svc);
     spawn_billing_sweep(svc);
     spawn_package_enforce(svc);
     spawn_care_reports(svc);
@@ -586,6 +587,17 @@ fn spawn_site_scan(svc: &Svc) {
                 Ok(_) => tracing::debug!("site scan tick: no new findings"),
                 Err(e) => tracing::warn!(error=%e, "site scan tick failed"),
             }
+        }
+    });
+}
+
+/// Reference copies for premium plugins, from the links WordPress holds. Beside the
+/// site scan rather than in it: a vendor can take minutes per package, and a "Scan
+/// now" must not wait behind one. Its budget is by the clock, not by this period.
+fn spawn_vendor_sweep(svc: &Svc) {
+    every(svc, 9 * MIN, 10 * MIN, |svc| async move {
+        if let Err(e) = svc.site_scan_vendor_tick().await {
+            tracing::warn!(error=%e, "vendor package sweep failed");
         }
     });
 }

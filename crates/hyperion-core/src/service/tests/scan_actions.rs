@@ -228,11 +228,13 @@ async fn quarantine_takes_the_file_off_the_upstream_lists() {
     r.core_unexpected = vec!["wp-admin/shell.php".into(), "wp-admin/other.php".into()];
     r.plugins_failed = vec![
         hyperion_types::WpIntegrityPluginResult {
+            source: None,
             slug: "foo".into(),
             issues: vec![issue("a/b.php"), issue("b.php")],
             ..Default::default()
         },
         hyperion_types::WpIntegrityPluginResult {
+            source: None,
             slug: "hello".into(),
             issues: vec![issue("hello.php")],
             ..Default::default()
@@ -1136,6 +1138,115 @@ async fn quarantine_then_restore_keeps_the_clamav_hit() {
     assert!(!stored.result.is_clean());
 }
 
+// ---- forgetting a vendor package ----
+
+fn cached_vendor_package(scan_dir: &Path, slug: &str, version: &str) -> std::path::PathBuf {
+    let dir = scan_dir.join("manifests/vendor/plugin").join(slug);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let sha = "a".repeat(64);
+    let manifest = dir.join(format!("{version}.json"));
+    std::fs::write(
+        &manifest,
+        format!(r#"{{"source":"VendorPackage","files":{{"a.php":"sha256:{sha}"}}}}"#),
+    )
+    .expect("write");
+    std::fs::write(dir.join(format!("{version}.provenance")), "{}").expect("write");
+    std::fs::write(dir.join(format!("{version}.disputed")), "").expect("write");
+    manifest
+}
+
+#[tokio::test]
+async fn forgetting_a_package_is_audited_and_rescans_sites_on_it() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), happy_mocks_many());
+    let asking = {
+        s.create(req("a.test")).await.expect("create");
+        s.get(HostingSelector::Domain(
+            Domain::parse("a.test").expect("parse"),
+        ))
+        .await
+        .expect("get")
+    };
+    s.create(req("b.test")).await.expect("create");
+    let other = s
+        .get(HostingSelector::Domain(
+            Domain::parse("b.test").expect("parse"),
+        ))
+        .await
+        .expect("get");
+    s.create(req("c.test")).await.expect("create");
+    let elsewhere = s
+        .get(HostingSelector::Domain(
+            Domain::parse("c.test").expect("parse"),
+        ))
+        .await
+        .expect("get");
+    let site = |version: &str| {
+        serde_json::json!({
+            "candidates": [{"kind": "plugin", "slug": "pro", "version": version}]
+        })
+        .to_string()
+    };
+    for (id, version) in [(&other, "1.0"), (&elsewhere, "2.0")] {
+        hyperion_state::hosting_kv::set(
+            &pool,
+            id.id.as_str(),
+            "scan_vendor_site",
+            &site(version),
+            1,
+        )
+        .await
+        .expect("kv");
+    }
+    let tmp = tempfile::tempdir().expect("tmp");
+    let s = s.with_paths(HostingPaths {
+        scan_dir: tmp.path().display().to_string(),
+        ..Default::default()
+    });
+    let manifest = cached_vendor_package(tmp.path(), "pro", "1.0");
+    let kept = cached_vendor_package(tmp.path(), "pro", "2.0");
+
+    s.scan_vendor_forget(
+        HostingSelector::Id(asking.id.clone()),
+        false,
+        "pro".into(),
+        "1.0".into(),
+        "kevin".into(),
+    )
+    .await
+    .expect("forget");
+    assert!(!manifest.exists());
+    assert!(!manifest.with_extension("provenance").exists());
+    assert!(!manifest.with_extension("disputed").exists());
+    assert!(kept.exists(), "per version");
+    assert!(s.scan_request_flag(asking.id.as_str()).await.is_some());
+    assert!(s.scan_request_flag(other.id.as_str()).await.is_some());
+    assert!(s.scan_request_flag(elsewhere.id.as_str()).await.is_none());
+
+    let rows = audit_rows(&pool, "wp.integrity.vendor_forget").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "kevin");
+    assert!(rows[0].1.contains("pro"), "{}", rows[0].1);
+    assert_eq!(rows[0].2, "ok");
+
+    // Nothing there, or a key that can't be a file name: refused, and on the record.
+    for (slug, version) in [("pro", "1.0"), ("../../etc", "1.0"), ("pro", "../x")] {
+        let got = s
+            .scan_vendor_forget(
+                HostingSelector::Id(asking.id.clone()),
+                false,
+                slug.into(),
+                version.into(),
+                "kevin".into(),
+            )
+            .await;
+        assert!(got.is_err(), "{slug} {version}");
+    }
+    let rows = audit_rows(&pool, "wp.integrity.vendor_forget").await;
+    assert_eq!(rows.len(), 4);
+    assert!(rows[1..].iter().all(|r| r.2 == "refused"));
+}
+
 // ---- audit ----
 
 #[tokio::test]
@@ -1235,6 +1346,7 @@ fn wporg(slug: &str, label: &str) -> SiteFileFinding {
 
 fn failed(slug: &str, version: &str) -> hyperion_types::WpIntegrityPluginResult {
     hyperion_types::WpIntegrityPluginResult {
+        source: None,
         slug: slug.into(),
         issues: vec![hyperion_types::WpIntegrityFileIssue {
             path: "x.php".into(),

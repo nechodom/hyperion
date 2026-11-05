@@ -1,5 +1,6 @@
 //! MariaDB database + user provisioning via the local `mariadb` socket.
 
+use crate::backup::{mariadb_option_file, DbLogin};
 use crate::{cmd, AdapterError};
 use hyperion_types::HostingId;
 use std::time::Duration;
@@ -113,7 +114,7 @@ pub const UPDATE_PLUGINS_OPTION: &str = "_site_transient_update_plugins";
 pub const UPDATE_THEMES_OPTION: &str = "_site_transient_update_themes";
 
 /// How long reading one option may take, from start to giving up.
-const READ_OPTION_TIMEOUT: Duration = Duration::from_secs(60);
+const READ_OPTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A WordPress table prefix this code is willing to put in a statement.
 pub fn valid_table_prefix(prefix: &str) -> bool {
@@ -133,25 +134,44 @@ fn valid_db_name(db: &str) -> bool {
 /// One of the update transients from a WordPress site's options table, as the
 /// database holds it. `None` when there's no such row.
 ///
-/// This runs as root against a database its tenant has every right in, and the
-/// caller has already made sure `db` is one the hosting owns. See
-/// [`read_option_sql`] for what stops the tenant's objects running as root.
+/// Read as the hosting's own login, never root: its user has `ALL` on the database,
+/// views and stored functions included, and a view of `SQL SECURITY INVOKER` over a
+/// function of the same kind runs that function with the rights of whoever selects
+/// from it. This way that's only ever the tenant, who could have run it anyway. The
+/// password goes in a 0600 option file, and the user on argv as well, so a
+/// `.my.cnf` read after that file can't turn this into root.
 pub async fn read_option(
     db: &str,
     prefix: &str,
     option: &str,
+    login: &DbLogin<'_>,
 ) -> Result<Option<String>, AdapterError> {
+    use std::io::Write;
     use tokio::io::AsyncWriteExt;
     let sql = read_option_sql(db, prefix, option)?;
+    if !valid_db_name(login.user) {
+        return Err(AdapterError::Other("refusing a database login".into()));
+    }
+    let mut opt = tempfile::Builder::new()
+        .prefix("hyperion-dbread-")
+        .suffix(".cnf")
+        .tempfile()?;
+    opt.write_all(mariadb_option_file(login).as_bytes())?;
+    opt.flush()?;
     let mut child = tokio::process::Command::new("/usr/bin/mariadb")
+        // `--defaults-extra-file` must come first. `--local-infile=0`: the client
+        // runs as root, and a server can ask it for a local file.
+        .arg(format!("--defaults-extra-file={}", opt.path().display()))
+        .arg(format!("--user={}", login.user))
         // Raw: batch mode's escaping would change the byte lengths inside a
         // serialized value. utf8mb4: a narrower connection charset would too.
         .args([
+            "--local-infile=0",
             "--batch",
             "--raw",
             "--skip-column-names",
             "--default-character-set=utf8mb4",
-            "--connect-timeout=10",
+            "--connect-timeout=3",
         ])
         .kill_on_drop(true)
         .stdin(std::process::Stdio::piped())
@@ -181,16 +201,10 @@ pub async fn read_option(
 }
 
 /// The statements behind [`read_option`]. Everything that isn't a constant is
-/// checked to be safe inside quotes and backticks, and a bad value is refused.
-///
-/// `{prefix}options` is the tenant's to replace: its user has `ALL` on the
-/// database, views and stored functions included. A view with `SQL SECURITY
-/// INVOKER` over a function of the same kind runs that function with the rights of
-/// whoever selects from it, and that's root here, with every other tenant's
-/// database in reach. So the statement runs only if the name is a base table, and
-/// the lock holds it to that: without it a `RENAME` could put a view there between
-/// the check and the read. A lock on a view runs nothing, and a read has no
-/// triggers. `LEFT` bounds the value at 8 MiB characters.
+/// checked to be safe inside quotes and backticks, and a bad value is refused. Only
+/// a base table is read: a view swapped in between the check and the read runs as
+/// the tenant and answers with the tenant's text, which all of this expects anyway.
+/// `LEFT` bounds the value at 8 MiB characters.
 fn read_option_sql(db: &str, prefix: &str, option: &str) -> Result<String, AdapterError> {
     if !valid_db_name(db) {
         return Err(AdapterError::Other("refusing a database name".into()));
@@ -203,9 +217,7 @@ fn read_option_sql(db: &str, prefix: &str, option: &str) -> Result<String, Adapt
     }
     let table = format!("{prefix}options");
     Ok(format!(
-        "SET SESSION lock_wait_timeout = 5;\n\
-         SET SESSION max_statement_time = 30;\n\
-         LOCK TABLES `{db}`.`{table}` READ;\n\
+        "SET SESSION max_statement_time = 4;\n\
          SET @hyperion_read = IF(\
            (SELECT COUNT(*) FROM information_schema.TABLES \
             WHERE TABLE_SCHEMA = '{db}' AND TABLE_NAME = '{table}' \
@@ -215,8 +227,7 @@ fn read_option_sql(db: &str, prefix: &str, option: &str) -> Result<String, Adapt
            'DO 0');\n\
          PREPARE hyperion_read FROM @hyperion_read;\n\
          EXECUTE hyperion_read;\n\
-         DEALLOCATE PREPARE hyperion_read;\n\
-         UNLOCK TABLES;\n"
+         DEALLOCATE PREPARE hyperion_read;\n"
     ))
 }
 
@@ -284,16 +295,16 @@ mod tests {
     }
 
     #[test]
-    fn the_read_is_gated_on_a_base_table_under_a_lock() {
+    fn the_read_is_gated_on_a_base_table() {
         let sql = read_option_sql("lm_abc", "wp_", UPDATE_PLUGINS_OPTION).expect("sql");
         let at = |needle: &str| {
             sql.find(needle)
                 .unwrap_or_else(|| panic!("{needle}: {sql}"))
         };
-        assert!(at("LOCK TABLES `lm_abc`.`wp_options` READ") < at("TABLE_TYPE = 'BASE TABLE'"));
         assert!(at("TABLE_TYPE = 'BASE TABLE'") < at("EXECUTE hyperion_read"));
         assert!(sql.contains("SELECT LEFT(option_value, 8388608)"));
         assert!(sql.contains("option_name = ''_site_transient_update_plugins''"));
+        assert!(!sql.contains("LOCK TABLES"));
         // The only read of the table is the gated one.
         assert_eq!(sql.matches("FROM `lm_abc`").count(), 1);
     }
@@ -320,11 +331,39 @@ mod tests {
     async fn live_sql(sql: &str) -> String {
         cmd::run_with_stdin(
             "/usr/bin/mariadb",
-            &["--batch", "--raw", "-N"],
+            &["--batch", "--raw", "-N", "--default-character-set=utf8mb4"],
             sql.as_bytes(),
         )
         .await
         .unwrap_or_else(|e| panic!("{sql}: {e}"))
+    }
+
+    const LIVE_PASSWORD: &str = "pa\"ss#w0rd";
+
+    fn tenant(user: &str) -> DbLogin<'_> {
+        DbLogin {
+            user,
+            password: LIVE_PASSWORD,
+        }
+    }
+
+    /// A tenant's database: its user has `ALL` there and nothing elsewhere.
+    async fn live_tenant(db: &str, user: &str) {
+        let pass = escape_string_literal(LIVE_PASSWORD);
+        live_sql(&format!(
+            "DROP DATABASE IF EXISTS `{db}`; CREATE DATABASE `{db}`;\n\
+             DROP USER IF EXISTS `{user}`@`localhost`;\n\
+             CREATE USER `{user}`@`localhost` IDENTIFIED BY '{pass}';\n\
+             GRANT ALL PRIVILEGES ON `{db}`.* TO `{user}`@`localhost`;"
+        ))
+        .await;
+    }
+
+    async fn live_drop(db: &str, user: &str) {
+        live_sql(&format!(
+            "DROP DATABASE `{db}`; DROP USER `{user}`@`localhost`;"
+        ))
+        .await;
     }
 
     /// Lengths in a serialized value are bytes, so what comes back has to be the
@@ -332,120 +371,119 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires running mariadb-server"]
     async fn read_option_returns_the_exact_value() {
-        let db = "hyp_read_option_exact";
+        let (db, user) = ("hyp_read_exact", "hyp_read_exact_u");
+        live_tenant(db, user).await;
         let value = "a:1:{s:3:\"k\\n\";s:12:\"Přílo\\žha\ne\";}";
+        let literal = escape_string_literal(value);
         live_sql(&format!(
-            "DROP DATABASE IF EXISTS `{db}`; CREATE DATABASE `{db}`;\n\
-             CREATE TABLE `{db}`.`wp_options` (option_name VARCHAR(191) PRIMARY KEY, \
-               option_value LONGTEXT NOT NULL) DEFAULT CHARSET utf8mb4;"
+            "CREATE TABLE `{db}`.`wp_options` (option_name VARCHAR(191) PRIMARY KEY, \
+               option_value LONGTEXT NOT NULL) DEFAULT CHARSET utf8mb4;\n\
+             INSERT INTO `{db}`.`wp_options` VALUES \
+               ('{UPDATE_PLUGINS_OPTION}', '{literal}');"
         ))
         .await;
-        let literal = escape_string_literal(value);
-        cmd::run_with_stdin(
-            "/usr/bin/mariadb",
-            &["--default-character-set=utf8mb4"],
-            format!(
-                "INSERT INTO `{db}`.`wp_options` VALUES ('{UPDATE_PLUGINS_OPTION}', '{literal}');"
-            )
-            .as_bytes(),
-        )
-        .await
-        .expect("insert");
-
-        let got = read_option(db, "wp_", UPDATE_PLUGINS_OPTION)
+        let login = tenant(user);
+        let got = read_option(db, "wp_", UPDATE_PLUGINS_OPTION, &login)
             .await
             .expect("read");
         assert_eq!(got.as_deref(), Some(value));
         // No such row, and no such table.
-        assert_eq!(
-            read_option(db, "wp_", UPDATE_THEMES_OPTION)
-                .await
-                .expect("read"),
-            None
-        );
-        assert!(read_option(db, "other_", UPDATE_THEMES_OPTION)
-            .await
-            .is_err());
-        live_sql(&format!("DROP DATABASE `{db}`;")).await;
+        let none = read_option(db, "wp_", UPDATE_THEMES_OPTION, &login);
+        assert_eq!(none.await.expect("read"), None);
+        let none = read_option(db, "other_", UPDATE_THEMES_OPTION, &login);
+        assert_eq!(none.await.expect("read"), None, "not a base table");
+        live_drop(db, user).await;
     }
 
-    /// The attack [`read_option_sql`] is written against: `wp_options` is a view
-    /// with invoker rights over a function of invoker rights, which would read
-    /// another database, and leave a mark, if root ever selected from it.
     #[tokio::test]
     #[ignore = "requires running mariadb-server"]
-    async fn a_view_in_place_of_the_table_runs_nothing_as_root() {
-        let (db, victim) = ("hyp_read_option_attacker", "hyp_read_option_victim");
+    async fn a_wrong_password_or_someone_elses_database_reads_nothing() {
+        let (db, user) = ("hyp_read_login", "hyp_read_login_u");
+        let (other, other_user) = ("hyp_read_login2", "hyp_read_login2_u");
+        live_tenant(db, user).await;
+        live_tenant(other, other_user).await;
         live_sql(&format!(
-            "DROP DATABASE IF EXISTS `{db}`; DROP DATABASE IF EXISTS `{victim}`;\n\
-             CREATE DATABASE `{db}`; CREATE DATABASE `{victim}`;\n\
+            "CREATE TABLE `{other}`.`wp_options` (option_name VARCHAR(191), \
+               option_value LONGTEXT);\n\
+             INSERT INTO `{other}`.`wp_options` VALUES \
+               ('{UPDATE_PLUGINS_OPTION}', 'THEIR-LICENCE');"
+        ))
+        .await;
+        let wrong = DbLogin {
+            user,
+            password: "not-it",
+        };
+        assert!(read_option(db, "wp_", UPDATE_PLUGINS_OPTION, &wrong)
+            .await
+            .is_err());
+        // Whatever names it, this login can't see that table.
+        let got = read_option(other, "wp_", UPDATE_PLUGINS_OPTION, &tenant(user)).await;
+        assert!(!format!("{got:?}").contains("THEIR-LICENCE"), "{got:?}");
+        live_drop(db, user).await;
+        live_drop(other, other_user).await;
+    }
+
+    /// The attack this login is for: `wp_options` is a view with invoker rights over
+    /// a function of invoker rights, which reads another database and leaves a mark.
+    /// It isn't read at all, and even a read would run as the tenant.
+    #[tokio::test]
+    #[ignore = "requires running mariadb-server"]
+    async fn a_view_in_place_of_the_table_gives_nothing_dangerous() {
+        let (db, user, victim) = (
+            "hyp_read_attacker",
+            "hyp_read_attacker_u",
+            "hyp_read_victim",
+        );
+        live_tenant(db, user).await;
+        live_sql(&format!(
+            "DROP DATABASE IF EXISTS `{victim}`; CREATE DATABASE `{victim}`;\n\
              CREATE TABLE `{victim}`.`wp_options` (option_name VARCHAR(191), \
                option_value LONGTEXT);\n\
              INSERT INTO `{victim}`.`wp_options` VALUES \
                ('{UPDATE_PLUGINS_OPTION}', 'VICTIM-LICENCE');\n\
              CREATE TABLE `{db}`.`ran` (who VARCHAR(255));\n\
              DELIMITER //\n\
-             CREATE FUNCTION `{db}`.`steal`() RETURNS LONGTEXT SQL SECURITY INVOKER \
+             CREATE DEFINER=`{user}`@`localhost` FUNCTION `{db}`.`steal`() RETURNS LONGTEXT \
+             SQL SECURITY INVOKER \
              BEGIN \
                INSERT INTO `{db}`.`ran` VALUES (CURRENT_USER()); \
                RETURN (SELECT option_value FROM `{victim}`.`wp_options` LIMIT 1); \
              END//\n\
              DELIMITER ;\n\
-             CREATE SQL SECURITY INVOKER VIEW `{db}`.`wp_options` AS \
+             CREATE DEFINER=`{user}`@`localhost` SQL SECURITY INVOKER VIEW `{db}`.`wp_options` AS \
                SELECT '{UPDATE_PLUGINS_OPTION}' AS option_name, \
                `{db}`.`steal`() AS option_value;"
         ))
         .await;
-        // As a check the setup is what it claims: an ungated select does run it.
+        // The setup is what it claims: root selecting from it gets the victim's value.
         let direct = live_sql(&format!("SELECT option_value FROM `{db}`.`wp_options`;")).await;
         assert!(direct.contains("VICTIM-LICENCE"), "{direct}");
         live_sql(&format!("DELETE FROM `{db}`.`ran`;")).await;
 
-        let got = read_option(db, "wp_", UPDATE_PLUGINS_OPTION)
+        let login = tenant(user);
+        let got = read_option(db, "wp_", UPDATE_PLUGINS_OPTION, &login)
             .await
             .expect("read");
         assert_eq!(got, None, "a view isn't read");
         let ran = live_sql(&format!("SELECT COUNT(*) FROM `{db}`.`ran`;")).await;
         assert_eq!(ran.trim(), "0", "nothing ran");
-        live_sql(&format!("DROP DATABASE `{db}`; DROP DATABASE `{victim}`;")).await;
-    }
 
-    /// A real table reads under the lock, and the lock is what keeps it a table:
-    /// with it held, the `RENAME` that would swap a view in has to wait.
-    #[tokio::test]
-    #[ignore = "requires running mariadb-server"]
-    async fn the_lock_keeps_a_view_from_being_swapped_in() {
-        let db = "hyp_read_option_table";
-        live_sql(&format!(
-            "DROP DATABASE IF EXISTS `{db}`; CREATE DATABASE `{db}`;\n\
-             CREATE TABLE `{db}`.`x_options` (option_name VARCHAR(191), \
-               option_value LONGTEXT);\n\
-             INSERT INTO `{db}`.`x_options` VALUES \
-               ('{UPDATE_THEMES_OPTION}', 'value');"
-        ))
-        .await;
-        let got = read_option(db, "x_", UPDATE_THEMES_OPTION)
-            .await
-            .expect("read");
-        assert_eq!(got.as_deref(), Some("value"));
-
-        let holder =
-            format!("LOCK TABLES `{db}`.`x_options` READ; SELECT SLEEP(3); UNLOCK TABLES;");
-        let holding = tokio::spawn(async move { live_sql(&holder).await });
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let swap = cmd::run_with_stdin(
+        // And past the check, as a swap could get: the tenant's own rights.
+        let mut opt = tempfile::NamedTempFile::new().expect("tmp");
+        std::io::Write::write_all(&mut opt, mariadb_option_file(&login).as_bytes()).expect("write");
+        let arg = format!("--defaults-extra-file={}", opt.path().display());
+        let as_tenant = cmd::run_with_stdin(
             "/usr/bin/mariadb",
-            &[],
-            format!(
-                "SET SESSION lock_wait_timeout = 1; \
-                 RENAME TABLE `{db}`.`x_options` TO `{db}`.`moved`;"
-            )
-            .as_bytes(),
+            &[&arg, "--batch", "-N"],
+            format!("SELECT option_value FROM `{db}`.`wp_options`;").as_bytes(),
         )
         .await;
-        assert!(swap.is_err(), "the rename had to wait: {swap:?}");
-        holding.await.expect("holder");
-        live_sql(&format!("DROP DATABASE `{db}`;")).await;
+        assert!(
+            !format!("{as_tenant:?}").contains("VICTIM-LICENCE"),
+            "{as_tenant:?}"
+        );
+        live_sql(&format!("DROP DATABASE `{victim}`;")).await;
+        live_drop(db, user).await;
     }
 
     #[tokio::test]

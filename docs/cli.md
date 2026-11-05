@@ -742,6 +742,21 @@ runs ClamAV over the site. A part that could not be checked (no wp-cli,
 ClamAV not installed, a premium plugin with no published checksums) says so
 rather than passing.
 
+### hctl wp vendor-forget
+
+Forget this node's reference copy of a vendor package version.
+
+**Options:** `SELECTOR SLUG VERSION`, `--theme`
+
+```bash
+hctl wp vendor-forget example.com elementor-pro 3.26.0
+```
+
+Deletes the manifest built from a premium plugin's or theme's package, the record
+of where it came from and any dispute about it, on the node that hosts `SELECTOR`.
+Every site there on that version is scanned again. `hctl wp integrity-scan` lists
+the packages behind a site's differences. Audited.
+
 ### hctl wp core-repair
 
 Re-download WordPress core over the existing files.

@@ -464,20 +464,7 @@ pub(super) fn assemble_integrity_result(
     clamav_available: bool,
     report_only: bool,
 ) -> hyperion_types::WpIntegrityScanResult {
-    let mut up = outcome.upstream;
-    // Comparing with a vendor's package is a new layer, with hosts nobody has tried
-    // yet, and the plugin list is what alerts and reports read. Through the pilot
-    // its differences show in the panel's findings only. A theme's aren't read there.
-    if report_only {
-        let vendor: std::collections::HashSet<&str> = outcome
-            .findings
-            .iter()
-            .filter(|f| f.source_label.as_deref() == Some("vendor package"))
-            .filter_map(|f| f.component.as_deref())
-            .collect();
-        up.plugins_failed
-            .retain(|p| !vendor.contains(p.slug.as_str()));
-    }
+    let up = outcome.upstream;
     hyperion_types::WpIntegrityScanResult {
         // A missing file alone leaves core "ok": usually a botched update, and
         // listed in its own bucket.
@@ -606,6 +593,21 @@ pub(super) fn read_new_layers_live(cfg_path: Option<&std::path::Path>) -> bool {
         .and_then(|doc| {
             doc.get("integrity")
                 .and_then(|s| s.get("new_layers_live"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+/// Whether a difference from a vendor's package counts as a finding, from
+/// `[integrity] vendor_refs_live`. Off until real licences have shown these
+/// references can be believed: it's a change to review until then.
+pub(super) fn read_vendor_refs_live(cfg_path: Option<&std::path::Path>) -> bool {
+    cfg_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| raw.parse::<toml_edit::DocumentMut>().ok())
+        .and_then(|doc| {
+            doc.get("integrity")
+                .and_then(|s| s.get("vendor_refs_live"))
                 .and_then(|v| v.as_bool())
         })
         .unwrap_or(false)

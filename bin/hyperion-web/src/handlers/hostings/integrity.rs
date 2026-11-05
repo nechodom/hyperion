@@ -460,6 +460,46 @@ pub async fn post_integrity_trust_all(
     .await
 }
 
+#[derive(Deserialize)]
+pub struct IntegrityVendorForgetForm {
+    pub selector: String,
+    pub slug: String,
+    pub version: String,
+    #[serde(default)]
+    pub theme: bool,
+}
+
+/// POST /hostings/integrity/vendor-forget — stop believing this node's copy of one
+/// vendor package version. Same capability as Trust: both decide what's taken as
+/// good, and a customer's login must not be able to.
+pub async fn post_integrity_vendor_forget(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<IntegrityVendorForgetForm>,
+) -> Result<Response, AppError> {
+    let IntegrityVendorForgetForm {
+        selector,
+        slug,
+        version,
+        theme,
+    } = form;
+    integrity_file_action(
+        state,
+        ctx,
+        selector,
+        Capability::WpScanTrust,
+        "Forgotten on this node. Sites on this version are scanned again.".into(),
+        move |hosting, actor| Request::ScanVendorForget {
+            hosting,
+            theme,
+            slug,
+            version,
+            actor,
+        },
+    )
+    .await
+}
+
 /// Run a fix on the owning node, then ask for a re-scan and render the card
 /// with the fix's outcome on top. The re-scan is the proof: "repaired" is
 /// only worth saying next to a scan that no longer lists the file — until

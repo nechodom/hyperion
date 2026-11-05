@@ -347,16 +347,23 @@ impl AdapterPort for RealAdapter {
         db: &str,
         prefix: &str,
         option: &str,
+        user: &str,
+        password: &str,
     ) -> Result<Option<String>, AdapterError> {
-        hyperion_adapters::mariadb::read_option(db, prefix, option).await
+        let login = hyperion_adapters::backup::DbLogin { user, password };
+        hyperion_adapters::mariadb::read_option(db, prefix, option, &login).await
     }
 
     async fn site_scan_vendor_fetch(
         &self,
         package: &hyperion_adapters::sitescan::vendor::PlannedPackage,
+        hosting_id: &str,
         cache_dir: &std::path::Path,
-    ) -> Result<(), hyperion_adapters::sitescan::vendor::VendorError> {
-        hyperion_adapters::sitescan::vendor::fetch_package(package, cache_dir).await
+    ) -> Result<
+        hyperion_adapters::sitescan::vendor::VendorFetched,
+        hyperion_adapters::sitescan::vendor::VendorError,
+    > {
+        hyperion_adapters::sitescan::vendor::fetch_package(package, hosting_id, cache_dir).await
     }
 
     async fn site_scan_evict_manifests(&self, cache_dir: &std::path::Path) {

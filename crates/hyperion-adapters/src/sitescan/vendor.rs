@@ -8,7 +8,8 @@
 //! message, a log or a file, and it is only ever fetched from a compiled-in host
 //! list with every hop re-checked and pinned. A manifest is keyed by slug and
 //! version, so one site with a working licence verifies every site on that
-//! version, and the first one for a key stays.
+//! version. The first one for a key stays, with a record of where it came from, and
+//! another site's different package disputes it rather than replacing it.
 //!
 //! None of the hosts below is confirmed against a real licence yet.
 
@@ -21,23 +22,27 @@ use std::process::Stdio;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant, SystemTime};
 
+use hyperion_types::VendorPackageInfo;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 use url::Url;
 
-use super::discover::{Component, Discovery};
+use super::discover::Discovery;
 use super::manifest::{
-    cache_path_for, manifest_from_zip, package_identity, valid_slug, valid_version, ComponentKey,
-    ComponentKind, ManifestSource,
+    cache_path_for, manifest_from_zip, package_identity, valid_slug, valid_version,
+    vendor_disputed_path, vendor_provenance_path, ComponentKey, ComponentKind, Manifest,
+    ManifestSource,
 };
 use super::walk::TenantRoot;
 use crate::cmd::curl_config_quote;
 use crate::mariadb::valid_table_prefix;
 
-/// Hosts a package URL may start on. `*.x` is any name below `x`; anything else
-/// is that exact name.
+/// Hosts a package URL may start on: exact names. No wildcards, here or below:
+/// anyone can rent a name under a CDN, and an open redirect on a listed host would
+/// then make their ZIP the reference for every site on that version.
 const VENDOR_HOSTS: [&str; 6] = [
     "my.elementor.com",
     "connect.advancedcustomfields.com",
@@ -46,9 +51,9 @@ const VENDOR_HOSTS: [&str; 6] = [
     "wpml.org",
     "wpforms.com",
 ];
-/// Hosts only a vendor's redirect may lead to. Anyone can rent a name here, so
-/// these are never a first hop.
-const REDIRECT_HOSTS: [&str; 2] = ["*.s3.amazonaws.com", "*.cloudfront.net"];
+/// Hosts only a vendor's redirect may lead to, by exact name, as real data names
+/// them: a redirect anywhere else is recorded in `unknown_vendor_hosts`.
+const REDIRECT_HOSTS: [&str; 0] = [];
 
 pub(crate) const MAX_PACKAGE_BYTES: u64 = 200 * 1024 * 1024;
 /// One package, every hop included.
@@ -56,6 +61,9 @@ const TIME_CAP: Duration = Duration::from_secs(300);
 /// Requests one package may take.
 const MAX_HOPS: usize = 5;
 const CONNECT_SECS: u32 = 15;
+/// Under this many bytes a second for [`SLOW_SECS`], a download is given up on.
+const SLOW_BYTES_PER_SEC: u32 = 10 * 1024;
+const SLOW_SECS: u32 = 60;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
 const REDIRECT_STATUSES: [u16; 5] = [301, 302, 303, 307, 308];
 
@@ -79,6 +87,10 @@ const MAX_PHP_DEPTH: usize = 8;
 const MAX_PHP_VALUES: usize = 200_000;
 pub(crate) const MAX_REFS: usize = 2000;
 const MAX_URL_BYTES: usize = 8192;
+/// curl's report: a status and a location.
+pub(crate) const MAX_REPORT_BYTES: usize = MAX_URL_BYTES + 64;
+/// Hostings a provenance record names.
+const MAX_PROVENANCE_HOSTINGS: usize = 20;
 
 const VENDOR_DIR: &str = "vendor";
 const TMP_DIR: &str = "tmp";
@@ -184,14 +196,7 @@ pub enum VendorError {
 // ---- hosts and addresses ----
 
 fn on_list(list: &[&str], host: &str) -> bool {
-    valid_hostname(host)
-        && list.iter().any(|entry| match entry.strip_prefix("*.") {
-            Some(parent) => host
-                .strip_suffix(parent)
-                .and_then(|h| h.strip_suffix('.'))
-                .is_some_and(|label| !label.is_empty()),
-            None => host == *entry,
-        })
+    valid_hostname(host) && list.contains(&host)
 }
 
 /// May a package URL start on this host?
@@ -259,6 +264,8 @@ fn v6_allowed(ip: &Ipv6Addr) -> bool {
         || ip.is_multicast()
         || (seg[0] & 0xfe00) == 0xfc00 // unique local, AWS's metadata included
         || (seg[0] & 0xffc0) == 0xfe80 // link-local
+        || (seg[0] & 0xffc0) == 0xfec0 // site-local, deprecated and never public
+        || seg[..3] == [0x64, 0xff9b, 1] // local-use NAT64
         || (seg[0] == 0x2001 && seg[1] == 0x0db8) // documentation
         || (seg[0] == 0x2001 && seg[1] == 0) // Teredo: hides an address
         || (seg[0] == 0x0100 && seg[1..4] == [0, 0, 0]) // discard
@@ -560,7 +567,10 @@ fn package_ref(
 /// What a package could verify: a plugin or theme in a folder, with a version,
 /// that wordpress.org doesn't know. A slug it does know has its checksums to
 /// answer to, and those are never replaced by a URL from the tenant's database.
-pub fn vendor_candidates(discovery: &Discovery, wporg_known: &BTreeSet<String>) -> Vec<Component> {
+pub fn vendor_candidates(
+    discovery: &Discovery,
+    wporg_known: &BTreeSet<String>,
+) -> Vec<ComponentKey> {
     if !discovery.is_wordpress {
         return Vec::new();
     }
@@ -575,7 +585,7 @@ pub fn vendor_candidates(discovery: &Discovery, wporg_known: &BTreeSet<String>) 
                 && valid_version(&c.key.version)
                 && !wporg_known.contains(&c.key.slug)
         })
-        .cloned()
+        .map(|c| c.key.clone())
         .collect()
 }
 
@@ -587,18 +597,26 @@ pub struct VendorPlan {
     pub unknown_hosts: Vec<String>,
 }
 
-/// Match a site's transients with its candidates. A `no_update` entry that names
-/// no version is taken to be what the site runs; a `response` entry has to say, or
-/// nothing could tell the next scan it was already fetched.
+/// Match a site's transients with its candidates, for at most the version it runs
+/// and one on offer per slug: a transient can hold any number of entries and one
+/// folder can have many main files. A `no_update` entry that names no version is
+/// taken to be what the site runs, and one that names another is neither; a
+/// `response` entry has to say, or nothing could tell the next scan it was fetched.
+///
+/// A version already cached isn't fetched, unless `differing` says this site has a
+/// difference from that manifest and this site hasn't had its say: its own package
+/// then settles whether the reference or the site is wrong.
 pub fn plan_downloads(
     refs: Vec<PackageRef>,
-    candidates: &[Component],
+    candidates: &[ComponentKey],
+    differing: &BTreeSet<String>,
+    hosting_id: &str,
     cache_dir: &Path,
     now: SystemTime,
 ) -> VendorPlan {
     let running: BTreeMap<(ComponentKind, &str), &str> = candidates
         .iter()
-        .map(|c| ((c.key.kind, c.key.slug.as_str()), c.key.version.as_str()))
+        .map(|k| ((k.kind, k.slug.as_str()), k.version.as_str()))
         .collect();
     let mut plan = VendorPlan::default();
     let mut unknown = BTreeSet::new();
@@ -607,22 +625,33 @@ pub fn plan_downloads(
             continue;
         };
         let version = match (r.version, r.bucket) {
+            (Some(v), PackageBucket::NoUpdate) if v != site_runs => continue,
             (Some(v), _) => v,
             (None, PackageBucket::NoUpdate) => site_runs.to_string(),
             (None, PackageBucket::Response) => continue,
         };
         let key = vendor_key(r.kind, &r.slug, &version);
         // A key that can't be a file name can't be cached, so it isn't asked for.
-        let cached = cache_path_for(cache_dir, &key, ManifestSource::VendorPackage)
-            .map(|p| p.exists())
-            .unwrap_or(true);
-        if cached || backing_off(cache_dir, &r.slug, &version, now) {
+        let Ok(path) = cache_path_for(cache_dir, &key, ManifestSource::VendorPackage) else {
+            continue;
+        };
+        if read_vendor_manifest(&path).is_some() {
+            let compare = version == site_runs
+                && differing.contains(&r.slug)
+                && !vendor_disputed_path(&path).exists()
+                && !read_provenance(&path)
+                    .is_some_and(|p| p.hostings.iter().any(|h| h == hosting_id));
+            if !compare {
+                continue;
+            }
+        }
+        if backing_off(cache_dir, hosting_id, &r.slug, &version, now) {
             continue;
         }
         match check_target(r.url.expose(), true) {
             Ok(_) => plan.fetch.push(PlannedPackage {
                 kind: r.kind,
-                verifies_today: r.bucket == PackageBucket::NoUpdate && version == site_runs,
+                verifies_today: r.bucket == PackageBucket::NoUpdate,
                 slug: r.slug,
                 version,
                 url: r.url,
@@ -640,8 +669,12 @@ pub fn plan_downloads(
     plan.fetch.sort_by(|a, b| plan_rank(a).cmp(&plan_rank(b)));
     // After the sort, so a key on offer twice keeps its better reason.
     let mut seen = BTreeSet::new();
-    plan.fetch
-        .retain(|p| seen.insert((p.kind, p.slug.clone(), p.version.clone())));
+    let mut prepared = BTreeSet::new();
+    plan.fetch.retain(|p| {
+        let runs = running.get(&(p.kind, p.slug.as_str())) == Some(&p.version.as_str());
+        seen.insert((p.kind, p.slug.clone(), p.version.clone()))
+            && (runs || prepared.insert((p.kind, p.slug.clone())))
+    });
     plan.unknown_hosts = unknown.into_iter().collect();
     plan
 }
@@ -666,12 +699,15 @@ fn vendor_key(kind: ComponentKind, slug: &str, version: &str) -> ComponentKey {
 
 // ---- backing off ----
 
+/// One hosting's own wait, so a tenant planting a bad link backs off nobody else.
 /// The marker's name says neither what failed nor whose.
-fn failed_marker(cache_dir: &Path, slug: &str, version: &str) -> PathBuf {
+fn failed_marker(cache_dir: &Path, hosting_id: &str, slug: &str, version: &str) -> PathBuf {
     let mut h = Sha256::new();
     h.update(slug.as_bytes());
     h.update([0]);
     h.update(version.as_bytes());
+    h.update([0]);
+    h.update(hosting_id.as_bytes());
     cache_dir
         .join(VENDOR_DIR)
         .join(FAILED_DIR)
@@ -686,9 +722,15 @@ fn younger_than(path: &Path, limit: Duration, now: SystemTime) -> bool {
         .is_some_and(|age| age < limit)
 }
 
-fn backing_off(cache_dir: &Path, slug: &str, version: &str, now: SystemTime) -> bool {
+fn backing_off(
+    cache_dir: &Path,
+    hosting_id: &str,
+    slug: &str,
+    version: &str,
+    now: SystemTime,
+) -> bool {
     younger_than(
-        &failed_marker(cache_dir, slug, version),
+        &failed_marker(cache_dir, hosting_id, slug, version),
         FAILED_BACKOFF,
         now,
     )
@@ -702,8 +744,8 @@ fn root_only_dir(dir: &Path) -> std::io::Result<()> {
         .create(dir)
 }
 
-fn mark_failed(cache_dir: &Path, slug: &str, version: &str, now: SystemTime) {
-    let marker = failed_marker(cache_dir, slug, version);
+fn mark_failed(cache_dir: &Path, hosting_id: &str, slug: &str, version: &str, now: SystemTime) {
+    let marker = failed_marker(cache_dir, hosting_id, slug, version);
     let written = marker
         .parent()
         .map_or(Ok(()), root_only_dir)
@@ -714,8 +756,8 @@ fn mark_failed(cache_dir: &Path, slug: &str, version: &str, now: SystemTime) {
     }
 }
 
-/// Drop downloads a restart cut off, and markers past their wait. What's cached
-/// stays: nothing can fetch a vendor's manifest again.
+/// Drop downloads a restart cut off, and markers past their wait. What's cached has
+/// its own sweep, by whether any site still runs it.
 pub fn sweep_leftovers(cache_dir: &Path, now: SystemTime) {
     let vendor = cache_dir.join(VENDOR_DIR);
     for (dir, limit) in [(TMP_DIR, TMP_MAX_AGE), (FAILED_DIR, FAILED_BACKOFF)] {
@@ -794,6 +836,8 @@ pub(crate) fn hop_config(hop: &Hop<'_>) -> String {
     cfg.push_str(&format!("max-filesize = {MAX_PACKAGE_BYTES}\n"));
     cfg.push_str(&format!("max-time = {}\n", hop.max_secs));
     cfg.push_str(&format!("connect-timeout = {CONNECT_SECS}\n"));
+    cfg.push_str(&format!("speed-limit = {SLOW_BYTES_PER_SEC}\n"));
+    cfg.push_str(&format!("speed-time = {SLOW_SECS}\n"));
     cfg.push_str("user-agent = \"hyperion-sitescan\"\n");
     // The body takes stdout, so the report goes to stderr. Nothing else does:
     // `silent` without `show-error`.
@@ -859,9 +903,11 @@ async fn run_curl(hop: &Hop<'_>, dest: &Path) -> Result<HopAnswer, VendorError> 
     let report = async {
         let mut report = Vec::new();
         let _ = (&mut stderr)
-            .take(MAX_URL_BYTES as u64 + 64)
+            .take(MAX_REPORT_BYTES as u64 + 1)
             .read_to_end(&mut report)
             .await;
+        // To the end: a curl writing to a pipe nobody reads never exits.
+        let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
         report
     };
     let (copied, report) = tokio::join!(body, report);
@@ -883,8 +929,12 @@ async fn run_curl(hop: &Hop<'_>, dest: &Path) -> Result<HopAnswer, VendorError> 
     parse_report(&report).ok_or(VendorError::Transport)
 }
 
-/// `<status> <redirect url>`.
+/// `<status> <redirect url>`. One past the bound had its location cut, and a cut
+/// location is another URL.
 fn parse_report(report: &[u8]) -> Option<HopAnswer> {
+    if report.len() > MAX_REPORT_BYTES {
+        return None;
+    }
     let text = std::str::from_utf8(report).ok()?;
     let (status, location) = text.split_once(' ')?;
     let location = location.trim();
@@ -894,8 +944,9 @@ fn parse_report(report: &[u8]) -> Option<HopAnswer> {
     })
 }
 
-/// Fetch a package into `dest`, which the caller keeps private.
-pub async fn download_package(url: &Secret, dest: &Path) -> Result<(), VendorError> {
+/// Fetch a package into `dest`, which the caller keeps private. Returns the host it
+/// finally came from.
+pub async fn download_package(url: &Secret, dest: &Path) -> Result<String, VendorError> {
     download_with(&CurlFetch, url, dest).await
 }
 
@@ -903,7 +954,7 @@ pub(crate) async fn download_with(
     fetch: &dyn HopFetch,
     url: &Secret,
     dest: &Path,
-) -> Result<(), VendorError> {
+) -> Result<String, VendorError> {
     let deadline = Instant::now() + TIME_CAP;
     let mut current = url.clone();
     for hop in 0..MAX_HOPS {
@@ -944,26 +995,43 @@ pub(crate) async fn download_with(
         if size > MAX_PACKAGE_BYTES {
             return Err(VendorError::TooLarge);
         }
-        return Ok(());
+        return Ok(host);
     }
     Err(VendorError::TooManyRedirects)
 }
 
-/// Download a planned package and cache its manifest. A failure of any kind backs
-/// this slug and version off. Only hashes are kept: no ZIP, no URL.
-pub async fn fetch_package(p: &PlannedPackage, cache_dir: &Path) -> Result<(), VendorError> {
-    fetch_with(&CurlFetch, p, cache_dir, SystemTime::now()).await
+/// What a package turned out to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VendorFetched {
+    /// The first for its slug and version: sites on it are verified from now.
+    New,
+    /// The same as the cached one, which now has a second hosting behind it.
+    Confirmed,
+    /// Not the same: the version is disputed until someone forgets it.
+    Disputed,
+}
+
+/// Download a planned package and compare it with, or cache it as, the manifest for
+/// its version. A failure backs this hosting's slug and version off, unless the
+/// failure is this machine's (a full disk). Only hashes are kept: no ZIP, no URL.
+pub async fn fetch_package(
+    p: &PlannedPackage,
+    hosting_id: &str,
+    cache_dir: &Path,
+) -> Result<VendorFetched, VendorError> {
+    fetch_with(&CurlFetch, p, hosting_id, cache_dir, SystemTime::now()).await
 }
 
 pub(crate) async fn fetch_with(
     fetch: &dyn HopFetch,
     p: &PlannedPackage,
+    hosting_id: &str,
     cache_dir: &Path,
     now: SystemTime,
-) -> Result<(), VendorError> {
-    let result = download_and_store(fetch, p, cache_dir).await;
-    if result.is_err() {
-        mark_failed(cache_dir, &p.slug, &p.version, now);
+) -> Result<VendorFetched, VendorError> {
+    let result = download_and_store(fetch, p, hosting_id, cache_dir, now).await;
+    if matches!(&result, Err(e) if *e != VendorError::Local) {
+        mark_failed(cache_dir, hosting_id, &p.slug, &p.version, now);
     }
     result
 }
@@ -971,18 +1039,21 @@ pub(crate) async fn fetch_with(
 async fn download_and_store(
     fetch: &dyn HopFetch,
     p: &PlannedPackage,
+    hosting_id: &str,
     cache_dir: &Path,
-) -> Result<(), VendorError> {
+    now: SystemTime,
+) -> Result<VendorFetched, VendorError> {
     let tmp_dir = cache_dir.join(VENDOR_DIR).join(TMP_DIR);
     root_only_dir(&tmp_dir).map_err(|_| VendorError::Local)?;
     // 0600, and gone when dropped, on every path out of here.
     let tmp = tempfile::NamedTempFile::new_in(&tmp_dir).map_err(|_| VendorError::Local)?;
-    download_with(fetch, &p.url, tmp.path()).await?;
-    let (kind, slug, version) = (p.kind, p.slug.clone(), p.version.clone());
+    let final_host = download_with(fetch, &p.url, tmp.path()).await?;
+    let key = vendor_key(p.kind, &p.slug, &p.version);
+    let hosting_id = hosting_id.to_string();
     let cache_dir = cache_dir.to_path_buf();
     // Hashing a large package is CPU and disk work: off the async threads.
     tokio::task::spawn_blocking(move || {
-        let stored = store_manifest(tmp.path(), kind, &slug, &version, &cache_dir);
+        let stored = store_manifest(tmp.path(), &key, &final_host, &hosting_id, &cache_dir, now);
         drop(tmp);
         stored
     })
@@ -990,39 +1061,128 @@ async fn download_and_store(
     .map_err(|_| VendorError::Local)?
 }
 
-/// Check a downloaded package is what was asked for, and cache its manifest under
-/// the version its own header says. The first manifest for a key stays.
+/// Check a downloaded package is what was asked for, under the version its own
+/// header says. The first manifest for a key stays; one that can't be parsed is no
+/// manifest. Any later one only says whether it agrees.
 fn store_manifest(
     zip: &Path,
-    kind: ComponentKind,
-    slug: &str,
-    expected: &str,
+    key: &ComponentKey,
+    final_host: &str,
+    hosting_id: &str,
     cache_dir: &Path,
-) -> Result<(), VendorError> {
-    let (top, version) = package_identity(zip, kind, slug).map_err(|_| VendorError::BadPackage)?;
-    if top != slug {
+    now: SystemTime,
+) -> Result<VendorFetched, VendorError> {
+    let (top, version) =
+        package_identity(zip, key.kind, &key.slug).map_err(|_| VendorError::BadPackage)?;
+    if top != key.slug {
         return Err(VendorError::BadPackage);
     }
-    if version != expected {
+    if version != key.version {
         return Err(VendorError::VersionMismatch);
     }
-    let key = vendor_key(kind, slug, &version);
-    let dest = cache_path_for(cache_dir, &key, ManifestSource::VendorPackage)
+    let dest = cache_path_for(cache_dir, key, ManifestSource::VendorPackage)
         .map_err(|_| VendorError::BadPackage)?;
-    if dest.exists() {
-        return Ok(());
+    let manifest = manifest_from_zip(zip, key, ManifestSource::VendorPackage)
+        .map_err(|_| VendorError::BadPackage)?;
+    if let Some(cached) = read_vendor_manifest(&dest) {
+        if cached.files != manifest.files {
+            write_synced(&vendor_disputed_path(&dest), b"")?;
+            return Ok(VendorFetched::Disputed);
+        }
+        let mut record = read_provenance(&dest).unwrap_or_default();
+        if record.hostings.len() < MAX_PROVENANCE_HOSTINGS
+            && !record.hostings.iter().any(|h| h == hosting_id)
+        {
+            record.hostings.push(hosting_id.to_string());
+            write_provenance(&dest, &record)?;
+        }
+        return Ok(VendorFetched::Confirmed);
     }
-    let manifest = manifest_from_zip(zip, &key, ManifestSource::VendorPackage)
-        .map_err(|_| VendorError::BadPackage)?;
+    let record = Provenance {
+        final_host: final_host.to_string(),
+        hostings: vec![hosting_id.to_string()],
+        at: now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX)),
+    };
+    write_provenance(&dest, &record)?;
     let json = serde_json::to_vec(&manifest).map_err(|_| VendorError::Local)?;
-    let dir = dest.parent().ok_or(VendorError::Local)?;
+    write_synced(&dest, &json)?;
+    Ok(VendorFetched::New)
+}
+
+/// Written whole and on disk before the name appears: a reader sees a complete file
+/// or none, even after a crash.
+fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), VendorError> {
+    let dir = path.parent().ok_or(VendorError::Local)?;
     fs::create_dir_all(dir).map_err(|_| VendorError::Local)?;
     let mut out = tempfile::NamedTempFile::new_in(dir).map_err(|_| VendorError::Local)?;
-    out.write_all(&json).map_err(|_| VendorError::Local)?;
-    match out.persist_noclobber(&dest) {
-        Ok(_) => Ok(()),
-        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(_) => Err(VendorError::Local),
+    out.write_all(bytes).map_err(|_| VendorError::Local)?;
+    out.as_file().sync_all().map_err(|_| VendorError::Local)?;
+    out.persist(path).map_err(|_| VendorError::Local)?;
+    Ok(())
+}
+
+/// A cached vendor manifest, or `None` for anything that isn't a usable one.
+fn read_vendor_manifest(path: &Path) -> Option<Manifest> {
+    let m: Manifest = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    (m.source == ManifestSource::VendorPackage && !m.files.is_empty()).then_some(m)
+}
+
+// ---- where a manifest came from ----
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Provenance {
+    #[serde(default)]
+    final_host: String,
+    #[serde(default)]
+    hostings: Vec<String>,
+    #[serde(default)]
+    at: i64,
+}
+
+fn read_provenance(manifest_path: &Path) -> Option<Provenance> {
+    serde_json::from_slice(&fs::read(vendor_provenance_path(manifest_path)).ok()?).ok()
+}
+
+fn write_provenance(manifest_path: &Path, record: &Provenance) -> Result<(), VendorError> {
+    let json = serde_json::to_vec(record).map_err(|_| VendorError::Local)?;
+    write_synced(&vendor_provenance_path(manifest_path), &json)
+}
+
+/// What the operator is shown about a cached manifest. `None` when there is none.
+pub fn package_info(cache_dir: &Path, key: &ComponentKey) -> Option<VendorPackageInfo> {
+    let path = cache_path_for(cache_dir, key, ManifestSource::VendorPackage).ok()?;
+    read_vendor_manifest(&path)?;
+    let record = read_provenance(&path).unwrap_or_default();
+    Some(VendorPackageInfo {
+        theme: key.kind == ComponentKind::Theme,
+        slug: key.slug.clone(),
+        version: key.version.clone(),
+        final_host: record.final_host,
+        hostings: record.hostings,
+        at: record.at,
+        disputed: vendor_disputed_path(&path).exists(),
+    })
+}
+
+/// Delete a manifest, its record and any dispute, for one slug and version. Says
+/// whether there was a manifest. The next site with a link for it starts over.
+pub fn forget_package(cache_dir: &Path, key: &ComponentKey) -> std::io::Result<bool> {
+    let Ok(path) = cache_path_for(cache_dir, key, ManifestSource::VendorPackage) else {
+        return Ok(false);
+    };
+    for marker in [vendor_provenance_path(&path), vendor_disputed_path(&path)] {
+        match fs::remove_file(marker) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -1038,7 +1198,7 @@ mod tests {
     use crate::sitescan::scan::{scan_site, ScanInput, ScanMode};
     use crate::sitescan::TenantRoot;
     use hyperion_types::FindingKind;
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::fs;
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::{Path, PathBuf};
@@ -1244,6 +1404,23 @@ mod tests {
 
     fn key(slug: &str, version: &str) -> ComponentKey {
         component(slug, version).key
+    }
+
+    const SITE_A: &str = "01JAAAAAAAAAAAAAAAAAAAAAAA";
+    const SITE_B: &str = "01JBBBBBBBBBBBBBBBBBBBBBBB";
+
+    fn no_differences() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
+    fn plan_for(
+        refs: Vec<PackageRef>,
+        candidates: &[ComponentKey],
+        hosting: &str,
+        cache: &Path,
+        now: SystemTime,
+    ) -> VendorPlan {
+        plan_downloads(refs, candidates, &no_differences(), hosting, cache, now)
     }
 
     fn cached(cache: &Path, slug: &str, version: &str) -> PathBuf {
@@ -1493,9 +1670,16 @@ $table_prefix  = 'wp_x1_';
             &"a".repeat(65),
         ] {
             assert!(!valid_table_prefix(bad), "{bad:?}");
-            let refused =
-                crate::mariadb::read_option("lm_abc", bad, crate::mariadb::UPDATE_PLUGINS_OPTION)
-                    .await;
+            let refused = crate::mariadb::read_option(
+                "lm_abc",
+                bad,
+                crate::mariadb::UPDATE_PLUGINS_OPTION,
+                &crate::backup::DbLogin {
+                    user: "lm_u",
+                    password: "p",
+                },
+            )
+            .await;
             assert!(refused.is_err(), "{bad:?}");
             let text = format!("<?php define('DB_NAME', 'a'); $table_prefix = '{bad}';");
             assert_eq!(parse_wp_config_db(&text), None, "{bad:?}");
@@ -1601,6 +1785,8 @@ $table_prefix  = 'wp_x1_';
             "max-time = 300",
             "noproxy = \"*\"",
             "globoff",
+            "speed-limit = 10240",
+            "speed-time = 60",
             "resolve = \"my.elementor.com:443:93.184.216.34\"",
         ] {
             assert!(cfg.lines().any(|l| l == line), "{line} in {cfg}");
@@ -1715,12 +1901,15 @@ $table_prefix  = 'wp_x1_';
             assert!(vendor_host_allowed(host), "{host}");
             assert!(redirect_host_allowed(host), "{host}");
         }
-        for host in ["bucket.s3.amazonaws.com", "d1234.cloudfront.net"] {
-            assert!(!vendor_host_allowed(host), "CDN as a first hop: {host}");
-            assert!(redirect_host_allowed(host), "{host}");
-        }
+        // Anyone can rent a name under these, so no wildcard is ever on a list.
+        assert!(VENDOR_HOSTS
+            .iter()
+            .chain(&REDIRECT_HOSTS)
+            .all(|h| !h.contains('*')));
         for host in [
             "",
+            "bucket.s3.amazonaws.com",
+            "d1234.cloudfront.net",
             "s3.amazonaws.com",
             "cloudfront.net",
             ".cloudfront.net",
@@ -1766,6 +1955,10 @@ $table_prefix  = 'wp_x1_';
             "64:ff9b::a9fe:a9fe",
             "2002:a9fe:a9fe::1",
             "2001:0:1::1",
+            "fec0::1",
+            "feff::1",
+            "64:ff9b:1::1",
+            "64:ff9b:1:ffff::a9fe:a9fe",
         ] {
             let ip: IpAddr = ip.parse().expect("ip");
             assert!(!address_allowed(&ip), "{ip}");
@@ -1872,9 +2065,10 @@ $table_prefix  = 'wp_x1_';
             url: secret(&url),
             bucket: PackageBucket::NoUpdate,
         }];
-        let plan = plan_downloads(
+        let plan = plan_for(
             refs,
-            &[component("pro", "1.0")],
+            &[key("pro", "1.0")],
+            SITE_A,
             t.path(),
             SystemTime::now(),
         );
@@ -1909,9 +2103,10 @@ $table_prefix  = 'wp_x1_';
                 bucket: PackageBucket::Response,
             });
         }
-        let plan = plan_downloads(
+        let plan = plan_for(
             refs,
-            &[component("pro", "1.0")],
+            &[key("pro", "1.0")],
+            SITE_A,
             t.path(),
             SystemTime::now(),
         );
@@ -1970,14 +2165,9 @@ $table_prefix  = 'wp_x1_';
         assert!(matches!(got, Err(VendorError::PrivateAddress)), "{got:?}");
         assert_eq!(fake.asked().len(), 1, "the hop is never requested");
 
-        // A CDN name that resolves inside: asked again for each hop.
-        let fake = Fake::new(vec![Answer::Redirect(
-            "https://internal.cloudfront.net/p.zip".into(),
-        )])
-        .resolving(
-            "internal.cloudfront.net",
-            &[IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))],
-        );
+        // A listed name that resolves inside: asked again for each hop.
+        let fake = Fake::new(vec![Answer::Redirect("https://wpforms.com/p.zip".into())])
+            .resolving("wpforms.com", &[IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))]);
         let got = download(&fake, "https://wpml.org/p.zip").await;
         assert!(matches!(got, Err(VendorError::PrivateAddress)), "{got:?}");
         assert_eq!(fake.asked().len(), 1);
@@ -1985,23 +2175,25 @@ $table_prefix  = 'wp_x1_';
 
     #[tokio::test]
     async fn redirect_off_allowlist_refused() {
-        let fake = Fake::new(vec![Answer::Redirect(format!(
-            "https://evil.example/p.zip?license={LICENCE}"
-        ))]);
-        let got = download(&fake, "https://wpml.org/p.zip")
-            .await
-            .expect_err("refused");
-        assert!(
-            matches!(&got, VendorError::UnknownHost(h) if h == "evil.example"),
-            "{got:?}"
-        );
-        assert!(!format!("{got:?} {got}").contains(LICENCE));
-        assert_eq!(fake.asked().len(), 1);
+        for to in [
+            format!("https://evil.example/p.zip?license={LICENCE}"),
+            format!("https://d1.cloudfront.net/p.zip?license={LICENCE}"),
+            format!("https://bucket.s3.amazonaws.com/p.zip?license={LICENCE}"),
+        ] {
+            let fake = Fake::new(vec![Answer::Redirect(to)]);
+            let got = download(&fake, "https://wpml.org/p.zip")
+                .await
+                .expect_err("refused");
+            // The host only, so the list can grow from real data.
+            assert!(matches!(got, VendorError::UnknownHost(_)), "{got:?}");
+            assert!(!format!("{got:?} {got}").contains(LICENCE));
+            assert_eq!(fake.asked().len(), 1);
+        }
 
         for bad in [
-            "http://d1.cloudfront.net/p.zip",
-            "https://u:p@d1.cloudfront.net/p.zip",
-            "https://d1.cloudfront.net:8443/p.zip",
+            "http://wpforms.com/p.zip",
+            "https://u:p@wpforms.com/p.zip",
+            "https://wpforms.com:8443/p.zip",
             "file:///etc/passwd",
         ] {
             let fake = Fake::new(vec![Answer::Redirect(bad.into())]);
@@ -2014,28 +2206,41 @@ $table_prefix  = 'wp_x1_';
     }
 
     #[tokio::test]
-    async fn a_redirect_to_a_cdn_is_followed_and_each_hop_pinned() {
-        let cdn: IpAddr = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 99));
+    async fn a_redirect_to_a_listed_host_is_followed_and_each_hop_pinned() {
+        let second: IpAddr = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 99));
         let fake = Fake::new(vec![
-            Answer::Redirect("https://d1.cloudfront.net/p.zip?sig=abc".into()),
+            Answer::Redirect("https://wpforms.com/p.zip?sig=abc".into()),
             Answer::Body(b"zip".to_vec()),
         ])
-        .resolving("d1.cloudfront.net", &[cdn]);
-        let got = download(&fake, "https://wpml.org/p.zip").await.expect("ok");
-        assert_eq!(got, b"zip");
-        assert_eq!(fake.asked()[1], "https://d1.cloudfront.net/p.zip?sig=abc");
+        .resolving("wpforms.com", &[second]);
+        let t = tempfile::tempdir().expect("tmp");
+        let dest = t.path().join("out");
+        let host = download_with(&fake, &secret("https://wpml.org/p.zip"), &dest)
+            .await
+            .expect("ok");
+        assert_eq!(host, "wpforms.com", "where it finally came from");
+        assert_eq!(fs::read(dest).expect("read"), b"zip");
+        assert_eq!(fake.asked()[1], "https://wpforms.com/p.zip?sig=abc");
         assert_eq!(
             *fake.pinned.lock().expect("lock"),
-            [vec![PUBLIC], vec![cdn]]
+            [vec![PUBLIC], vec![second]]
         );
     }
 
     #[tokio::test]
-    async fn a_cdn_is_no_first_hop() {
+    async fn a_cdn_is_on_no_list() {
         let fake = Fake::new(vec![Answer::Body(b"zip".to_vec())]);
         let got = download(&fake, "https://d1.cloudfront.net/p.zip").await;
         assert!(matches!(got, Err(VendorError::UnknownHost(_))), "{got:?}");
         assert!(fake.asked().is_empty());
+    }
+
+    #[test]
+    fn a_report_past_the_bound_is_a_failure_not_a_cut_location() {
+        let at_limit = format!("302 https://wpml.org/{}", "a".repeat(2000));
+        assert!(parse_report(at_limit.as_bytes()).is_some());
+        let over = format!("302 https://wpml.org/{}", "a".repeat(MAX_REPORT_BYTES));
+        assert!(parse_report(over.as_bytes()).is_none());
     }
 
     #[tokio::test]
@@ -2074,7 +2279,7 @@ $table_prefix  = 'wp_x1_';
         let fake = Fake::new(vec![Answer::Body(zip)]);
         let url = elementor_url("p.zip");
         let p = planned("pro", "1.0", PackageBucket::NoUpdate, &url);
-        fetch_with(&fake, &p, t.path(), SystemTime::now())
+        fetch_with(&fake, &p, SITE_A, t.path(), SystemTime::now())
             .await
             .expect("fetch");
         let m: Manifest =
@@ -2085,7 +2290,7 @@ $table_prefix  = 'wp_x1_';
         assert!(tmp_is_empty(t.path()), "no ZIP is kept");
         let all = everything_under(t.path());
         assert!(!all.contains(LICENCE), "{all}");
-        assert!(!all.contains("my.elementor.com"), "{all}");
+        assert!(!all.contains("p.zip"), "{all}");
     }
 
     #[tokio::test]
@@ -2094,7 +2299,7 @@ $table_prefix  = 'wp_x1_';
         let zip = plugin_zip_bytes("pro", "9.9", &[]);
         let fake = Fake::new(vec![Answer::Body(zip)]);
         let p = planned("pro", "1.0", PackageBucket::NoUpdate, &elementor_url("p"));
-        let got = fetch_with(&fake, &p, t.path(), SystemTime::now()).await;
+        let got = fetch_with(&fake, &p, SITE_A, t.path(), SystemTime::now()).await;
         assert!(matches!(got, Err(VendorError::VersionMismatch)), "{got:?}");
         assert!(!cached(t.path(), "pro", "1.0").exists());
         assert!(!cached(t.path(), "pro", "9.9").exists());
@@ -2107,7 +2312,7 @@ $table_prefix  = 'wp_x1_';
         let zip = plugin_zip_bytes("other", "1.0", &[]);
         let fake = Fake::new(vec![Answer::Body(zip)]);
         let p = planned("pro", "1.0", PackageBucket::NoUpdate, &elementor_url("p"));
-        let got = fetch_with(&fake, &p, t.path(), SystemTime::now()).await;
+        let got = fetch_with(&fake, &p, SITE_A, t.path(), SystemTime::now()).await;
         assert!(matches!(got, Err(VendorError::BadPackage)), "{got:?}");
         assert!(!cached(t.path(), "pro", "1.0").exists());
         assert!(tmp_is_empty(t.path()));
@@ -2118,30 +2323,148 @@ $table_prefix  = 'wp_x1_';
         let t = tempfile::tempdir().expect("tmp");
         let fake = Fake::new(vec![Answer::Body(b"<html>log in</html>".to_vec())]);
         let p = planned("pro", "1.0", PackageBucket::NoUpdate, &elementor_url("p"));
-        let got = fetch_with(&fake, &p, t.path(), SystemTime::now()).await;
+        let got = fetch_with(&fake, &p, SITE_A, t.path(), SystemTime::now()).await;
         assert!(matches!(got, Err(VendorError::BadPackage)), "{got:?}");
         assert!(tmp_is_empty(t.path()));
     }
 
+    fn manifest_bytes(cache: &Path, slug: &str, version: &str) -> Vec<u8> {
+        fs::read(cached(cache, slug, version)).expect("read")
+    }
+
     #[tokio::test]
-    async fn the_first_manifest_for_a_version_stays() {
+    async fn provenance_says_where_and_who_and_holds_no_url() {
+        let t = tempfile::tempdir().expect("tmp");
+        let fake = Fake::new(vec![
+            Answer::Redirect(format!("https://wpforms.com/final.zip?license={LICENCE}")),
+            Answer::Body(plugin_zip_bytes("pro", "1.0", &[])),
+        ]);
+        let p = planned("pro", "1.0", PackageBucket::NoUpdate, &elementor_url("p"));
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let got = fetch_with(&fake, &p, SITE_A, t.path(), now)
+            .await
+            .expect("fetch");
+        assert_eq!(got, VendorFetched::New);
+        let info = package_info(t.path(), &key("pro", "1.0")).expect("info");
+        assert_eq!(info.final_host, "wpforms.com");
+        assert_eq!(info.hostings, [SITE_A]);
+        assert_eq!(info.at, 1_800_000_000);
+        assert!(!info.disputed);
+        assert!(!everything_under(t.path()).contains(LICENCE));
+    }
+
+    #[tokio::test]
+    async fn a_second_package_that_agrees_records_a_second_hosting() {
+        let t = tempfile::tempdir().expect("tmp");
+        let zip = plugin_zip_bytes("pro", "1.0", &[("a.php", b"<?php // a\n")]);
+        let fake = Fake::new(vec![Answer::Body(zip.clone()), Answer::Body(zip)]);
+        let p = planned("pro", "1.0", PackageBucket::NoUpdate, &elementor_url("p"));
+        let now = SystemTime::now();
+        fetch_with(&fake, &p, SITE_A, t.path(), now)
+            .await
+            .expect("first");
+        let kept = manifest_bytes(t.path(), "pro", "1.0");
+        let got = fetch_with(&fake, &p, SITE_B, t.path(), now)
+            .await
+            .expect("second");
+        assert_eq!(got, VendorFetched::Confirmed);
+        assert_eq!(
+            manifest_bytes(t.path(), "pro", "1.0"),
+            kept,
+            "nothing changes"
+        );
+        let info = package_info(t.path(), &key("pro", "1.0")).expect("info");
+        assert_eq!(info.hostings, [SITE_A, SITE_B]);
+        assert!(!info.disputed);
+    }
+
+    #[tokio::test]
+    async fn a_second_package_that_differs_disputes_the_version_and_keeps_the_first() {
         let t = tempfile::tempdir().expect("tmp");
         let first = plugin_zip_bytes("pro", "1.0", &[("a.php", b"<?php // first\n")]);
         let second = plugin_zip_bytes("pro", "1.0", &[("a.php", b"<?php // second\n")]);
         let fake = Fake::new(vec![Answer::Body(first), Answer::Body(second)]);
         let p = planned("pro", "1.0", PackageBucket::NoUpdate, &elementor_url("p"));
-        fetch_with(&fake, &p, t.path(), SystemTime::now())
+        let now = SystemTime::now();
+        fetch_with(&fake, &p, SITE_A, t.path(), now)
             .await
             .expect("first");
-        let kept = fs::read(cached(t.path(), "pro", "1.0")).expect("read");
-        // Even if something asks again, past the plan's own check.
-        fetch_with(&fake, &p, t.path(), SystemTime::now())
+        let kept = manifest_bytes(t.path(), "pro", "1.0");
+        let got = fetch_with(&fake, &p, SITE_B, t.path(), now)
             .await
             .expect("second");
-        assert_eq!(
-            fs::read(cached(t.path(), "pro", "1.0")).expect("read"),
-            kept
+        assert_eq!(got, VendorFetched::Disputed);
+        assert_eq!(manifest_bytes(t.path(), "pro", "1.0"), kept);
+        assert!(
+            package_info(t.path(), &key("pro", "1.0"))
+                .expect("info")
+                .disputed
         );
+        assert!(tmp_is_empty(t.path()));
+    }
+
+    #[tokio::test]
+    async fn forgetting_removes_the_manifest_its_record_and_the_dispute() {
+        let t = tempfile::tempdir().expect("tmp");
+        let fake = Fake::new(vec![
+            Answer::Body(plugin_zip_bytes("pro", "1.0", &[("a", b"1")])),
+            Answer::Body(plugin_zip_bytes("pro", "1.0", &[("a", b"2")])),
+            Answer::Body(plugin_zip_bytes("pro", "1.1", &[])),
+        ]);
+        let p = planned("pro", "1.0", PackageBucket::NoUpdate, &elementor_url("p"));
+        let now = SystemTime::now();
+        fetch_with(&fake, &p, SITE_A, t.path(), now)
+            .await
+            .expect("first");
+        fetch_with(&fake, &p, SITE_B, t.path(), now)
+            .await
+            .expect("second");
+        let other = planned("pro", "1.1", PackageBucket::Response, &elementor_url("p"));
+        fetch_with(&fake, &other, SITE_A, t.path(), now)
+            .await
+            .expect("other");
+
+        assert!(forget_package(t.path(), &key("pro", "1.0")).expect("forget"));
+        assert!(package_info(t.path(), &key("pro", "1.0")).is_none());
+        assert!(!cached(t.path(), "pro", "1.0").exists());
+        let dir = cached(t.path(), "pro", "1.0");
+        let names = everything_under(dir.parent().expect("parent"));
+        assert!(!names.contains("1.0."), "{names}");
+        assert!(
+            cached(t.path(), "pro", "1.1").exists(),
+            "per slug and version"
+        );
+
+        assert!(!forget_package(t.path(), &key("pro", "1.0")).expect("again"));
+        let bad = ComponentKey {
+            slug: "../x".into(),
+            ..key("pro", "1.0")
+        };
+        assert!(!forget_package(t.path(), &bad).expect("bad key"));
+    }
+
+    #[tokio::test]
+    async fn an_unparsable_cached_file_counts_as_absent() {
+        let t = tempfile::tempdir().expect("tmp");
+        let path = cached(t.path(), "pro", "1.0");
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(&path, b"{ half a manif").expect("write");
+        let url = elementor_url("p");
+        let plan = plan_for(
+            vec![refs_for("pro", Some("1.0"), PackageBucket::NoUpdate, &url)],
+            &[key("pro", "1.0")],
+            SITE_A,
+            t.path(),
+            SystemTime::now(),
+        );
+        assert_eq!(plan.fetch.len(), 1);
+        let fake = Fake::new(vec![Answer::Body(plugin_zip_bytes("pro", "1.0", &[]))]);
+        let got = fetch_with(&fake, &plan.fetch[0], SITE_A, t.path(), SystemTime::now())
+            .await
+            .expect("fetch");
+        assert_eq!(got, VendorFetched::New);
+        let m: Manifest = serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
+        assert_eq!(m.source, ManifestSource::VendorPackage);
     }
 
     fn refs_for(slug: &str, version: Option<&str>, bucket: PackageBucket, url: &str) -> PackageRef {
@@ -2160,6 +2483,7 @@ $table_prefix  = 'wp_x1_';
         let zip = plugin_zip_bytes("pro", "1.0", &[]);
         let fake = Fake::new(vec![Answer::Body(zip)]);
         let now = SystemTime::now();
+        let candidates = [key("pro", "1.0")];
 
         let site_a = vec![refs_for(
             "pro",
@@ -2167,9 +2491,9 @@ $table_prefix  = 'wp_x1_';
             PackageBucket::NoUpdate,
             &elementor_url("a"),
         )];
-        let plan = plan_downloads(site_a, &[component("pro", "1.0")], t.path(), now);
+        let plan = plan_for(site_a, &candidates, SITE_A, t.path(), now);
         assert_eq!(plan.fetch.len(), 1);
-        fetch_with(&fake, &plan.fetch[0], t.path(), now)
+        fetch_with(&fake, &plan.fetch[0], SITE_A, t.path(), now)
             .await
             .expect("fetch");
 
@@ -2180,10 +2504,55 @@ $table_prefix  = 'wp_x1_';
             PackageBucket::NoUpdate,
             &elementor_url("b"),
         )];
-        let plan = plan_downloads(site_b, &[component("pro", "1.0")], t.path(), now);
+        let plan = plan_for(site_b, &candidates, SITE_B, t.path(), now);
         assert!(plan.fetch.is_empty());
         assert!(plan.unknown_hosts.is_empty());
         assert_eq!(fake.asked().len(), 1);
+    }
+
+    /// A site with a difference that holds its own link compares once, and only
+    /// where it hasn't already had a say.
+    #[tokio::test]
+    async fn a_difference_with_its_own_link_asks_for_a_comparison() {
+        let t = tempfile::tempdir().expect("tmp");
+        let now = SystemTime::now();
+        let zip = plugin_zip_bytes("pro", "1.0", &[]);
+        let fake = Fake::new(vec![Answer::Body(zip.clone()), Answer::Body(zip)]);
+        let p = planned("pro", "1.0", PackageBucket::NoUpdate, &elementor_url("a"));
+        fetch_with(&fake, &p, SITE_A, t.path(), now)
+            .await
+            .expect("first");
+
+        let url = elementor_url("b");
+        let candidates = [key("pro", "1.0")];
+        let refs = || vec![refs_for("pro", Some("1.0"), PackageBucket::NoUpdate, &url)];
+        let differing: BTreeSet<String> = ["pro".to_string()].into();
+        let wanted = |hosting: &str, diff: &BTreeSet<String>| {
+            plan_downloads(refs(), &candidates, diff, hosting, t.path(), now)
+                .fetch
+                .len()
+        };
+        assert_eq!(
+            wanted(SITE_B, &no_differences()),
+            0,
+            "no difference, no download"
+        );
+        assert_eq!(wanted(SITE_B, &differing), 1);
+        assert_eq!(
+            wanted(SITE_A, &differing),
+            0,
+            "its own package is the reference"
+        );
+
+        fetch_with(&fake, &p, SITE_B, t.path(), now)
+            .await
+            .expect("second");
+        assert_eq!(wanted(SITE_B, &differing), 0, "already compared");
+
+        // Disputed already: there's nothing more to learn.
+        fs::write(vendor_disputed_path(&cached(t.path(), "pro", "1.0")), b"").expect("write");
+        let third = "01JCCCCCCCCCCCCCCCCCCCCCCC";
+        assert_eq!(wanted(third, &differing), 0);
     }
 
     #[tokio::test]
@@ -2193,32 +2562,33 @@ $table_prefix  = 'wp_x1_';
         let url = elementor_url("p");
         let now = SystemTime::now();
         let p = planned("pro", "1.0", PackageBucket::NoUpdate, &url);
-        assert!(fetch_with(&fake, &p, t.path(), now).await.is_err());
+        assert!(fetch_with(&fake, &p, SITE_A, t.path(), now).await.is_err());
 
-        let wanted = |version: &str, at: SystemTime| {
-            plan_downloads(
+        let wanted = |hosting: &str, version: &str, at: SystemTime| {
+            plan_for(
                 vec![refs_for(
                     "pro",
                     Some(version),
                     PackageBucket::NoUpdate,
                     &url,
                 )],
-                &[component("pro", version)],
+                &[key("pro", version)],
+                hosting,
                 t.path(),
                 at,
             )
             .fetch
             .len()
         };
-        assert_eq!(wanted("1.0", now), 0, "this version waits");
+        assert_eq!(wanted(SITE_A, "1.0", now), 0, "this version waits");
         assert_eq!(
-            wanted("1.0", now + Duration::from_secs(23 * 3600)),
+            wanted(SITE_A, "1.0", now + Duration::from_secs(23 * 3600)),
             0,
             "still waiting"
         );
-        assert_eq!(wanted("1.1", now), 1, "another version doesn't");
+        assert_eq!(wanted(SITE_A, "1.1", now), 1, "another version doesn't");
         assert_eq!(
-            wanted("1.0", now + Duration::from_secs(24 * 3600 + 1)),
+            wanted(SITE_A, "1.0", now + Duration::from_secs(24 * 3600 + 1)),
             1,
             "and after a day it's asked again"
         );
@@ -2227,7 +2597,79 @@ $table_prefix  = 'wp_x1_';
         let all = everything_under(t.path());
         assert!(!all.contains(LICENCE), "{all}");
         assert!(!all.contains("pro"), "named by a hash: {all}");
+        assert!(!all.contains(SITE_A), "named by a hash: {all}");
         assert!(tmp_is_empty(t.path()));
+    }
+
+    /// A tenant planting a bad link backs off itself, and the site with a working
+    /// licence still fills the cache.
+    #[tokio::test]
+    async fn a_failing_site_doesnt_stop_a_good_one() {
+        let t = tempfile::tempdir().expect("tmp");
+        let now = SystemTime::now();
+        let candidates = [key("pro", "1.0")];
+        let bad = elementor_url("planted");
+        let good = elementor_url("licensed");
+        let fake = Fake::new(vec![
+            Answer::Status(404),
+            Answer::Body(plugin_zip_bytes("pro", "1.0", &[])),
+        ]);
+
+        let plan = plan_for(
+            vec![refs_for("pro", Some("1.0"), PackageBucket::NoUpdate, &bad)],
+            &candidates,
+            SITE_A,
+            t.path(),
+            now,
+        );
+        assert!(fetch_with(&fake, &plan.fetch[0], SITE_A, t.path(), now)
+            .await
+            .is_err());
+        let attacker_again = plan_for(
+            vec![refs_for("pro", Some("1.0"), PackageBucket::NoUpdate, &bad)],
+            &candidates,
+            SITE_A,
+            t.path(),
+            now,
+        );
+        assert!(
+            attacker_again.fetch.is_empty(),
+            "the attacker backs off itself"
+        );
+
+        let plan = plan_for(
+            vec![refs_for("pro", Some("1.0"), PackageBucket::NoUpdate, &good)],
+            &candidates,
+            SITE_B,
+            t.path(),
+            now,
+        );
+        assert_eq!(plan.fetch.len(), 1, "the good site isn't held up");
+        let got = fetch_with(&fake, &plan.fetch[0], SITE_B, t.path(), now).await;
+        assert_eq!(got, Ok(VendorFetched::New));
+    }
+
+    /// A full disk says nothing about the vendor or the licence.
+    #[tokio::test]
+    async fn a_local_failure_sets_no_marker() {
+        let t = tempfile::tempdir().expect("tmp");
+        // The temp folder can't be made: a file is where it should go.
+        fs::create_dir_all(t.path().join("vendor")).expect("mkdir");
+        fs::write(t.path().join("vendor").join("tmp"), b"").expect("write");
+        let fake = Fake::new(vec![]);
+        let url = elementor_url("p");
+        let p = planned("pro", "1.0", PackageBucket::NoUpdate, &url);
+        let now = SystemTime::now();
+        let got = fetch_with(&fake, &p, SITE_A, t.path(), now).await;
+        assert_eq!(got, Err(VendorError::Local));
+        let plan = plan_for(
+            vec![refs_for("pro", Some("1.0"), PackageBucket::NoUpdate, &url)],
+            &[key("pro", "1.0")],
+            SITE_A,
+            t.path(),
+            now,
+        );
+        assert_eq!(plan.fetch.len(), 1, "it's asked again next time");
     }
 
     #[tokio::test]
@@ -2243,10 +2685,11 @@ $table_prefix  = 'wp_x1_';
             let url = elementor_url("p");
             let now = SystemTime::now();
             let p = planned("pro", "1.0", PackageBucket::NoUpdate, &url);
-            assert!(fetch_with(&fake, &p, t.path(), now).await.is_err());
-            let plan = plan_downloads(
+            assert!(fetch_with(&fake, &p, SITE_A, t.path(), now).await.is_err());
+            let plan = plan_for(
                 vec![refs_for("pro", Some("1.0"), PackageBucket::NoUpdate, &url)],
-                &[component("pro", "1.0")],
+                &[key("pro", "1.0")],
+                SITE_A,
                 t.path(),
                 now,
             );
@@ -2305,7 +2748,7 @@ $table_prefix  = 'wp_x1_';
         let known = ["akismet".to_string()].into_iter().collect();
         let slugs: Vec<String> = vendor_candidates(&d, &known)
             .into_iter()
-            .map(|c| c.key.slug)
+            .map(|k| k.slug)
             .collect();
         assert_eq!(slugs, ["pro"]);
         let not_wp = Discovery {
@@ -2323,7 +2766,7 @@ $table_prefix  = 'wp_x1_';
             // The next version of another plugin comes after what verifies today.
             refs_for("alpha", Some("2.0"), PackageBucket::Response, u),
             refs_for("pro", Some("1.0"), PackageBucket::NoUpdate, u),
-            // A stale no_update entry only prepares.
+            // A stale no_update entry is neither what it runs nor on offer.
             refs_for("alpha", Some("0.5"), PackageBucket::NoUpdate, u),
             // No declared version: what the site runs, for no_update.
             refs_for("beta", None, PackageBucket::NoUpdate, u),
@@ -2335,12 +2778,12 @@ $table_prefix  = 'wp_x1_';
             refs_for("stranger", Some("1.0"), PackageBucket::NoUpdate, u),
         ];
         let candidates = [
-            component("alpha", "1.0"),
-            component("beta", "3.0"),
-            component("gamma", "1.0"),
-            component("pro", "1.0"),
+            key("alpha", "1.0"),
+            key("beta", "3.0"),
+            key("gamma", "1.0"),
+            key("pro", "1.0"),
         ];
-        let plan = plan_downloads(refs, &candidates, t.path(), SystemTime::now());
+        let plan = plan_for(refs, &candidates, SITE_A, t.path(), SystemTime::now());
         let got: Vec<(&str, &str, bool)> = plan
             .fetch
             .iter()
@@ -2351,10 +2794,32 @@ $table_prefix  = 'wp_x1_';
             [
                 ("beta", "3.0", true),
                 ("pro", "1.0", true),
-                ("alpha", "0.5", false),
                 ("alpha", "2.0", false),
             ]
         );
+    }
+
+    /// One slug's many main files can't spend the budget: the running version and
+    /// one on offer, whatever the transient claims.
+    #[test]
+    fn many_files_of_one_slug_are_two_downloads_at_most() {
+        let t = tempfile::tempdir().expect("tmp");
+        let u = "https://wpml.org/p.zip";
+        let mut refs: Vec<PackageRef> = (0..40)
+            .map(|i| refs_for("pro", Some(&format!("2.{i}")), PackageBucket::Response, u))
+            .collect();
+        refs.push(refs_for("pro", Some("1.0"), PackageBucket::NoUpdate, u));
+        let plan = plan_for(
+            refs,
+            &[key("pro", "1.0")],
+            SITE_A,
+            t.path(),
+            SystemTime::now(),
+        );
+        assert_eq!(plan.fetch.len(), 2, "{:?}", plan.fetch);
+        assert_eq!(plan.fetch[0].version, "1.0");
+        assert!(plan.fetch[0].verifies_today);
+        assert!(!plan.fetch[1].verifies_today);
     }
 
     // ---- what the scan makes of it ----
@@ -2427,7 +2892,7 @@ $table_prefix  = 'wp_x1_';
         let tree = Tree::new("pro", "1.0", &files);
         let fake = Fake::new(vec![Answer::Body(plugin_zip_bytes("pro", "1.0", &files))]);
         let p = planned("pro", "1.0", PackageBucket::NoUpdate, &elementor_url("p"));
-        fetch_with(&fake, &p, &tree.cache, SystemTime::now())
+        fetch_with(&fake, &p, SITE_A, &tree.cache, SystemTime::now())
             .await
             .expect("fetch");
 
@@ -2463,7 +2928,7 @@ $table_prefix  = 'wp_x1_';
     async fn no_update_verifies_current_version_response_only_prepares_next() {
         let tree = Tree::new("pro", "1.0", &[]);
         let now = SystemTime::now();
-        let candidates = [component("pro", "1.0")];
+        let candidates = [key("pro", "1.0")];
 
         // Only the next version on offer: cached, and this site is no better off.
         let next = vec![refs_for(
@@ -2472,14 +2937,14 @@ $table_prefix  = 'wp_x1_';
             PackageBucket::Response,
             &elementor_url("n"),
         )];
-        let plan = plan_downloads(next, &candidates, &tree.cache, now);
+        let plan = plan_for(next, &candidates, SITE_A, &tree.cache, now);
         assert_eq!(plan.fetch.len(), 1);
         assert!(!plan.fetch[0].verifies_today);
         let fake = Fake::new(vec![
             Answer::Body(plugin_zip_bytes("pro", "2.0", &[])),
             Answer::Body(plugin_zip_bytes("pro", "1.0", &[])),
         ]);
-        fetch_with(&fake, &plan.fetch[0], &tree.cache, now)
+        fetch_with(&fake, &plan.fetch[0], SITE_A, &tree.cache, now)
             .await
             .expect("fetch");
         assert!(cached(&tree.cache, "pro", "2.0").exists());
@@ -2492,30 +2957,134 @@ $table_prefix  = 'wp_x1_';
             PackageBucket::NoUpdate,
             &elementor_url("t"),
         )];
-        let plan = plan_downloads(today, &candidates, &tree.cache, now);
+        let plan = plan_for(today, &candidates, SITE_A, &tree.cache, now);
         assert!(plan.fetch[0].verifies_today);
-        fetch_with(&fake, &plan.fetch[0], &tree.cache, now)
+        fetch_with(&fake, &plan.fetch[0], SITE_A, &tree.cache, now)
             .await
             .expect("fetch");
         assert_eq!(tree.scan().coverage.plugins_verified, 1);
     }
 
-    #[tokio::test]
-    async fn a_no_update_entry_for_another_version_verifies_nothing_today() {
-        let tree = Tree::new("pro", "1.0", &[]);
-        let now = SystemTime::now();
+    #[test]
+    fn a_no_update_entry_for_another_version_is_not_fetched() {
+        let t = tempfile::tempdir().expect("tmp");
         let stale = vec![refs_for(
             "pro",
             Some("0.9"),
             PackageBucket::NoUpdate,
             &elementor_url("s"),
         )];
-        let plan = plan_downloads(stale, &[component("pro", "1.0")], &tree.cache, now);
-        assert!(!plan.fetch[0].verifies_today);
-        let fake = Fake::new(vec![Answer::Body(plugin_zip_bytes("pro", "0.9", &[]))]);
-        fetch_with(&fake, &plan.fetch[0], &tree.cache, now)
+        let plan = plan_for(
+            stale,
+            &[key("pro", "1.0")],
+            SITE_A,
+            t.path(),
+            SystemTime::now(),
+        );
+        assert!(plan.fetch.is_empty());
+    }
+
+    /// Everywhere on the node, until forgotten: a difference is a change to review
+    /// with that label, and a rule hit is still a finding.
+    #[tokio::test]
+    async fn a_disputed_version_labels_differences_for_review() {
+        let files: [(&str, &[u8]); 1] = [("a.php", b"<?php // a\n")];
+        let tree = Tree::new("pro", "1.0", &files);
+        let other: [(&str, &[u8]); 1] = [("a.php", b"<?php // other\n")];
+        let fake = Fake::new(vec![
+            Answer::Body(plugin_zip_bytes("pro", "1.0", &files)),
+            Answer::Body(plugin_zip_bytes("pro", "1.0", &other)),
+        ]);
+        let p = planned("pro", "1.0", PackageBucket::NoUpdate, &elementor_url("p"));
+        let now = SystemTime::now();
+        fetch_with(&fake, &p, SITE_A, &tree.cache, now)
             .await
-            .expect("fetch");
-        assert_eq!(tree.scan().coverage.plugins_verified, 0);
+            .expect("first");
+        tree.write("wp-content/plugins/pro/a.php", b"<?php // tampered\n");
+        let out = tree.scan();
+        let before = out
+            .upstream
+            .plugins_failed
+            .iter()
+            .find(|c| c.slug == "pro")
+            .expect("failed");
+        assert_eq!(
+            before.source.as_deref(),
+            Some(hyperion_types::VENDOR_PACKAGE_LABEL)
+        );
+
+        fetch_with(&fake, &p, SITE_B, &tree.cache, now)
+            .await
+            .expect("second");
+        let out = tree.scan();
+        let item = out
+            .findings
+            .iter()
+            .find(|f| f.rel == "wp-content/plugins/pro/a.php")
+            .expect("item");
+        assert_eq!(
+            item.source_label.as_deref(),
+            Some(hyperion_types::PACKAGES_DISAGREE_LABEL)
+        );
+        let failed = out
+            .upstream
+            .plugins_failed
+            .iter()
+            .find(|c| c.slug == "pro")
+            .expect("failed");
+        assert_eq!(
+            failed.source.as_deref(),
+            Some(hyperion_types::PACKAGES_DISAGREE_LABEL)
+        );
+    }
+
+    /// A forgotten manifest and a different one under the same version: what the
+    /// old one verified isn't verified by the new one.
+    #[tokio::test]
+    async fn a_replaced_manifest_doesnt_inherit_what_the_old_one_verified() {
+        let files: [(&str, &[u8]); 1] = [("a.php", b"<?php // a\n")];
+        let tree = Tree::new("pro", "1.0", &files);
+        let other: [(&str, &[u8]); 1] = [("a.php", b"<?php // other\n")];
+        let fake = Fake::new(vec![
+            Answer::Body(plugin_zip_bytes("pro", "1.0", &files)),
+            Answer::Body(plugin_zip_bytes("pro", "1.0", &other)),
+        ]);
+        let p = planned("pro", "1.0", PackageBucket::NoUpdate, &elementor_url("p"));
+        let now = SystemTime::now();
+        fetch_with(&fake, &p, SITE_A, &tree.cache, now)
+            .await
+            .expect("first");
+        assert!(tree.scan().findings.is_empty());
+        forget_package(&tree.cache, &key("pro", "1.0")).expect("forget");
+        fetch_with(&fake, &p, SITE_A, &tree.cache, now)
+            .await
+            .expect("again");
+        let out = tree.scan();
+        assert!(
+            out.findings
+                .iter()
+                .any(|f| f.rel == "wp-content/plugins/pro/a.php"),
+            "compared with the new one: {:?}",
+            out.findings
+        );
+    }
+
+    #[test]
+    fn coverage_counts_what_a_vendor_verified_apart() {
+        let tree = Tree::new("pro", "1.0", &[]);
+        let path = cached(&tree.cache, "pro", "1.0");
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        let main = "<?php\n/*\nPlugin Name: pro\nVersion: 1.0\n*/\n";
+        let digest = crate::sitescan::manifest::Digest::Sha256(Sha256::digest(main).into());
+        let m = Manifest {
+            source: ManifestSource::VendorPackage,
+            files: [("pro.php".to_string(), digest)].into(),
+            served_locale: None,
+        };
+        fs::write(&path, serde_json::to_vec(&m).expect("json")).expect("write");
+        let c = tree.scan().coverage;
+        assert_eq!(c.plugins_verified, 1);
+        assert_eq!(c.plugins_vendor_verified, 1);
+        assert_eq!(c.themes_vendor_verified, 0);
     }
 }

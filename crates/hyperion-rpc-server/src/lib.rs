@@ -921,6 +921,19 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::ScanVendorForget {
+            hosting,
+            theme,
+            slug,
+            version,
+            actor,
+        } => match api
+            .scan_vendor_forget(hosting, theme, slug, version, actor)
+            .await
+        {
+            Ok(r) => Response::WpIntegrityScan(r),
+            Err(e) => Response::Error(e),
+        },
         Request::ScanQuarantineList { hosting } => match api.scan_quarantine_list(hosting).await {
             Ok(r) => Response::ScanQuarantineList(r),
             Err(e) => Response::Error(e),
@@ -3151,6 +3164,16 @@ mod tests {
         async fn scan_trust_all_review(
             &self,
             _: HostingSelector,
+            _: String,
+        ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+            Ok(hyperion_types::WpIntegrityScanResult::default())
+        }
+        async fn scan_vendor_forget(
+            &self,
+            _: HostingSelector,
+            _: bool,
+            _: String,
+            _: String,
             _: String,
         ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
             Ok(hyperion_types::WpIntegrityScanResult::default())

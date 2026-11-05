@@ -2058,6 +2058,20 @@ pub fn print_pretty(resp: &Response) {
                 r.plugins_failed.len(),
                 r.plugins_unknown.len()
             );
+            for v in &r.coverage.vendor_packages {
+                println!(
+                    "    vendor   : {} {} from {} by {}{}",
+                    v.slug,
+                    v.version,
+                    v.final_host,
+                    v.hostings.join(", "),
+                    if v.disputed {
+                        " (packages for this version disagree)"
+                    } else {
+                        ""
+                    }
+                );
+            }
             for p in &r.plugins_failed {
                 for i in &p.issues {
                     println!("    {} — {} ({})", p.slug, i.path, i.message);

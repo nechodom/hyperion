@@ -22,9 +22,9 @@
    Quarantine and Trust are shown to who may use them and refused on the server
    either way; their confirm attributes are on the <form>. #}
 {% macro file_actions(f) %}
-{% if (can_manage && f.can_quarantine()) || (can_trust && f.can_trust()) %}
+{% if (can_manage && f.can_quarantine() && f.held_vendor_note().is_none()) || (can_trust && f.can_trust()) %}
 <div class="file-act">
-  {% if can_manage && f.can_quarantine() %}
+  {% if can_manage && f.can_quarantine() && f.held_vendor_note().is_none() %}
   <form hx-post="/hostings/integrity/quarantine" hx-target="#integrity-card" hx-swap="outerHTML"
         hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
         data-confirm-title="Quarantine {{ f.rel|tenant_text }}"
@@ -56,8 +56,9 @@
 {% macro finding_row(f) %}
 <li><span class="chk-dot {% if f.severity == "high" %}err{% else %}warn{% endif %}"></span><code>{{ f.rel|tenant_text }}</code><span class="chk-detail">
   {% if f.rel == "." %}most of WordPress core no longer matches the release
-  {% else if let Some(noun) = f.component_wide() %}this {{ noun }} no longer matches {% if let Some(l) = f.source_label %}{% if l == "vendor package" %}the vendor's package{% else %}{{ l|tenant_text }}{% endif %}{% else %}its source{% endif %}
+  {% else if let Some(noun) = f.component_wide() %}this {{ noun }} no longer matches {% if let Some(l) = f.source_label %}{% if l == "vendor package" || l == "packages for this version disagree" %}the vendor's package{% else %}{{ l|tenant_text }}{% endif %}{% else %}its source{% endif %}
   {% else %}{{ f.kind.label() }}{% endif %}
+  {% if let Some(n) = f.held_vendor_note() %} · {{ n }}{% endif %}
   {% if let Some(r) = f.rule_id %} · rule <code>{{ r|tenant_text }}</code>{% if f.line > 0 %}, line {{ f.line }}{% endif %}{% endif %}
   {% if !f.domains.is_empty() %} · mentions {% for d in f.domains %}{% if loop.index0 < 5 %}<code>{{ d|tenant_text }}</code> {% endif %}{% endfor %}{% endif %}
   {% if !f.snippet.is_empty() %} · <code>{{ f.snippet|tenant_text }}</code>{% endif %}
@@ -83,7 +84,7 @@
       {% else if v == "running" %}No verdict until the scan finishes
       {% else if v == "never" && scan.error.is_none() %}Not scanned yet — nothing was verified, so this is not a clean result
       {% else if v == "never" %}Couldn't check — nothing was verified, so this is not a clean result
-      {% else if v == "clean" && scan.native_scan_ran %}Clean — {% if scan.coverage.upstream_ran %}files match WordPress.org, {% endif %}no suspicious files found
+      {% else if v == "clean" && scan.native_scan_ran %}Clean — {% if scan.coverage.upstream_ran %}{% if scan.coverage.any_vendor_verified() %}files match their reference copies, {% else %}files match WordPress.org, {% endif %}{% endif %}no suspicious files found
       {% else if v == "clean" %}Clean — files match WordPress.org, no malware found
       {% else if scan.native_scan_ran %}Partly checked — this isn't a clean result
       {% else if !scan.wp_cli_ok %}Couldn't check — nothing was verified, so this is not a clean result
@@ -175,7 +176,8 @@
       Checked:
       {% if scan.coverage.no_upstream %}
       {# No release to compare with: not a failure, and nothing to name. #}
-      {% else if scan.wp_cli_ok %}core, {{ scan.plugins_checked }} of {{ scan.plugins_total }} plugin(s){% if scan.native_scan_ran %} and {{ scan.coverage.themes_verified }} of {{ scan.coverage.themes_total }} theme(s){% endif %} against wordpress.org
+      {% else if scan.wp_cli_ok %}core, {{ scan.plugins_wporg_checked() }} of {{ scan.plugins_total }} plugin(s){% if scan.native_scan_ran %} and {{ scan.coverage.themes_wporg_verified() }} of {{ scan.coverage.themes_total }} theme(s){% endif %} against wordpress.org
+      {% if scan.coverage.any_vendor_verified() %}· {{ scan.coverage.plugins_vendor_verified }} of {{ scan.plugins_total }} plugin(s) and {{ scan.coverage.themes_vendor_verified }} of {{ scan.coverage.themes_total }} theme(s) against the vendor's package{% endif %}
       {% else %}<span class="tone-warn">not compared with wordpress.org</span>{% endif %}
       {% if scan.native_scan_ran %}
       {% if !scan.coverage.no_upstream %}·{% endif %}
@@ -193,6 +195,33 @@
       {% endif %}
       The database is not scanned.
     </p>
+
+    {# Where a vendor reference came from names other hostings, so it's for who may
+       decide what's believed. Its confirm attributes are on the form. #}
+    {% if can_trust && !scan.coverage.vendor_packages.is_empty() %}
+    <h4 class="chk-sub">Vendor packages behind these differences</h4>
+    <ul class="chk-list">
+      {% for p in scan.coverage.vendor_packages %}
+      <li><span class="chk-dot warn"></span><code>{{ p.slug|tenant_text }}</code><span class="chk-detail">
+        version {{ p.version|tenant_text }} · from <code>{{ p.final_host|tenant_text }}</code>{% if p.at != 0 %} · {{ p.at|date }}{% endif %} · downloaded by {% for h in p.hostings %}<code>{{ h|tenant_text }}</code> {% endfor %}{% if p.disputed %} · packages for this version disagree{% endif %}
+      </span>
+      <div class="file-act">
+        <form hx-post="/hostings/integrity/vendor-forget" hx-target="#integrity-card" hx-swap="outerHTML"
+              hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
+              data-confirm-title="Forget this package"
+              data-confirm-body="Deletes this node's reference copy of {{ p.slug|tenant_text }} {{ p.version|tenant_text }}. Every site on this version is scanned again, and the next package from a site's own link becomes the reference."
+              data-confirm-confirm-label="Forget package">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="selector" value="{{ selector }}">
+          <input type="hidden" name="slug" value="{{ p.slug }}">
+          <input type="hidden" name="version" value="{{ p.version }}">
+          {% if p.theme %}<input type="hidden" name="theme" value="true">{% endif %}
+          <button class="btn ghost small" type="submit">Forget package</button>
+        </form>
+      </div></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
 
     {# ── WordPress core ──────────────────────────────────────────────── #}
     {% if scan.core_issue_count() > 0 %}

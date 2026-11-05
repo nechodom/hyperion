@@ -436,6 +436,7 @@ fn findings_are_listed_with_their_paths() {
         core_modified: vec!["wp-includes/load.php".into()],
         core_unexpected: vec!["wp-admin/x.php".into()],
         plugins_failed: vec![hyperion_types::WpIntegrityPluginResult {
+            source: None,
             slug: "akismet".into(),
             issues: vec![hyperion_types::WpIntegrityFileIssue {
                 path: "akismet.php".into(),
@@ -467,6 +468,7 @@ fn fixable_findings_offer_a_fix() {
         wp_cli_ok: true,
         core_missing: vec!["license.txt".into(), "readme.html".into()],
         plugins_failed: vec![hyperion_types::WpIntegrityPluginResult {
+            source: None,
             slug: "akismet".into(),
             issues: vec![hyperion_types::WpIntegrityFileIssue {
                 path: "akismet.php".into(),
@@ -855,6 +857,7 @@ fn lists_are_capped_at_fifty_with_a_count() {
 fn component_level_finding_says_the_plugin_no_longer_matches() {
     let html = render_integrity(hyperion_types::WpIntegrityScanResult {
         plugins_failed: vec![hyperion_types::WpIntegrityPluginResult {
+            source: None,
             slug: "akismet".into(),
             issues: vec![hyperion_types::WpIntegrityFileIssue {
                 path: ".".into(),
@@ -887,6 +890,7 @@ fn component_level_finding_says_the_plugin_no_longer_matches() {
 fn component_finding_names_its_own_reference() {
     let html = render_integrity(hyperion_types::WpIntegrityScanResult {
         plugins_failed: vec![hyperion_types::WpIntegrityPluginResult {
+            source: None,
             slug: "elementor-pro".into(),
             issues: vec![hyperion_types::WpIntegrityFileIssue {
                 path: ".".into(),
@@ -917,6 +921,7 @@ fn component_finding_names_its_own_reference() {
 #[test]
 fn reinstall_needs_wordpress_org_as_the_reference() {
     let failed = |slug: &str| hyperion_types::WpIntegrityPluginResult {
+        source: None,
         slug: slug.into(),
         issues: vec![hyperion_types::WpIntegrityFileIssue {
             path: "a.php".into(),
@@ -982,6 +987,7 @@ fn scan_error_is_escaped_and_printable() {
 fn theme_failures_are_listed() {
     let html = render_integrity(hyperion_types::WpIntegrityScanResult {
         themes_failed: vec![hyperion_types::WpIntegrityPluginResult {
+            source: None,
             slug: "twentytwentyfour".into(),
             issues: vec![hyperion_types::WpIntegrityFileIssue {
                 path: "functions.php".into(),
@@ -1070,6 +1076,114 @@ fn the_card_shows_the_vendor_note_and_never_the_unlisted_hosts() {
         !html.contains("didn't finish"),
         "the note isn't a partial scan"
     );
+}
+
+fn card_of(scan: hyperion_types::WpIntegrityScanResult, can_trust: bool) -> String {
+    IntegrityCardTpl {
+        scan,
+        selector: "example.com".into(),
+        csrf_token: "t".into(),
+        can_manage: true,
+        can_trust,
+        ..Default::default()
+    }
+    .render()
+    .expect("renders")
+}
+
+/// What a vendor verified is said to be, and the headline doesn't credit
+/// wordpress.org with it.
+#[test]
+fn the_card_counts_vendor_verified_apart_from_wordpress_org() {
+    let mut scan = native_scan();
+    scan.clamav_available = true;
+    scan.coverage.upstream_ran = true;
+    scan.plugins_checked = 3;
+    scan.plugins_total = 4;
+    scan.coverage.plugins_verified = 3;
+    scan.coverage.plugins_vendor_verified = 2;
+    scan.coverage.themes_verified = 1;
+    scan.coverage.themes_total = 2;
+    let html = card_of(scan.clone(), true);
+    assert!(html.contains("core, 1 of 4 plugin(s)"), "{html}");
+    assert!(
+        html.contains("2 of 4 plugin(s) and 0 of 2 theme(s) against the vendor"),
+        "{html}"
+    );
+    assert!(!html.contains("files match WordPress.org"), "{html}");
+    assert!(
+        html.contains("files match their reference copies"),
+        "{html}"
+    );
+
+    scan.coverage.plugins_vendor_verified = 0;
+    let html = card_of(scan, true);
+    assert!(html.contains("core, 3 of 4 plugin(s)"), "{html}");
+    assert!(!html.contains("against the vendor"), "{html}");
+    assert!(html.contains("files match WordPress.org"), "{html}");
+}
+
+/// Held for review: no Quarantine next to something unproven, and the label says
+/// why it's there. A wordpress.org difference in review keeps its button.
+#[test]
+fn a_held_vendor_difference_offers_no_quarantine() {
+    let held = |label: &str| hyperion_types::SiteFileFinding {
+        rel: "wp-content/plugins/pro/a.php".into(),
+        kind: hyperion_types::FindingKind::UpstreamModified,
+        severity: "medium".into(),
+        sha256: "aa".into(),
+        component: Some("pro".into()),
+        source_label: Some(label.into()),
+        ..Default::default()
+    };
+    let mut scan = native_scan();
+    scan.review = vec![held(hyperion_types::VENDOR_PACKAGE_LABEL)];
+    let html = card_of(scan.clone(), true);
+    assert!(!html.contains("/hostings/integrity/quarantine"), "{html}");
+    assert!(html.contains("not confirmed"), "{html}");
+
+    scan.review = vec![held(hyperion_types::PACKAGES_DISAGREE_LABEL)];
+    let html = card_of(scan.clone(), true);
+    assert!(!html.contains("/hostings/integrity/quarantine"), "{html}");
+    assert!(
+        html.contains("packages for this version disagree"),
+        "{html}"
+    );
+
+    scan.review = vec![held("wordpress.org")];
+    assert!(card_of(scan, true).contains("/hostings/integrity/quarantine"));
+}
+
+/// Where a reference came from names other hostings, and forgetting it decides what
+/// everyone's site is judged by: operators only.
+#[test]
+fn only_an_operator_sees_where_a_package_came_from_and_can_forget_it() {
+    let mut scan = native_scan();
+    scan.coverage.vendor_packages = vec![hyperion_types::VendorPackageInfo {
+        slug: "pro".into(),
+        version: "1.0".into(),
+        final_host: "wpml.org".into(),
+        hostings: vec!["01JOTHERTENANT".into()],
+        at: 1_794_055_205,
+        disputed: true,
+        ..Default::default()
+    }];
+    let html = card_of(scan.clone(), true);
+    assert!(
+        html.contains(r#"hx-post="/hostings/integrity/vendor-forget""#),
+        "{html}"
+    );
+    assert!(
+        html.contains("data-confirm-title=\"Forget this package\""),
+        "{html}"
+    );
+    assert!(html.contains("01JOTHERTENANT"), "{html}");
+    assert!(html.contains("wpml.org"), "{html}");
+
+    let customer = card_of(scan, false);
+    assert!(!customer.contains("vendor-forget"), "{customer}");
+    assert!(!customer.contains("01JOTHERTENANT"), "{customer}");
+    assert!(!customer.contains("wpml.org"), "{customer}");
 }
 
 /// A stolen customer login can move a file out of harm's way and can't approve
@@ -1196,6 +1310,7 @@ fn reinstall_theme_is_for_wordpress_org_themes() {
                 ..Default::default()
             }],
             themes_failed: vec![hyperion_types::WpIntegrityPluginResult {
+                source: None,
                 slug: "t".into(),
                 issues: vec![hyperion_types::WpIntegrityFileIssue {
                     path: "x.php".into(),
@@ -1231,6 +1346,7 @@ fn reinstall_theme_is_for_wordpress_org_themes() {
 fn an_unlabelled_native_record_names_no_source() {
     let html = render_integrity(hyperion_types::WpIntegrityScanResult {
         plugins_failed: vec![hyperion_types::WpIntegrityPluginResult {
+            source: None,
             slug: "p".into(),
             issues: vec![hyperion_types::WpIntegrityFileIssue {
                 path: ".".into(),

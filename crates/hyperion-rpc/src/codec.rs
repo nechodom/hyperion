@@ -724,6 +724,17 @@ pub enum Request {
         #[serde(default)]
         actor: String,
     },
+    /// Delete this node's reference copy of one vendor package version, answered by
+    /// `Response::WpIntegrityScan`. The panel only sends this for `WpScanTrust`.
+    ScanVendorForget {
+        hosting: HostingSelector,
+        #[serde(default)]
+        theme: bool,
+        slug: String,
+        version: String,
+        #[serde(default)]
+        actor: String,
+    },
     /// What a hosting holds in quarantine: metadata only.
     ScanQuarantineList {
         hosting: HostingSelector,

@@ -577,6 +577,18 @@ pub async fn execute(socket: &Path, cmd: &Cmd) -> Result<Outcome> {
             WpCmd::IntegrityScan { selector } => Request::WpIntegrityScan {
                 hosting: parse_selector(selector)?,
             },
+            WpCmd::VendorForget {
+                selector,
+                slug,
+                version,
+                theme,
+            } => Request::ScanVendorForget {
+                hosting: parse_selector(selector)?,
+                theme: *theme,
+                slug: slug.clone(),
+                version: version.clone(),
+                actor: String::new(),
+            },
             WpCmd::CoreRepair { selector } => Request::WpCoreRepair {
                 sel: parse_selector(selector)?,
             },

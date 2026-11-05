@@ -197,6 +197,7 @@ const KEEPS_WP_LISTS: &[&str] = &[
     "/hostings/page-cache/",
     "/hostings/integrity/scan",
     "/hostings/integrity/trust",
+    "/hostings/integrity/vendor-forget",
     "/hostings/ban",
     "/hostings/waf-",
     "/hostings/access/",
@@ -339,6 +340,7 @@ mod tests {
             "/hostings/integrity/scan",
             "/hostings/integrity/trust",
             "/hostings/integrity/trust-all",
+            "/hostings/integrity/vendor-forget",
         ] {
             assert!(!invalidates(&Method::POST, keeps), "{keeps}");
         }

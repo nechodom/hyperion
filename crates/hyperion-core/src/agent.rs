@@ -988,6 +988,19 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.scan_trust_all_review(hosting, actor).await
     }
 
+    async fn scan_vendor_forget(
+        &self,
+        hosting: HostingSelector,
+        theme: bool,
+        slug: String,
+        version: String,
+        actor: String,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+        self.svc
+            .scan_vendor_forget(hosting, theme, slug, version, actor)
+            .await
+    }
+
     async fn scan_quarantine_list(
         &self,
         hosting: hyperion_rpc::HostingSelector,

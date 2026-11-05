@@ -102,11 +102,12 @@ pub use stats::{
 pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};
 pub use wp::{
     FindingKind, HostingIntegritySummary, HostingVulnSummary, QuarantineList, QuarantinedFile,
-    ScanCoverage, ScanVerdict, SiteFileFinding, WpCoreUpdate, WpFatalReport, WpInstallRequest,
-    WpInstallStatus, WpIntegrityFileIssue, WpIntegrityPluginResult, WpIntegrityScanResult,
-    WpMalwareHit, WpPlugin, WpPluginAction, WpPluginActionResult, WpPluginListResponse, WpTheme,
-    WpThemeAction, WpThemeActionResult, WpThemeListResponse, WpVulnFinding, WpVulnScanResult,
-    HARD_LINKED_SNIPPET,
+    ScanCoverage, ScanVerdict, SiteFileFinding, VendorPackageInfo, WpCoreUpdate, WpFatalReport,
+    WpInstallRequest, WpInstallStatus, WpIntegrityFileIssue, WpIntegrityPluginResult,
+    WpIntegrityScanResult, WpMalwareHit, WpPlugin, WpPluginAction, WpPluginActionResult,
+    WpPluginListResponse, WpTheme, WpThemeAction, WpThemeActionResult, WpThemeListResponse,
+    WpVulnFinding, WpVulnScanResult, HARD_LINKED_SNIPPET, PACKAGES_DISAGREE_LABEL,
+    VENDOR_PACKAGE_LABEL,
 };
 
 /// Leads the DNS-01 "TXT not on the authoritative nameservers yet"

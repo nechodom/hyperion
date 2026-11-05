@@ -16,7 +16,7 @@ use hyperion_types::{
     FindingKind, QuarantineList, QuarantinedFile, SiteFileFinding, WpIntegrityScanResult,
 };
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// `hosting_kv` key: the files someone vouched for, as JSON path -> hex hash. The
 /// one place this is kept. It travels with a Copy, since the paths are relative to
@@ -254,6 +254,67 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// The action happened whatever comes of this, so a failure is only logged.
     pub(super) async fn request_rescan(&self, hosting_id: &str) {
         request_rescan_in(&self.pool, &self.site_scan, hosting_id).await;
+    }
+
+    /// Delete this node's reference copy of one vendor package version, its record
+    /// and any dispute about it, when an operator has decided it can't be believed.
+    /// Every site on that version is scanned again. It's the next package from a
+    /// site's own link that becomes the reference.
+    pub async fn scan_vendor_forget(
+        &self,
+        sel: HostingSelector,
+        theme: bool,
+        slug: String,
+        version: String,
+        actor: String,
+    ) -> Result<WpIntegrityScanResult, RpcError> {
+        use hyperion_adapters::sitescan::manifest::{ComponentKey, ComponentKind};
+        let detail = self.scan_action_target(sel).await?;
+        let key = ComponentKey {
+            kind: if theme {
+                ComponentKind::Theme
+            } else {
+                ComponentKind::Plugin
+            },
+            slug,
+            version,
+            locale: None,
+        };
+        let dir = Path::new(&self.paths.scan_dir).join("manifests");
+        let forget_key = key.clone();
+        let done: Result<(), RpcError> = tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::vendor::forget_package(&dir, &forget_key)
+        })
+        .await
+        .map_err(|e| RpcError::Internal_with(e.to_string()))
+        .and_then(|r| r.map_err(|e| RpcError::Internal_with(format!("forget: {e}"))))
+        .and_then(|found| {
+            found
+                .then_some(())
+                .ok_or_else(|| refuse("there's no vendor package for that version on this node"))
+        });
+        let mut payload = serde_json::json!({
+            "kind": key.kind.as_str(),
+            "slug": audited_path(&key.slug),
+            "version": audited_path(&key.version),
+        });
+        if let Err(e) = &done {
+            payload["reason"] = e.to_string().into();
+        }
+        self.append_audit_as(
+            0,
+            actor_label(&actor),
+            "wp.integrity.vendor_forget",
+            Some(detail.id.as_str()),
+            &payload.to_string(),
+            outcome_of(&done),
+        )
+        .await;
+        done?;
+        self.after_file_action(&detail, |_| {}).await;
+        self.rescan_sites_on(&key).await;
+        self.wp_integrity_stored(HostingSelector::Id(detail.id))
+            .await
     }
 
     /// Move one reported file to quarantine.
