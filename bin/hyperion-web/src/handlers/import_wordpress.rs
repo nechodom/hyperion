@@ -18,8 +18,8 @@
 //! streams are checked and turned into an ordinary bundle by the import job.
 
 use super::import_wizard::{
-    avail_bytes, bearer, ensure_migration_dir, final_path, migration_dir, resolve, text, token_rpc,
-    update, wire_safe_domain, MAX_CHUNK_BYTES, PLUGIN_KIND as SOURCE_KIND,
+    avail_bytes, bearer, current_status, ensure_migration_dir, final_path, migration_dir, resolve,
+    text, token_rpc, update, wire_safe_domain, MAX_CHUNK_BYTES, PLUGIN_KIND as SOURCE_KIND,
 };
 use crate::auth::AuthCtx;
 use crate::error::AppError;
@@ -33,7 +33,7 @@ use hyperion_import::wordpress::{self, WpSource, WpTarget, DB_STREAM, FILES_STRE
 use hyperion_import::SiteImportOverride;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_state::capabilities::Capability;
-use hyperion_types::{ImportTokenOp, ImportTokenResult};
+use hyperion_types::{ImportTokenInfo, ImportTokenOp, ImportTokenResult};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -399,6 +399,20 @@ async fn prepare_run(id: i64, meta: &RunMeta) -> std::io::Result<()> {
     f.flush().await
 }
 
+/// Where a code stands once its transfer went to a job: `importing`, `done` or
+/// `failed`. Begin and commit answer alike, because a retried commit and a reloaded
+/// tab both come here to find out what became of the transfer.
+async fn committed_reply(state: &SharedState, info: &ImportTokenInfo) -> Response {
+    text(
+        StatusCode::OK,
+        format!(
+            "state {}\njob {}\n",
+            current_status(state, info).await,
+            info.job_id.as_deref().unwrap_or("-")
+        ),
+    )
+}
+
 /// `POST /import/upload/wp/begin`: admit a run and say where each stream stands.
 ///
 /// Idempotent, because calling it again is how a reloaded tab resumes.
@@ -426,13 +440,7 @@ pub async fn post_begin(
         return Ok(run_is_busy());
     };
     if info.status == "importing" {
-        return Ok(text(
-            StatusCode::OK,
-            format!(
-                "state importing\njob {}\n",
-                info.job_id.as_deref().unwrap_or("-")
-            ),
-        ));
+        return Ok(committed_reply(&state, &info).await);
     }
     let begin: BeginBody = match serde_json::from_str(&body) {
         Ok(b) => b,
@@ -819,13 +827,7 @@ pub async fn post_commit(
     };
     if info.status == "importing" {
         // A retried commit whose reply was lost. Importing twice would be the harm.
-        return Ok(text(
-            StatusCode::OK,
-            format!(
-                "state importing\njob {}\n",
-                info.job_id.as_deref().unwrap_or("-")
-            ),
-        ));
+        return Ok(committed_reply(&state, &info).await);
     }
     let commit: CommitBody = match serde_json::from_str(&body) {
         Ok(c) => c,
@@ -911,7 +913,6 @@ pub async fn post_commit(
             discard_run(id).await;
             if let Err(e) = assembled {
                 let _ = tokio::fs::remove_file(&out).await;
-                update(&job_state, id, Some("failed"), None, None).await;
                 reporter.finish(false, Some(e)).await;
                 return;
             }

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Hyperion Migration
  * Description: Moves this WordPress site to a Hyperion panel. Generate a code in Hyperion (Import → WordPress plugin) and paste it under Tools → Hyperion Migration.
- * Version: 1.1.0
+ * Version: 1.1.1
  * Requires at least: 4.7
  * Requires PHP: 5.6
  * Author: Hyperion
@@ -26,7 +26,8 @@ if (!defined('ABSPATH')) {
 
 final class Hyperion_Migrate
 {
-    const VERSION = '1.1.0';
+    const VERSION = '1.1.1';
+    const IMPORT_FAILED = 'Hyperion received this transfer but could not import it, and no longer holds its data. The reason is on the Import page in Hyperion. Generate a new code to try again.';
     const OPTION = 'hyperion_migrate_run';
     const SWEEP_HOOK = 'hyperion_migrate_sweep';
     /** A run left this long without progress is abandoned. The panel's code lasts two days at most. */
@@ -151,7 +152,10 @@ final class Hyperion_Migrate
         if ($r['code'] !== 200 || !isset($f['state']) || $f['state'] === 'cancelled') {
             self::reply(array('fatal' => 'Hyperion does not accept this code. It has expired or was cancelled, so generate a new one.'));
         }
-        if ($f['state'] === 'importing') {
+        if ($f['state'] === 'failed') {
+            self::reply(array('fatal' => self::IMPORT_FAILED));
+        }
+        if ($f['state'] === 'importing' || $f['state'] === 'done') {
             self::reply(array('fatal' => 'This code has already brought a site across. Generate a new one to transfer again.'));
         }
         self::reply(array('panel' => (string) wp_parse_url($url, PHP_URL_HOST), 'site' => (string) get_option('home')));
@@ -752,7 +756,10 @@ final class Hyperion_Migrate
             return array('fatal' => self::short($r['body']));
         }
         $f = self::kv($r['body']);
-        if (isset($f['state']) && $f['state'] === 'importing') {
+        if (isset($f['state']) && $f['state'] === 'failed') {
+            return array('fatal' => self::IMPORT_FAILED);
+        }
+        if (isset($f['state']) && ($f['state'] === 'importing' || $f['state'] === 'done')) {
             return $this->finish(isset($f['job']) ? $f['job'] : '-');
         }
         // A fresh run on an empty server. Anything else would mean a stream that
@@ -1301,6 +1308,9 @@ final class Hyperion_Migrate
             return array('fatal' => 'Hyperion did not accept the finished transfer: ' . self::short($r['body']));
         }
         $f = self::kv($r['body']);
+        if (isset($f['state']) && $f['state'] === 'failed') {
+            return array('fatal' => self::IMPORT_FAILED);
+        }
         return $this->finish(isset($f['job']) ? $f['job'] : '-');
     }
 
