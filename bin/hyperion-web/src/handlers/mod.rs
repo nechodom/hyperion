@@ -9,6 +9,7 @@ pub mod bans;
 pub mod care;
 pub mod certs;
 pub mod dashboard;
+pub mod docker;
 pub mod emails;
 pub mod enroll;
 pub mod files;

@@ -110,6 +110,7 @@ pub const SECTIONS: &[Section] = &[
 pub const CARDS: &[(&str, &str)] = &[
     ("panel-domain", "panel"),
     ("updates", "panel"),
+    ("docker-module", "panel"),
     ("acme", "https"),
     ("acme-dns", "https"),
     ("preview-address", "https"),

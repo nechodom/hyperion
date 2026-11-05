@@ -1431,6 +1431,78 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(items) => Response::MonitorOverview(items),
             Err(e) => Response::Error(e),
         },
+        Request::DockerModuleStatus => match api.docker_module_status().await {
+            Ok(st) => Response::DockerModule(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerClusterInstall => match api.docker_cluster_install().await {
+            Ok(st) => Response::DockerModule(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerClusterRemove => match api.docker_cluster_remove().await {
+            Ok(st) => Response::DockerModule(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerNodeInstall => match api.docker_node_install().await {
+            Ok(st) => Response::DockerModule(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerNodeRemove => match api.docker_node_remove().await {
+            Ok(st) => Response::DockerModule(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerNodeRegister { node_id, installed } => {
+            match api.docker_node_register(node_id, installed).await {
+                Ok(()) => Response::DockerNodeRegistered,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::DockerNodeList => match api.docker_node_list().await {
+            Ok(l) => Response::DockerNodeList(l),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerNodeSilent { node_id, silent } => {
+            match api.docker_node_silent(node_id, silent).await {
+                Ok(changed) => Response::DockerNodeSilent { changed },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::UrlMonitorList => match api.url_monitor_list().await {
+            Ok(l) => Response::UrlMonitorList(l),
+            Err(e) => Response::Error(e),
+        },
+        Request::UrlMonitorSet(input) => match api.url_monitor_set(input).await {
+            Ok(id) => Response::UrlMonitorSet { id },
+            Err(e) => Response::Error(e),
+        },
+        Request::UrlMonitorDelete { id, actor } => match api.url_monitor_delete(id, actor).await {
+            Ok(()) => Response::UrlMonitorDeleted,
+            Err(e) => Response::Error(e),
+        },
+        Request::UrlMonitorTick => match api.url_monitor_tick().await {
+            Ok(events) => Response::UrlMonitorTick(events),
+            Err(e) => Response::Error(e),
+        },
+        Request::UrlMonitorAlert { id, context } => {
+            match api.url_monitor_alert(id, context).await {
+                Ok(()) => Response::UrlMonitorAlerted,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::DockerOverview => match api.docker_overview().await {
+            Ok(st) => Response::DockerOverview(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerForgetProject { project } => {
+            match api.docker_forget_project(project).await {
+                Ok(()) => Response::DockerProjectForgotten,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::DockerLogs(req) => match api.docker_logs(req).await {
+            Ok(chunk) => Response::DockerLogs(chunk),
+            Err(e) => Response::Error(e),
+        },
         Request::AvatarFilename { user_id } => match api.avatar_filename(user_id).await {
             Ok(f) => Response::AvatarFilename(f),
             Err(e) => Response::Error(e),
@@ -3530,6 +3602,82 @@ mod tests {
             &self,
         ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {
             Ok(vec![])
+        }
+        async fn docker_module_status(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_cluster_install(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_cluster_remove(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_node_install(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_node_remove(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_node_register(&self, _: String, _: bool) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn docker_node_list(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerNodeList, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_node_silent(&self, _: String, _: bool) -> Result<bool, RpcError> {
+            Ok(false)
+        }
+        async fn url_monitor_list(
+            &self,
+        ) -> Result<hyperion_types::url_monitor::UrlMonitorList, RpcError> {
+            Ok(Default::default())
+        }
+        async fn url_monitor_set(
+            &self,
+            _: hyperion_types::url_monitor::UrlMonitorInput,
+        ) -> Result<i64, RpcError> {
+            Ok(0)
+        }
+        async fn url_monitor_delete(&self, _: i64, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn url_monitor_tick(
+            &self,
+        ) -> Result<Vec<hyperion_types::url_monitor::UrlMonitorEvent>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn url_monitor_alert(
+            &self,
+            _: i64,
+            _: hyperion_types::url_monitor::UrlAlertContext,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn docker_overview(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerNodeStatus, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_forget_project(&self, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn docker_logs(
+            &self,
+            _: hyperion_types::docker::DockerLogRequest,
+        ) -> Result<hyperion_types::docker::DockerLogChunk, RpcError> {
+            Ok(Default::default())
         }
         async fn avatar_filename(&self, _: i64) -> Result<Option<String>, RpcError> {
             Ok(None)

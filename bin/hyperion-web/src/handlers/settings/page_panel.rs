@@ -29,6 +29,8 @@ struct PanelTpl<'a> {
     update: UpdateStatus,
     current_short: String,
     latest_short: String,
+    /// The Docker module card: on or off, and for how many nodes.
+    docker: crate::handlers::docker::ModuleCard,
 }
 
 pub async fn get_panel(
@@ -54,6 +56,7 @@ pub async fn get_panel(
             ),
         ),
     );
+    let docker = crate::handlers::docker::module_card(&state).await;
     let (config, config_error) = super::config_or_default(config_res);
     let update = match update_res {
         Ok(Ok(RpcResponse::UpdateCheck(u))) => u,
@@ -74,6 +77,7 @@ pub async fn get_panel(
         config,
         config_error,
         update,
+        docker,
     };
     Ok(Html(tpl.render()?).into_response())
 }

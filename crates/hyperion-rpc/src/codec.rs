@@ -1412,6 +1412,61 @@ pub enum Request {
     /// Cluster-wide monitor list — every enabled monitor on this
     /// node with computed 24h success rate + avg latency.
     MonitorOverview,
+    /// Docker module state of this node (and, on the master, the cluster
+    /// flag). Runs `docker version` only when the module is on.
+    DockerModuleStatus,
+    /// Master: turn the Docker module on for the cluster. Bookkeeping only.
+    DockerClusterInstall,
+    /// Master: turn the cluster flag off and forget every registered node.
+    DockerClusterRemove,
+    /// Turn the module on for this node. Refused unless `docker version`
+    /// answers.
+    DockerNodeInstall,
+    /// Turn the module off for this node and drop the data it kept.
+    DockerNodeRemove,
+    /// Master: record that `node_id` runs (or no longer runs) the module.
+    DockerNodeRegister {
+        node_id: String,
+        installed: bool,
+    },
+    /// Master: whether the module is on for the cluster, and which nodes
+    /// were recorded as running it.
+    DockerNodeList,
+    /// Master: a node with the module stopped answering (`silent`) or answers
+    /// again. Alerts only when the recorded state changes.
+    DockerNodeSilent {
+        node_id: String,
+        silent: bool,
+    },
+    /// Projects and containers of this node's Docker, as of the last tick.
+    DockerOverview,
+    /// Forget a Docker project's panel state on this node. Touches no
+    /// container.
+    DockerForgetProject {
+        project: String,
+    },
+    /// Read the log of one container or of a whole stack on this node.
+    DockerLogs(hyperion_types::docker::DockerLogRequest),
+    /// Master: the URL checks, with 24 hour figures. Empty while the Docker
+    /// module is off for the cluster.
+    UrlMonitorList,
+    /// Master: add a URL check, or change one.
+    UrlMonitorSet(hyperion_types::url_monitor::UrlMonitorInput),
+    /// Master: delete a URL check and its samples.
+    UrlMonitorDelete {
+        id: i64,
+        /// Who asked, for the audit entry.
+        #[serde(default)]
+        actor: String,
+    },
+    /// Master: sample every URL check that is due, decide what changed, and
+    /// return the alerts not yet acknowledged.
+    UrlMonitorTick,
+    /// Master: send the alert a check owes and acknowledge it.
+    UrlMonitorAlert {
+        id: i64,
+        context: hyperion_types::url_monitor::UrlAlertContext,
+    },
     /// Look up the avatar basename for one web_user.
     AvatarFilename {
         user_id: i64,
@@ -2735,6 +2790,29 @@ pub enum Response {
     HostingFileMkdir,
     HostingFileRename,
     MonitorOverview(Vec<hyperion_types::MonitorOverviewItem>),
+    /// Answer to every Docker module call but `DockerNodeRegister`.
+    DockerModule(hyperion_types::docker::DockerModuleState),
+    /// Ack for DockerNodeRegister.
+    DockerNodeRegistered,
+    DockerNodeList(hyperion_types::docker::DockerNodeList),
+    /// Answer to DockerNodeSilent: whether the recorded state changed (and
+    /// so an alert went out).
+    DockerNodeSilent {
+        changed: bool,
+    },
+    DockerOverview(hyperion_types::docker::DockerNodeStatus),
+    /// Ack for DockerForgetProject.
+    DockerProjectForgotten,
+    DockerLogs(hyperion_types::docker::DockerLogChunk),
+    UrlMonitorList(hyperion_types::url_monitor::UrlMonitorList),
+    /// The id of the check that was added or changed.
+    UrlMonitorSet {
+        id: i64,
+    },
+    UrlMonitorDeleted,
+    /// Alerts decided and not yet acknowledged.
+    UrlMonitorTick(Vec<hyperion_types::url_monitor::UrlMonitorEvent>),
+    UrlMonitorAlerted,
     AvatarFilename(Option<String>),
     AvatarSet,
     /// Returns the masked target address (e.g. "k****@example.cz").

@@ -20,6 +20,7 @@ pub mod auth;
 pub mod cluster_sync;
 pub mod config;
 pub mod dispatcher;
+pub mod docker_watch;
 pub mod error;
 pub mod filters;
 pub mod handlers;
@@ -29,6 +30,7 @@ pub mod ratelimit;
 pub mod setup;
 pub mod state;
 pub mod ttl_cache;
+pub mod url_watch;
 pub mod wp_library;
 pub mod wp_list_cache;
 
@@ -337,6 +339,47 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::stats::post_backup_untracked_delete),
         )
         .route("/monitoring", get(handlers::monitoring::get_monitoring))
+        .route(
+            "/monitoring/urls",
+            post(handlers::monitoring::post_url_save),
+        )
+        .route(
+            "/monitoring/urls/:id/delete",
+            post(handlers::monitoring::post_url_delete),
+        )
+        .route("/docker", get(handlers::docker::get_docker))
+        .route(
+            "/docker/install-cluster",
+            post(handlers::docker::post_install_cluster),
+        )
+        .route(
+            "/docker/remove-cluster",
+            post(handlers::docker::post_remove_cluster),
+        )
+        .route(
+            "/docker/nodes/:node/install",
+            post(handlers::docker::post_node_install),
+        )
+        .route(
+            "/docker/nodes/:node/remove",
+            post(handlers::docker::post_node_remove),
+        )
+        .route(
+            "/docker/hosting-chip",
+            get(handlers::docker::get_hosting_chip),
+        )
+        .route(
+            "/docker/:node/:project",
+            get(handlers::docker::get_docker_stack),
+        )
+        .route(
+            "/docker/:node/:project/logs",
+            get(handlers::docker::get_docker_logs),
+        )
+        .route(
+            "/docker/:node/:project/forget",
+            post(handlers::docker::post_forget),
+        )
         .route("/trash", get(handlers::trash::get_trash))
         .route("/trash/restore", post(handlers::trash::post_trash_restore))
         .route("/trash/purge", post(handlers::trash::post_trash_purge))

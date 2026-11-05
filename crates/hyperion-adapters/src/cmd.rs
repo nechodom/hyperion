@@ -436,24 +436,7 @@ pub async fn curl_with_config(config: &str) -> Result<String, AdapterError> {
 /// output of a run that curl considers a failure — an FTP 530 is the ANSWER
 /// there, not a transport problem. Returns `(stdout, stderr tail, exit code)`.
 pub async fn curl_with_config_capture(config: &str) -> Result<(String, String, i32), AdapterError> {
-    use tokio::io::AsyncWriteExt;
-    debug!("exec curl (options on stdin)");
-    let mut child = Command::new("/usr/bin/curl")
-        .arg("--config")
-        .arg("-")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| AdapterError::Other(format!("spawn curl: {e}")))?;
-    if let Some(mut si) = child.stdin.take() {
-        si.write_all(config.as_bytes())
-            .await
-            .map_err(|e| AdapterError::Other(format!("write curl config: {e}")))?;
-        si.shutdown()
-            .await
-            .map_err(|e| AdapterError::Other(format!("close curl stdin: {e}")))?;
-    }
+    let child = spawn_curl_config(config, false).await?;
     let out = child
         .wait_with_output()
         .await
@@ -474,9 +457,161 @@ pub async fn curl_with_config_capture(config: &str) -> Result<(String, String, i
     ))
 }
 
+/// Start `curl --config -` with the options written to its stdin.
+async fn spawn_curl_config(
+    config: &str,
+    kill_on_drop: bool,
+) -> Result<tokio::process::Child, AdapterError> {
+    use tokio::io::AsyncWriteExt;
+    debug!("exec curl (options on stdin)");
+    let mut child = Command::new("/usr/bin/curl")
+        .arg("--config")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(kill_on_drop)
+        .spawn()
+        .map_err(|e| AdapterError::Other(format!("spawn curl: {e}")))?;
+    if let Some(mut si) = child.stdin.take() {
+        si.write_all(config.as_bytes())
+            .await
+            .map_err(|e| AdapterError::Other(format!("write curl config: {e}")))?;
+        si.shutdown()
+            .await
+            .map_err(|e| AdapterError::Other(format!("close curl stdin: {e}")))?;
+    }
+    Ok(child)
+}
+
+/// What [`curl_with_config_capped`] kept of curl's output: the first and the
+/// last bytes of stdout, and how many in between were read and thrown away.
+/// `head ++ (dropped bytes) ++ tail` is everything curl wrote; when
+/// `dropped` is 0, `head ++ tail` IS everything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CurlCapped {
+    pub head: Vec<u8>,
+    pub tail: Vec<u8>,
+    pub dropped: u64,
+    pub stderr_tail: String,
+    pub code: i32,
+}
+
+/// [`curl_with_config_capture`] for a response that may be of any size:
+/// stdout is read as it arrives and only its first `head_max` and last
+/// `tail_max` bytes are kept, so a multi-gigabyte page costs the time to
+/// read it and no memory. The run ends when curl does (its own `max-time`
+/// bounds it), and curl is killed if the caller's future is dropped.
+pub async fn curl_with_config_capped(
+    config: &str,
+    head_max: usize,
+    tail_max: usize,
+) -> Result<CurlCapped, AdapterError> {
+    use tokio::io::AsyncReadExt;
+    let mut child = spawn_curl_config(config, true).await?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AdapterError::Other("curl has no stdout".into()))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AdapterError::Other("curl has no stderr".into()))?;
+    let read_out = async {
+        let mut kept = CurlCapped::default();
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            let n = match stdout.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let mut rest = &buf[..n];
+            if kept.head.len() < head_max {
+                let take = (head_max - kept.head.len()).min(rest.len());
+                kept.head.extend_from_slice(&rest[..take]);
+                rest = &rest[take..];
+            }
+            kept.tail.extend_from_slice(rest);
+            if kept.tail.len() > tail_max {
+                let excess = kept.tail.len() - tail_max;
+                kept.tail.drain(..excess);
+                kept.dropped += excess as u64;
+            }
+        }
+        kept
+    };
+    let read_err = async {
+        let mut tail: Vec<u8> = Vec::new();
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let n = match stderr.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            tail.extend_from_slice(&buf[..n]);
+            if tail.len() > 4096 {
+                let excess = tail.len() - 4096;
+                tail.drain(..excess);
+            }
+        }
+        tail
+    };
+    let (mut kept, err, status) = tokio::join!(read_out, read_err, child.wait());
+    let status = status.map_err(|e| AdapterError::Other(format!("wait curl: {e}")))?;
+    kept.stderr_tail = String::from_utf8_lossy(&err).into_owned();
+    kept.code = status.code().unwrap_or(-1);
+    Ok(kept)
+}
+
 #[cfg(test)]
 mod curl_config_tests {
-    use super::curl_config_quote;
+    use super::{curl_config_quote, curl_with_config_capped};
+
+    /// A response of 3 MiB read through the cap keeps exactly the first and
+    /// the last bytes asked for, and counts the rest. What is held does not
+    /// depend on the size of the response.
+    #[tokio::test]
+    async fn a_large_response_keeps_only_its_ends() {
+        if !std::path::Path::new("/usr/bin/curl").exists() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("big.bin");
+        let data: Vec<u8> = (0..3 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &data).expect("write");
+        let config = format!("silent\nurl = \"file://{}\"\n", path.display());
+        let got = curl_with_config_capped(&config, 1000, 50)
+            .await
+            .expect("curl");
+        assert_eq!(got.code, 0, "{got:?}");
+        assert_eq!(got.head, data[..1000]);
+        assert_eq!(got.tail, data[data.len() - 50..]);
+        assert_eq!(got.dropped, (data.len() - 1000 - 50) as u64);
+    }
+
+    /// A short response is kept whole, in the head and the tail.
+    #[tokio::test]
+    async fn a_short_response_is_kept_whole() {
+        if !std::path::Path::new("/usr/bin/curl").exists() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("small.txt");
+        std::fs::write(&path, b"0123456789").expect("write");
+        let config = format!("silent\nurl = \"file://{}\"\n", path.display());
+        let got = curl_with_config_capped(&config, 4, 4).await.expect("curl");
+        assert_eq!(
+            (got.head.as_slice(), got.tail.as_slice()),
+            (&b"0123"[..], &b"6789"[..])
+        );
+        assert_eq!(got.dropped, 2);
+        let got = curl_with_config_capped(&config, 20, 20)
+            .await
+            .expect("curl");
+        assert_eq!(got.head, b"0123456789");
+        assert!(got.tail.is_empty());
+        assert_eq!(got.dropped, 0);
+    }
 
     /// An ordinary credential passes through untouched.
     #[test]

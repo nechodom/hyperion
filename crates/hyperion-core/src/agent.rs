@@ -1628,6 +1628,78 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn monitor_overview(&self) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {
         self.svc.monitor_overview().await
     }
+    async fn docker_module_status(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+        self.svc.docker_module_status().await
+    }
+    async fn docker_cluster_install(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+        self.svc.docker_cluster_install().await
+    }
+    async fn docker_cluster_remove(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+        self.svc.docker_cluster_remove().await
+    }
+    async fn docker_node_install(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+        self.svc.docker_node_install().await
+    }
+    async fn docker_node_remove(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+        self.svc.docker_node_remove().await
+    }
+    async fn docker_node_register(&self, node_id: String, installed: bool) -> Result<(), RpcError> {
+        self.svc.docker_node_register(&node_id, installed).await
+    }
+    async fn docker_node_list(&self) -> Result<hyperion_types::docker::DockerNodeList, RpcError> {
+        self.svc.docker_node_list().await
+    }
+    async fn docker_node_silent(&self, node_id: String, silent: bool) -> Result<bool, RpcError> {
+        self.svc.docker_node_silent(&node_id, silent).await
+    }
+    async fn docker_overview(&self) -> Result<hyperion_types::docker::DockerNodeStatus, RpcError> {
+        self.svc.docker_overview().await
+    }
+    async fn url_monitor_list(
+        &self,
+    ) -> Result<hyperion_types::url_monitor::UrlMonitorList, RpcError> {
+        self.svc.url_monitor_list().await
+    }
+    async fn url_monitor_set(
+        &self,
+        input: hyperion_types::url_monitor::UrlMonitorInput,
+    ) -> Result<i64, RpcError> {
+        self.svc.url_monitor_set(input).await
+    }
+    async fn url_monitor_delete(&self, id: i64, actor: String) -> Result<(), RpcError> {
+        self.svc.url_monitor_delete(id, &actor).await
+    }
+    async fn url_monitor_tick(
+        &self,
+    ) -> Result<Vec<hyperion_types::url_monitor::UrlMonitorEvent>, RpcError> {
+        self.svc.url_monitor_tick().await
+    }
+    async fn url_monitor_alert(
+        &self,
+        id: i64,
+        context: hyperion_types::url_monitor::UrlAlertContext,
+    ) -> Result<(), RpcError> {
+        self.svc.url_monitor_alert(id, context).await
+    }
+    async fn docker_forget_project(&self, project: String) -> Result<(), RpcError> {
+        self.svc.docker_forget_project(project).await
+    }
+    async fn docker_logs(
+        &self,
+        req: hyperion_types::docker::DockerLogRequest,
+    ) -> Result<hyperion_types::docker::DockerLogChunk, RpcError> {
+        self.svc.docker_logs(req).await
+    }
     async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError> {
         self.svc.avatar_filename(user_id).await
     }

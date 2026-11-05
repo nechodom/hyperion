@@ -1,0 +1,109 @@
+Subject:CN = *.example.test
+Issuer:C = US, O = Let's Encrypt, CN = YE1
+Version:2
+Serial Number:053b40dfba6f4007ab17009ddc850ccefea8
+Signature Algorithm:ecdsa-with-SHA384
+Public Key Algorithm:id-ecPublicKey
+X509v3 Key Usage:Digital Signature
+X509v3 Extended Key Usage:TLS Web Server Authentication
+X509v3 Basic Constraints:CA:FALSE
+X509v3 Subject Key Identifier:59:50:87:7D:A4:76:7E:9E:EE:44:94:03:D6:71:F3:81:2E:80:86:63
+X509v3 Authority Key Identifier:BB:20:CA:47:0B:FE:D7:E5:9C:F9:8F:09:2A:A3:8C:37:45:B1:BC:D8
+Authority Information Access:CA Issuers - URI:http://ye1.i.lencr.org/
+X509v3 Subject Alternative Name:DNS:*.example.test, DNS:example.test
+X509v3 Certificate Policies:Policy: 2.23.140.1.2.1
+X509v3 CRL Distribution Points:Full Name:
+  URI:http://ye1.c.lencr.org/41.crl
+CT Precertificate SCTs:Signed Certificate Timestamp:
+    Version   : v1 (0x0)
+    Log ID    : 00:1A:5D:1A:1C:2D:93:75:B6:48:55:78:F8:2F:71:A1:
+                AE:6E:EF:39:7D:29:7C:8A:E3:15:7B:CA:DE:E1:A0:1E
+    Timestamp : Oct 13 15:16:22.917 2026 GMT
+    Extensions: none
+    Signature : ecdsa-with-SHA256
+                30:46:02:21:00:A5:49:EA:41:24:7F:70:3A:AE:54:47:
+                0C:F5:23:F7:B5:05:AA:0B:01:EA:2A:05:96:C5:BD:3B:
+                5E:9A:5E:D1:19:02:21:00:D7:68:C3:C9:54:96:31:65:
+                B9:A3:62:68:A6:9D:66:1D:CC:5E:FE:C9:54:EF:78:70:
+                69:E8:08:44:A4:3C:F0:73
+Signed Certificate Timestamp:
+    Version   : v1 (0x0)
+    Log ID    : 1A:8B:9D:6B:8D:D7:91:D1:CD:05:49:ED:B6:03:55:D6:
+                06:B6:4F:AD:30:DB:71:FE:78:8F:0F:C7:C8:FB:C4:B1
+    Timestamp : Oct 13 15:16:24.580 2026 GMT
+    Extensions: 00:00:05:00:08:1C:D2:2B
+    Signature : ecdsa-with-SHA256
+                30:44:02:20:75:EC:28:8C:28:2C:04:94:53:C2:AC:6B:
+                6C:3A:FB:55:FE:B3:61:35:C5:D6:AC:E8:E5:D1:BB:75:
+                B2:2A:84:26:02:20:2E:98:A5:0B:82:73:7C:DB:E9:39:
+                3C:6E:88:7C:B4:13:3F:C9:BA:CD:BB:ED:5D:1C:A5:28:
+                A6:30:61:54:73:E0
+Start date:Oct 13 14:17:52 2026 GMT
+Expire date:Jan 11 14:17:51 2027 GMT
+Signature:30:65:02:30:15:8e:3c:e3:f7:fb:0b:cf:f1:21:4c:43:52:cc:a0:6e:34:7d:fb:9a:9a:fb:77:4a:96:c5:bb:20:57:f0:2f:46:59:c9:04:ee:d1:0d:96:58:30:f9:cc:34:58:24:59:7a:02:31:00:fe:39:55:05:de:be:de:95:28:3e:4a:fa:6c:05:59:c1:02:8f:0c:a8:22:48:00:1b:36:02:89:17:0f:da:0d:de:34:ee:dd:60:9d:ea:4b:63:5a:90:93:c0:fb:49:df:ad:
+-----BEGIN CERTIFICATE-----
+(base64 elided)
+-----END CERTIFICATE-----
+Subject:C = US, O = Let's Encrypt, CN = YE1
+Issuer:C = US, O = ISRG, CN = Root YE
+Version:2
+Serial Number:5ddd70dd31f801c85c186a7a04b80afe
+Signature Algorithm:ecdsa-with-SHA384
+Public Key Algorithm:id-ecPublicKey
+X509v3 Key Usage:Digital Signature, Certificate Sign, CRL Sign
+X509v3 Extended Key Usage:TLS Web Server Authentication
+X509v3 Basic Constraints:CA:TRUE, pathlen:0
+X509v3 Subject Key Identifier:BB:20:CA:47:0B:FE:D7:E5:9C:F9:8F:09:2A:A3:8C:37:45:B1:BC:D8
+X509v3 Authority Key Identifier:A3:C8:26:5A:8E:A1:4C:D0:35:63:FC:9B:23:C8:3A:AE:56:F3:4F:56
+Authority Information Access:CA Issuers - URI:http://ye.i.lencr.org/
+X509v3 Certificate Policies:Policy: 2.23.140.1.2.1
+X509v3 CRL Distribution Points:Full Name:
+  URI:http://ye.c.lencr.org/
+Start date:Sep  3 00:00:00 2025 GMT
+Expire date:Sep  2 23:59:59 2028 GMT
+Signature:30:65:02:31:00:e0:8d:41:1a:84:54:ff:87:70:d1:6a:4a:a2:3d:9a:4b:bc:f8:1f:67:09:2d:e8:ad:84:38:c9:a1:d6:7b:c4:ce:5f:37:78:c2:d8:72:87:78:18:29:77:6f:42:75:36:7d:02:30:13:58:98:44:09:6f:80:84:1b:95:a8:39:ee:da:46:7f:cb:54:ab:ba:b1:a1:e6:1c:4c:a7:23:bc:ac:20:f7:7c:cd:0b:0a:d4:77:66:86:51:ca:97:0f:59:e4:6a:46:bc:
+-----BEGIN CERTIFICATE-----
+(base64 elided)
+-----END CERTIFICATE-----
+Subject:C = US, O = ISRG, CN = Root YE
+Issuer:C = US, O = Internet Security Research Group, CN = ISRG Root X2
+Version:2
+Serial Number:872165fc34b6e5fba8add5b3705fb53a
+Signature Algorithm:ecdsa-with-SHA384
+Public Key Algorithm:id-ecPublicKey
+X509v3 Key Usage:Certificate Sign, CRL Sign
+X509v3 Extended Key Usage:TLS Web Server Authentication
+X509v3 Basic Constraints:CA:TRUE
+X509v3 Subject Key Identifier:A3:C8:26:5A:8E:A1:4C:D0:35:63:FC:9B:23:C8:3A:AE:56:F3:4F:56
+X509v3 Authority Key Identifier:7C:42:96:AE:DE:4B:48:3B:FA:92:F8:9E:8C:CF:6D:8B:A9:72:37:95
+Authority Information Access:CA Issuers - URI:http://x2.i.lencr.org/
+X509v3 Certificate Policies:Policy: 2.23.140.1.2.1
+X509v3 CRL Distribution Points:Full Name:
+  URI:http://x2.c.lencr.org/
+Start date:May 13 00:00:00 2026 GMT
+Expire date:Sep  2 23:59:59 2032 GMT
+Signature:30:66:02:31:00:c5:35:f5:60:ad:9b:15:4d:0f:c5:07:05:94:68:99:ae:3d:67:b8:cf:b3:ae:03:99:ad:1e:4e:ed:4e:0a:15:5b:07:fd:89:ec:65:77:9e:f6:0a:03:1e:78:ba:4d:46:f5:02:31:00:ed:26:88:b5:49:bb:c3:cb:36:25:d7:5e:48:84:fe:0b:0a:dc:24:d1:4c:5f:da:7a:8e:1b:31:7e:36:67:0e:34:72:c4:54:e8:00:b6:ea:14:96:d7:f2:16:69:ab:3a:76:
+-----BEGIN CERTIFICATE-----
+(base64 elided)
+-----END CERTIFICATE-----
+Subject:C = US, O = Internet Security Research Group, CN = ISRG Root X2
+Issuer:C = US, O = Internet Security Research Group, CN = ISRG Root X1
+Version:2
+Serial Number:6c8f1dc727c7117f7baf853ac980f9cd
+Signature Algorithm:sha256WithRSAEncryption
+Public Key Algorithm:id-ecPublicKey
+X509v3 Key Usage:Certificate Sign, CRL Sign
+X509v3 Extended Key Usage:TLS Web Server Authentication, TLS Web Client Authentication
+X509v3 Basic Constraints:CA:TRUE
+X509v3 Subject Key Identifier:7C:42:96:AE:DE:4B:48:3B:FA:92:F8:9E:8C:CF:6D:8B:A9:72:37:95
+X509v3 Authority Key Identifier:79:B4:59:E6:7B:B6:E5:E4:01:73:80:08:88:C8:1A:58:F6:E9:9B:6E
+Authority Information Access:CA Issuers - URI:http://x1.i.lencr.org/
+X509v3 Certificate Policies:Policy: 2.23.140.1.2.1
+X509v3 CRL Distribution Points:Full Name:
+  URI:http://x1.c.lencr.org/
+Start date:May 13 00:00:00 2026 GMT
+Expire date:Sep  2 23:59:59 2032 GMT
+Signature:3d:bf:7b:d7:eb:98:cc:4d:a4:25:74:de:a5:07:7a:08:3e:31:5d:b0:cf:de:b8:e1:8a:17:76:ab:47:f1:1c:96:61:c0:4e:ef:17:e3:8c:61:17:75:4d:5e:fe:8d:0e:90:41:62:ca:75:02:39:22:24:fe:f2:cb:a3:bb:6d:cf:a0:8f:01:e3:65:59:f0:b4:5c:d9:28:19:e5:a0:2b:a8:e3:5e:fa:33:05:a1:ae:18:7e:67:d1:47:e8:b2:13:1e:59:3b:94:46:a3:4d:e4:6d:34:b1:25:c3:4c:1a:e9:a7:6f:a6:82:f7:59:42:36:fc:2b:5d:53:60:c0:36:e5:00:3e:60:73:5f:6c:81:0b:d0:19:e2:02:12:92:da:0b:27:26:34:b3:ad:d6:4b:23:e1:19:ed:21:32:a9:d4:76:ae:48:dd:d4:ab:ad:2c:35:3e:9f:74:c5:cb:18:e7:89:95:46:ba:be:18:96:13:0f:de:66:3f:75:5f:79:22:bb:80:92:48:ce:66:27:ab:ea:11:81:74:48:19:5d:7b:da:0b:3f:6e:f6:25:44:69:db:08:13:be:69:00:62:fc:a0:75:79:bf:17:40:44:38:a8:b5:1a:6e:97:52:0d:fd:46:70:cc:06:eb:7d:41:5c:c3:51:e4:01:c6:03:fe:69:59:7e:74:36:89:e0:85:d8:c4:bb:8f:75:61:bf:b2:4f:0c:aa:78:e5:f9:b2:92:6c:d8:35:2a:ee:99:15:b4:ba:91:45:28:30:4e:a0:5e:e1:b0:e6:fb:a0:bc:87:4b:e5:1f:b7:a8:ce:51:f3:ab:a2:08:fc:61:4c:77:f2:12:9b:d8:ad:b4:af:8d:8e:82:c4:9d:0d:dc:5d:79:85:9c:31:2d:d2:6f:a9:b0:25:e4:99:11:8c:49:da:06:97:9c:34:8f:68:a8:61:ac:d9:18:c2:58:f2:55:0c:ab:e0:da:be:30:42:72:b5:73:53:9c:7a:9a:01:ca:cd:c1:99:55:a5:c2:4b:d4:a0:67:32:b3:23:3f:b7:9a:9e:f5:30:2f:71:58:8f:77:05:d7:b8:ed:6e:82:ed:ee:02:e8:8b:8f:b6:ad:66:45:be:7f:b0:e7:88:e6:77:f1:48:ba:18:59:70:46:94:ff:0b:d4:e8:15:0d:32:d7:15:aa:e5:46:1e:9e:e2:b5:07:83:b6:1e:63:f9:72:f7:8f:85:89:d9:20:01:c3:35:25:e8:e7:98:76:0a:48:b7:f2:13:65:af:a9:4d:3d:26:43:fa:f9:5f:20:38:30:40:22:69:b9:fb:5c:98:ef:08:44:65:17:67:5c:9f:6c:2a:27:0f:82:ad:e4:e4:91:0d:91:
+-----BEGIN CERTIFICATE-----
+(base64 elided)
+-----END CERTIFICATE-----

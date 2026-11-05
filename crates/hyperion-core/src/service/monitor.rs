@@ -620,36 +620,24 @@ pub(super) async fn probe_http(url: &str) -> HttpProbeResult {
     // Shell out to curl — adds an external dep that's already on
     // every node (we use it for backups). Avoids pulling in a full
     // reqwest+tls stack and the rustls CryptoProvider dance.
-    let res = tokio::process::Command::new("/usr/bin/curl")
-        .args([
-            // silent but keep curl's error line (the alert's "last error") +
-            // insecure + follow redirects
-            "-sSkL",
-            "--connect-timeout",
-            PROBE_CONNECT_TIMEOUT_SECS,
-            "--max-time",
-            PROBE_MAX_TIME_SECS,
-            "--max-redirs",
-            "3",
-            "-H",
-            "Cache-Control: no-cache",
-            "-w",
-            &format!("{PROBE_STATUS_MARK}%{{http_code}}"),
-            &probe_url,
-        ])
-        .output()
-        .await;
+    //
+    // The options go on curl's stdin, not argv: an address may carry a token
+    // (`?key=...`), and `/proc/<pid>/cmdline` is readable by every tenant.
+    // stdout is read as it comes and only the head of the body and the end
+    // (the status mark) are kept: a site answering with gigabytes costs the
+    // time to read them, never the memory.
+    let res = hyperion_adapters::cmd::curl_with_config_capped(
+        &probe_curl_config(&probe_url),
+        PROBE_HEAD_BYTES,
+        PROBE_TAIL_BYTES,
+    )
+    .await;
     let elapsed = start.elapsed().as_millis() as i64;
     match res {
         Ok(out) => {
-            let raw = String::from_utf8_lossy(&out.stdout);
-            let (body, code_str) = raw
-                .rsplit_once(PROBE_STATUS_MARK)
-                .unwrap_or((raw.as_ref(), "0"));
-            let code: i64 = code_str.trim().parse().unwrap_or(0);
-            let head: String = body.chars().take(PROBE_BODY_CAP).collect();
-            if probe_gave_up(code, out.status.success(), &head) {
-                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let (head, code) = split_probe_output(&out.head, &out.tail, out.dropped);
+            if probe_gave_up(code, out.code == 0, &head) {
+                let err = out.stderr_tail.trim().to_string();
                 return HttpProbeResult {
                     success: false,
                     http_status: (code > 0).then_some(code),
@@ -679,4 +667,58 @@ pub(super) async fn probe_http(url: &str) -> HttpProbeResult {
             hard_failure: false,
         },
     }
+}
+
+/// The most bytes that can make [`PROBE_BODY_CAP`] characters, with a char
+/// of slack for a cut inside one.
+const PROBE_HEAD_BYTES: usize = PROBE_BODY_CAP * 4 + 4;
+/// Room for the status mark and the three-digit code at the end of the
+/// output, with margin.
+const PROBE_TAIL_BYTES: usize = PROBE_STATUS_MARK.len() + 32;
+
+/// The curl options of one probe, as a config file for stdin. Every value
+/// goes through `curl_config_quote`.
+fn probe_curl_config(probe_url: &str) -> String {
+    use hyperion_adapters::cmd::curl_config_quote as q;
+    format!(
+        // silent but keep curl's error line (the alert's "last error") +
+        // insecure + follow redirects
+        "silent\nshow-error\ninsecure\nlocation\n\
+         connect-timeout = \"{}\"\n\
+         max-time = \"{}\"\n\
+         max-redirs = \"3\"\n\
+         header = \"Cache-Control: no-cache\"\n\
+         write-out = \"{}\"\n\
+         url = \"{}\"\n",
+        q(PROBE_CONNECT_TIMEOUT_SECS),
+        q(PROBE_MAX_TIME_SECS),
+        q(&format!("{PROBE_STATUS_MARK}%{{http_code}}")),
+        q(probe_url),
+    )
+}
+
+/// What a probe's capped output says: the first [`PROBE_BODY_CAP`]
+/// characters of the body, and the status code after the last mark (0 when
+/// curl never got to print it).
+///
+/// With nothing dropped the output is whole and is read exactly as before.
+/// Otherwise the body was longer than the head kept, which holds more than
+/// [`PROBE_BODY_CAP`] characters, and the mark is in the tail.
+pub(super) fn split_probe_output(head: &[u8], tail: &[u8], dropped: u64) -> (String, i64) {
+    let (body, code_str) = if dropped == 0 {
+        let whole = [head, tail].concat();
+        let raw = String::from_utf8_lossy(&whole).into_owned();
+        match raw.rsplit_once(PROBE_STATUS_MARK) {
+            Some((b, c)) => (b.to_string(), c.to_string()),
+            None => (raw, "0".to_string()),
+        }
+    } else {
+        let tail = String::from_utf8_lossy(tail).into_owned();
+        let code = tail
+            .rsplit_once(PROBE_STATUS_MARK)
+            .map_or("0".to_string(), |(_, c)| c.to_string());
+        (String::from_utf8_lossy(head).into_owned(), code)
+    };
+    let code: i64 = code_str.trim().parse().unwrap_or(0);
+    (body.chars().take(PROBE_BODY_CAP).collect(), code)
 }

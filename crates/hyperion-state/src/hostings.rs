@@ -925,6 +925,22 @@ pub async fn next_free_redis_db(pool: &SqlitePool, max: i64) -> Result<Option<i6
     Ok(None)
 }
 
+/// `(domain, upstream)` of every reverse-proxy hosting on this node that is
+/// not in the trash, by domain. A suspended or failed one still counts: it
+/// is still configured to forward to that address. Read raw, without the
+/// row parse, so one odd row cannot hide the others.
+pub async fn list_reverse_proxies(pool: &SqlitePool) -> Result<Vec<(String, String)>, StateError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT domain, proxy_upstream_url FROM hostings \
+          WHERE kind = 'reverse_proxy' AND state != 'trashed' \
+            AND proxy_upstream_url IS NOT NULL AND proxy_upstream_url != '' \
+          ORDER BY domain",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// Set the hosting kind + upstream URL on an existing row.
 /// `proxy_url` must be Some when `kind == "reverse_proxy"`, None otherwise.
 pub async fn set_kind(

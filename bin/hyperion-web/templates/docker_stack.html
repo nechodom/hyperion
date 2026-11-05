@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} · Docker · Hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>{{ name }} <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ node_label }}</span></h1>
+    <div class="subtitle">Containers of this stack as of the node's last look, {{ read }}.</div>
+    <nav class="svc-jump small" aria-label="Back">
+      <a href="/docker">← All stacks</a>
+    </nav>
+  </div>
+</div>
+
+{% if let Some(err) = daemon_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">Docker is not answering on this node: {{ err }} What follows is what it said last.</div>
+  </div>
+{% endif %}
+
+<div class="svc-verdict {{ tone }}">
+  <span class="dot"></span>
+  <span>{{ state_label }}</span>
+  {% if !summary.is_empty() %}<span class="svc-counts small">{{ summary }}</span>{% endif %}
+</div>
+
+{% if !gone.is_empty() %}
+<div class="group">
+  <div class="item svc-row">
+    <div class="svc-main">
+      <div class="svc-title"><strong>{{ gone }}</strong></div>
+      <div class="text-soft small">Hyperion remembers this stack and has told the administrators it vanished. Forgetting clears that record and its alert; no container, image or volume is touched.</div>
+    </div>
+    {% if can_forget %}{% if let Some(f) = forget_action %}
+    <div class="svc-actions">
+      <form method="post" action="{{ f }}"
+            data-confirm-title="Forget {{ name }}"
+            data-confirm-body="Clears Hyperion's record of this stack and its alert. No container, image or volume is touched. If the stack comes back it is picked up again."
+            data-confirm-confirm-label="Forget"
+            data-confirm-variant="danger">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small" type="submit">Forget</button>
+      </form>
+    </div>
+    {% endif %}{% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if !containers.is_empty() %}
+<div class="group">
+  <div class="ghead">Containers{% if !stats_note.is_empty() %}<span class="ghead-note">{{ stats_note }}</span>{% endif %}</div>
+  <div class="table-wrap">
+    <table class="stats-table">
+      <thead><tr><th>Container</th><th>State</th><th>Image</th><th class="right">Restarts</th><th class="hide-on-phone">Started</th><th class="hide-on-phone">Ports</th><th class="right hide-on-phone">CPU</th><th class="right hide-on-phone">Memory</th><th class="right">Log</th></tr></thead>
+      <tbody>
+      {% for c in containers %}
+        <tr>
+          <td>{{ c.name }}{% if !c.service.is_empty() %} <span class="text-soft small">{{ c.service }}</span>{% endif %}</td>
+          <td><span class="pill {{ c.tone }}">{{ c.state }}</span>{% if !c.exit.is_empty() %} <span class="text-soft small">{{ c.exit }}</span>{% endif %}</td>
+          <td><span class="mono small">{{ c.image }}</span>{% if let Some(u) = c.update %}
+            <div class="small"><span class="pill {{ u.tone }}">{{ u.label }}</span>{% if !c.update_checked.is_empty() %} <span class="text-soft">checked {{ c.update_checked }}</span>{% endif %}</div>
+            {% if !c.update_error.is_empty() %}<div class="small" style="color:var(--warn)">The latest check failed: {{ c.update_error }}</div>{% endif %}
+            {% if !c.update_reason.is_empty() %}<div class="text-soft small">{{ c.update_reason }}</div>{% endif %}
+          {% endif %}</td>
+          <td class="right numeric">{{ c.restarts }}</td>
+          <td class="hide-on-phone">{{ c.started }}</td>
+          <td class="hide-on-phone mono small">{{ c.ports }}</td>
+          <td class="right numeric hide-on-phone">{{ c.cpu }}</td>
+          <td class="right numeric hide-on-phone">{{ c.memory }}</td>
+          <td class="right numeric">{{ c.log }}{% if c.log_warn %}<div class="small" style="color:var(--warn)">no max-size</div>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if update_note %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">Image updates are checked once a day, for the same tag the container runs; a newer version number is not looked for. Hyperion does not pull images or restart containers. Pull and recreate them yourself when you want the update.</p>
+  </div>
+  {% endif %}
+  {% if log_warning %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">A log over 1 GiB with no <code>max-size</code> keeps growing until the disk is full. Set <code>max-size</code> and <code>max-file</code> under <code>logging.options</code> for the service in the compose file.</p>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if let Some(px) = proxy %}
+<div class="group">
+  <div class="ghead">Reverse proxy</div>
+  {% for h in px.hostings %}
+  <div class="item svc-row">
+    <div class="svc-main">
+      <div class="svc-title"><a class="svc-link" href="{{ h.href }}"><strong>{{ h.domain }}</strong></a></div>
+      <div class="text-soft small">A reverse-proxy hosting forwards to a port this stack publishes.</div>
+    </div>
+  </div>
+  {% endfor %}
+  {% for o in px.offers %}
+  <div class="item svc-row">
+    <div class="svc-main">
+      <div class="svc-title"><code>{{ o.url }}</code> <span class="text-soft small">{{ o.what }}</span></div>
+      {% if o.public_bind %}
+      <div class="small" style="color:var(--warn)">Published on every address. Docker sends this traffic around the host's firewall input rules, which is where Hyperion's bans live, so the app can be reached directly and bypass nginx, the WAF and bans. A rule dropping this port in an input chain does not stop a request from outside. Publish it as <code>{{ o.compose_hint }}</code> in the compose file to keep it behind the proxy.</div>
+      {% endif %}
+    </div>
+    {% if px.can_create %}
+    <div class="svc-actions">
+      <a class="btn small primary" href="{{ o.href }}">Add reverse proxy</a>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% for c in px.conflicts %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">Port {{ c.host }} is not offered: nginx on this node already serves ports 80 and 443. Publish this service on another host port, bound to the loopback address, for example <code>127.0.0.1:8080:{{ c.container }}</code>, and proxy to that.</p>
+  </div>
+  {% endfor %}
+  {% for e in px.elsewhere %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">{{ e }} is published on one address only, and a proxy on 127.0.0.1 would not reach it. Publish it on <code>127.0.0.1</code> as well to proxy to it.</p>
+  </div>
+  {% endfor %}
+  {% if px.offers.is_empty() && px.conflicts.is_empty() && px.elsewhere.is_empty() %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">No published port that a proxy can use. Publish one on the loopback address in the compose file, for example <code>ports: ["127.0.0.1:8080:80"]</code>, and it is offered here. Hyperion never proxies to a container address, because that changes every time the container is recreated.</p>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if let Some(logs) = logs %}
+{% include "_docker_logs.html" %}
+{% endif %}
+
+{% if let Some(d) = disk %}
+<div class="group">
+  <div class="ghead">Disk used by Docker on {{ node_label }}<span class="ghead-note">read {{ d.read }}</span></div>
+  <div class="item">
+    <div class="svc-facts small" style="margin:0"><span>Images {{ d.images }}</span><span>Volumes {{ d.volumes }}</span><span>Build cache {{ d.build_cache }}</span></div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

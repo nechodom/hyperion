@@ -124,4 +124,41 @@
     </details>
   </div>
 </fieldset>
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Docker<span class="scope-tag" title="Turned on for the cluster here, then per node on the Docker page">Master</span></div>
+  <div class="item" id="docker-module">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Docker monitoring</h3>
+      {% if docker.error.is_some() %}<span class="pill warn">unknown</span>
+      {% else if docker.installed %}<span class="pill ok">on</span>
+      {% else %}<span class="pill muted">off</span>{% endif %}
+    </div>
+    {% if let Some(e) = docker.error %}
+    <p class="chk-note tone-warn" style="margin:0.4rem 0 0">The master could not say whether it is on ({{ e }}).</p>
+    {% else if docker.installed %}
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      The <a href="/docker">Docker</a> page lists the stacks on {{ docker.nodes }} node{% if docker.nodes != 1 %}s{% endif %}.
+      Turn it on for more nodes there. Removing it asks every node to drop what Hyperion kept about Docker; Docker itself is never touched.
+    </p>
+    <form method="post" action="/docker/remove-cluster" style="margin-top:0.9rem"
+          data-confirm-title="Remove the Docker module"
+          data-confirm-body="Every node is asked to delete what Hyperion kept about Docker: remembered stacks, open alerts, cached disk figures, image-update answers and restart-loop history. URL checks and their history are deleted too. Docker, its containers, images and volumes are left alone. A node that does not answer stays listed and the module stays on until it is removed there."
+          data-confirm-confirm-label="Remove"
+          data-confirm-variant="danger">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="item-actions"><button class="btn" type="submit">Remove the module</button></div>
+    </form>
+    {% else %}
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      Watches the Docker Compose stacks on your nodes and tells you when one stops, restarts in a loop or runs out of memory.
+      Read-only: Hyperion never starts, stops or changes a container. Turning it on adds a Docker page; each node is then
+      switched on separately, and Docker has to be installed there already.
+    </p>
+    <form method="post" action="/docker/install-cluster" style="margin-top:0.9rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="item-actions"><button class="btn primary" type="submit">Turn on Docker monitoring</button></div>
+    </form>
+    {% endif %}
+  </div>
+</fieldset>
 {% endblock %}

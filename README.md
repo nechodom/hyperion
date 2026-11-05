@@ -144,7 +144,8 @@ install to sites that are running and backed up:
 - **Create in one step.** A type-first "Add a website" flow for WordPress, plain
   PHP, static sites and reverse proxies (Node.js, Python, Docker or any
   upstream). Linux user, PHP-FPM pool, database, vhost and certificate are
-  created in one transaction; a failure undoes the finished steps.
+  created in one transaction; a failure undoes the finished steps. A reverse
+  proxy can start from a stack the Docker module found, with its port filled in.
 - **PHP 8.1–8.4 side by side**, per-site PHP settings, static-to-PHP
   conversion, www / non-www canonical redirects, HSTS, FastCGI cache, a
   maintenance page, and a custom nginx snippet (raw nginx is admin-only).
@@ -257,6 +258,10 @@ install to sites that are running and backed up:
   sampled every 5 minutes, a realtime network graph, and per-site resource use
   with a period picker. Per-site CPU comes from a tracker fed every 10 seconds.
 - **HTTP uptime monitoring** per site, with every monitored site on one page.
+- An optional **Docker module** for the Compose stacks on your nodes: status,
+  logs, restart-loop and unhealthy alerts, image update notices and URL checks
+  that run from the master. It is read-only and Docker has to be installed
+  already. See [Docker monitoring](docs/RUNBOOK.md#docker-monitoring).
 - OOM kills, a read-only root filesystem, pending OS updates and a needed
   reboot are all reported.
 - A **Service health** page with the state of every system service across all
