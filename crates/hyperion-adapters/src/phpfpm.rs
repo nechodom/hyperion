@@ -47,6 +47,16 @@ impl<'a> PoolInput<'a> {
         }
     }
 
+    /// Render with a site's stored limits. The one way in, so every writer
+    /// produces the same file for the same values.
+    pub fn with_limits(mut self, limits: PoolLimits) -> Self {
+        self.memory_mb = limits.memory_mb.max(16) as u32;
+        self.max_exec_secs = limits.max_exec_secs.max(1) as u32;
+        self.max_children = limits.max_children.max(1) as u32;
+        self.max_requests = limits.max_requests.max(0) as u32;
+        self
+    }
+
     /// Convenience: copy `defaults()` but override socket owner/group.
     pub fn defaults_with_owner(
         system_user: &'a str,
@@ -61,6 +71,34 @@ impl<'a> PoolInput<'a> {
             ..Self::defaults(system_user, domain, php_version)
         }
     }
+}
+
+/// What the running master has to do to serve a pool as it now is on disk.
+/// Ordered: a restart reads everything a reload would, so a version gets the
+/// strongest thing any of its pools asked for, once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum FpmApply {
+    #[default]
+    Nothing,
+    Reload,
+    Restart,
+}
+
+/// A pool's listen socket compared with the owner its config asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketState {
+    Current,
+    Missing,
+    Stale,
+}
+
+/// The stored per-site limits a pool is rendered with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolLimits {
+    pub memory_mb: i64,
+    pub max_exec_secs: i64,
+    pub max_children: i64,
+    pub max_requests: i64,
 }
 
 #[derive(Template)]
@@ -261,14 +299,98 @@ pub fn socket_parent_dir(php_version: PhpVersion) -> PathBuf {
     PathBuf::from(format!("/run/php/{}", php_version.as_str()))
 }
 
+/// The socket a pool listens on: `listen =` in the pool template.
+pub fn pool_socket_path(php_version: PhpVersion, system_user: &str) -> PathBuf {
+    socket_parent_dir(php_version).join(format!("{system_user}.sock"))
+}
+
+/// `found` and `want` are (uid, gid). An owner that cannot be looked up counts
+/// as current: restarting FPM cuts every site on the version, too high a price
+/// for a guess.
+pub fn socket_state(found: Option<(u32, u32)>, want: Option<(u32, u32)>) -> SocketState {
+    match (found, want) {
+        (None, _) => SocketState::Missing,
+        (Some(found), Some(want)) if found != want => SocketState::Stale,
+        (Some(_), _) => SocketState::Current,
+    }
+}
+
+/// What the master must do for one pool. Only a restart fixes a socket's
+/// owner: FPM inherits its bound sockets across a reload and never chowns them
+/// again. A missing socket means the master never loaded this pool, or is not
+/// running, and [`reload`] brings up either.
+pub fn apply_for_pool(pool_changed: bool, socket: SocketState) -> FpmApply {
+    match socket {
+        SocketState::Stale => FpmApply::Restart,
+        SocketState::Missing => FpmApply::Reload,
+        SocketState::Current if pool_changed => FpmApply::Reload,
+        SocketState::Current => FpmApply::Nothing,
+    }
+}
+
+/// `getent` the id of an account or group: field 3 in both databases.
+async fn account_id(database: &str, name: &str) -> Option<u32> {
+    let out = cmd::run("/usr/bin/getent", &[database, name]).await.ok()?;
+    out.split(':').nth(2)?.trim().parse().ok()
+}
+
+async fn pool_socket_state(input: &PoolInput<'_>) -> SocketState {
+    use std::os::unix::fs::MetadataExt;
+    let path = pool_socket_path(input.php_version, input.system_user);
+    let Ok(meta) = tokio::fs::metadata(&path).await else {
+        return SocketState::Missing;
+    };
+    let want = account_id("passwd", input.listen_owner)
+        .await
+        .zip(account_id("group", input.listen_group).await);
+    socket_state(Some((meta.uid(), meta.gid())), want)
+}
+
 /// Render + atomic-write + reload. Idempotent.
+pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError> {
+    write_pool(input).await?;
+    reload(input.php_version).await?;
+    Ok(pool_path(input))
+}
+
+/// Bring the pool file up to date and say what the master has to do about it,
+/// without doing it. For the agent's start, which goes over every pool: the
+/// caller signals each version once, after the last pool, and not at all when
+/// nothing changed.
+pub async fn sync_pool(input: &PoolInput<'_>) -> Result<FpmApply, AdapterError> {
+    let changed = write_pool(input).await?;
+    Ok(apply_for_pool(changed, pool_socket_state(input).await))
+}
+
+/// Carry out what [`sync_pool`] asked for.
+///
+/// Never follow a reload with a restart without waiting: php-fpm's handler
+/// only queues a SIGTERM in its signal pipe, and if that lands in the
+/// milliseconds before the re-exec a reload ends in, `exec` throws the pipe
+/// away. The new master runs on knowing nothing about it, systemd sits in
+/// `stop-sigterm` for its 90 s timeout, then SIGKILLs it.
+pub async fn apply(php_version: PhpVersion, what: FpmApply) -> Result<(), AdapterError> {
+    match what {
+        FpmApply::Nothing => Ok(()),
+        FpmApply::Reload => reload(php_version).await,
+        FpmApply::Restart => {
+            let svc = format!("{}.service", php_version.service_name());
+            cmd::run("/usr/bin/systemctl", &["restart", &svc])
+                .await
+                .map(|_| ())
+        }
+    }
+}
+
+/// Write the pool, leaving the running master alone. Returns whether anything
+/// the master reads changed.
 ///
 /// Before writing the pool config we create `/run/php/<ver>/` (if it
 /// doesn't already exist) at mode 0755, owned by root. PHP-FPM master
 /// runs as root and opens the listen socket — we then chown the socket
 /// file itself to www-data:www-data via the `listen.owner/listen.group`
 /// directives in the pool template.
-pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError> {
+async fn write_pool(input: &PoolInput<'_>) -> Result<bool, AdapterError> {
     // Make sure the socket's parent dir exists BEFORE we hand the pool
     // config to PHP-FPM. Mode 0755 = world-traversable; nginx
     // (www-data) needs the x-bit to reach the socket file inside.
@@ -293,9 +415,13 @@ pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError>
     ensure_slowlog_dir().await?;
     // Node-wide OPcache sizing for this PHP version. Best-effort: a node
     // that cannot write it keeps the distro defaults, which still work.
-    if let Err(e) = ensure_opcache_ini(input.php_version).await {
-        tracing::warn!(error = %e, version = input.php_version.as_str(), "opcache ini not written");
-    }
+    let opcache_changed = match ensure_opcache_ini(input.php_version).await {
+        Ok(changed) => changed,
+        Err(e) => {
+            tracing::warn!(error = %e, version = input.php_version.as_str(), "opcache ini not written");
+            false
+        }
+    };
     // Startup only covers versions installed at the time; a version installed
     // later gets this with its first pool. Best-effort like the OPcache ini.
     if let Err(e) = ensure_oom_policy_dropin(input.php_version).await {
@@ -312,25 +438,29 @@ pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(AdapterError::Io(e)),
     };
-    atomic_write(&path, body.as_bytes(), 0o644).await?;
+    let pool_changed = backup.as_deref() != Some(body.as_bytes());
+    if pool_changed {
+        atomic_write(&path, body.as_bytes(), 0o644).await?;
+    }
     // Defense in depth: `php-fpm<ver> -t` parses the WHOLE pool dir
     // and exits non-zero on any syntax error, with the file path +
     // line number in stderr. If our just-written file is bad, restore
     // the previous one (or remove it on fresh creates) so the live
     // FPM daemon keeps serving every other hosting on this version.
     if let Err(e) = test_config(input.php_version).await {
-        match backup {
-            Some(prev) => {
-                let _ = atomic_write(&path, &prev, 0o644).await;
-            }
-            None => {
-                let _ = tokio::fs::remove_file(&path).await;
+        if pool_changed {
+            match backup {
+                Some(prev) => {
+                    let _ = atomic_write(&path, &prev, 0o644).await;
+                }
+                None => {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
             }
         }
         return Err(e);
     }
-    reload(input.php_version).await?;
-    Ok(path)
+    Ok(pool_changed || opcache_changed)
 }
 
 /// `/etc/php/<ver>/fpm/conf.d/90-hyperion-opcache.ini`. Loaded after the
@@ -761,6 +891,76 @@ pub async fn preflight_facts() -> hyperion_types::fpm_own::PreflightFacts {
 
 #[cfg(test)]
 mod tests {
+
+    /// A pool changing needs a reload, a socket with the wrong owner needs a
+    /// restart (FPM inherits the bound socket across a reload and never
+    /// chowns it again), and a pool in order needs nothing at all.
+    #[test]
+    fn a_pool_asks_for_only_what_it_needs() {
+        use FpmApply::{Nothing, Reload, Restart};
+        use SocketState::{Current, Missing, Stale};
+        for (changed, socket, want) in [
+            (false, Current, Nothing),
+            (true, Current, Reload),
+            // On disk but not loaded (an agent killed between its write and
+            // its reload), or FPM down: reload brings up either.
+            (false, Missing, Reload),
+            (true, Missing, Reload),
+            (false, Stale, Restart),
+            (true, Stale, Restart),
+        ] {
+            assert_eq!(
+                apply_for_pool(changed, socket),
+                want,
+                "{changed} {socket:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_restart_outranks_a_reload_outranks_nothing() {
+        assert!(FpmApply::Restart > FpmApply::Reload);
+        assert!(FpmApply::Reload > FpmApply::Nothing);
+        assert_eq!(FpmApply::default(), FpmApply::Nothing);
+    }
+
+    #[test]
+    fn socket_state_compares_owner_and_group() {
+        let www = Some((33, 33));
+        assert_eq!(socket_state(Some((33, 33)), www), SocketState::Current);
+        assert_eq!(socket_state(Some((0, 33)), www), SocketState::Stale);
+        assert_eq!(socket_state(Some((33, 0)), www), SocketState::Stale);
+        assert_eq!(socket_state(None, www), SocketState::Missing);
+        // An owner that cannot be looked up is no reason to cut every site.
+        assert_eq!(socket_state(Some((33, 33)), None), SocketState::Current);
+        assert_eq!(socket_state(None, None), SocketState::Missing);
+    }
+
+    /// The owner check stats this path, so it has to be the socket FPM binds.
+    #[test]
+    fn socket_path_is_the_one_the_pool_listens_on() {
+        let input = PoolInput::defaults("site_user", "ex.cz", PhpVersion::V8_3);
+        let path = pool_socket_path(input.php_version, input.system_user);
+        let line = format!("listen = {}\n", path.display());
+        assert!(render(&input).expect("render").contains(&line), "{line}");
+    }
+
+    /// One way into the limits, so a boot render and a panel save of the same
+    /// values produce the same file. If they differed, every agent start would
+    /// find every pool "changed" and reload.
+    #[test]
+    fn limits_clamp_the_same_for_every_writer() {
+        let input = PoolInput::defaults("u", "ex.cz", PhpVersion::V8_3).with_limits(PoolLimits {
+            memory_mb: 1,
+            max_exec_secs: 0,
+            max_children: 0,
+            max_requests: -1,
+        });
+        assert_eq!(input.memory_mb, 16);
+        assert_eq!(input.max_exec_secs, 1);
+        assert_eq!(input.max_children, 1);
+        assert_eq!(input.max_requests, 0);
+    }
 
     /// One OOM-killed worker must not stop the FPM master every other site
     /// on this version depends on. Exact match: a stray `MemoryMax=` or

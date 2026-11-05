@@ -1194,14 +1194,48 @@ impl AdapterPort for RealAdapter {
             ver,
             &self.nginx_user,
             &self.nginx_user,
-        );
+        )
+        .with_limits(hyperion_adapters::phpfpm::PoolLimits {
+            memory_mb: php_memory_mb,
+            max_exec_secs: php_max_exec_secs,
+            max_children: php_max_children,
+            max_requests: php_max_requests,
+        });
         input.also_serves = &others;
-        input.memory_mb = php_memory_mb.max(16) as u32;
-        input.max_exec_secs = php_max_exec_secs.max(1) as u32;
-        input.max_children = php_max_children.max(1) as u32;
-        input.max_requests = php_max_requests.max(0) as u32;
         hyperion_adapters::phpfpm::ensure_pool(&input).await?;
         Ok(())
+    }
+
+    async fn fpm_sync_pool(
+        &self,
+        system_user: &str,
+        domain: &str,
+        version: PhpVersion,
+        limits: Option<hyperion_adapters::phpfpm::PoolLimits>,
+    ) -> Result<hyperion_adapters::phpfpm::FpmApply, AdapterError> {
+        let others = self
+            .others_on_php_pool(system_user, domain, version)
+            .await?;
+        let mut input = hyperion_adapters::phpfpm::PoolInput::defaults_with_owner(
+            system_user,
+            domain,
+            version,
+            &self.nginx_user,
+            &self.nginx_user,
+        );
+        if let Some(limits) = limits {
+            input = input.with_limits(limits);
+        }
+        input.also_serves = &others;
+        hyperion_adapters::phpfpm::sync_pool(&input).await
+    }
+
+    async fn fpm_apply(
+        &self,
+        version: PhpVersion,
+        what: hyperion_adapters::phpfpm::FpmApply,
+    ) -> Result<(), AdapterError> {
+        hyperion_adapters::phpfpm::apply(version, what).await
     }
 
     async fn db_lock(&self, engine: DbProvision, db_user: &str) -> Result<(), AdapterError> {
