@@ -7976,8 +7976,182 @@ async fn stack_and_list_show_the_hosting_that_proxies_to_it() {
             page.contains("href=\"/hostings/app.example.cz\""),
             "{uri}: {page}"
         );
-        assert!(!page.contains("other.example.cz"), "{uri}");
+        assert!(
+            !page.contains("href=\"/hostings/other.example.cz\""),
+            "{uri}"
+        );
     }
+}
+
+/// Where a hosting forwards to now, read from the agent.
+async fn docker_upstream_of(sock: &std::path::Path, domain: &str) -> Option<String> {
+    match hyperion_rpc_client::call(
+        sock,
+        DockerReq::HostingGet(hyperion_rpc::wire::HostingSelector::Domain(
+            hyperion_validate::Domain::parse(domain).expect("domain"),
+        )),
+    )
+    .await
+    .expect("get")
+    {
+        DockerResp::HostingGet(d) => d.proxy_upstream_url,
+        other => panic!("unexpected get: {other:?}"),
+    }
+}
+
+/// Where a redirect goes.
+fn docker_location(resp: &axum::response::Response) -> String {
+    resp.headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[tokio::test]
+async fn an_existing_reverse_proxy_can_be_pointed_at_a_stack() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(proxy_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    docker_proxy_hosting(&sock, "old.example.cz", "http://127.0.0.1:9000").await;
+    docker_proxy_hosting(&sock, "app.example.cz", "http://127.0.0.1:18080").await;
+    acme_ssl_hosting(&sock, "plain.example.cz").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    let action = "/docker/local/loop/link-proxy";
+    let (st, page) = acme_dns_get(&app, &cookie, "/docker/local/loop").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(page.contains(&format!("action=\"{action}\"")), "{page}");
+    assert!(page.contains("<option value=\"old.example.cz\""), "{page}");
+    assert!(
+        !page.contains("<option value=\"app.example.cz\""),
+        "already forwards here: {page}"
+    );
+    assert!(
+        !page.contains("<option value=\"plain.example.cz\""),
+        "not a reverse proxy: {page}"
+    );
+    let csrf = extract_csrf_named(&page, action);
+
+    // A port the stack does not offer is refused, and nothing changes.
+    for port in ["9999", "80", "5353", "x"] {
+        let resp = acme_dns_post(
+            &app,
+            &cookie,
+            action,
+            format!("_csrf={csrf}&hosting=old.example.cz&port={port}"),
+        )
+        .await;
+        let to = docker_location(&resp);
+        assert!(
+            to.starts_with("/docker/local/loop?flash_error="),
+            "{port}: {to}"
+        );
+    }
+    // Only a reverse proxy can be pointed somewhere.
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        action,
+        format!("_csrf={csrf}&hosting=plain.example.cz&port=18080"),
+    )
+    .await;
+    assert!(
+        docker_location(&resp).starts_with("/docker/local/loop?flash_error="),
+        "{}",
+        docker_location(&resp)
+    );
+    assert_eq!(
+        docker_upstream_of(&sock, "old.example.cz").await.as_deref(),
+        Some("http://127.0.0.1:9000")
+    );
+
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        action,
+        format!("_csrf={csrf}&hosting=old.example.cz&port=18080"),
+    )
+    .await;
+    let to = docker_location(&resp);
+    assert!(to.starts_with("/docker/local/loop?flash="), "{to}");
+    assert!(to.contains("old.example.cz"), "{to}");
+    // The agent stores the upstream as it re-serializes it.
+    assert_eq!(
+        docker_upstream_of(&sock, "old.example.cz")
+            .await
+            .as_deref()
+            .map(|u| u.trim_end_matches('/')),
+        Some("http://127.0.0.1:18080")
+    );
+
+    // From then on it is one of the stack's hostings, and the flash says so.
+    let (_, page) = acme_dns_get(&app, &cookie, &to).await;
+    assert!(page.contains("href=\"/hostings/old.example.cz\""), "{page}");
+    assert!(page.contains("flash success"), "{page}");
+    assert!(!page.contains("<option value=\"old.example.cz\""), "{page}");
+}
+
+#[tokio::test]
+async fn pointing_a_proxy_needs_the_edit_config_capability() {
+    use hyperion_state::capabilities::Capability;
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(proxy_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    docker_proxy_hosting(&sock, "old.example.cz", "http://127.0.0.1:9000").await;
+    let action = "/docker/local/loop/link-proxy";
+
+    let reader = docker_caps_user(&app, &sock, "dk-link-reader", &[Capability::DockerView]).await;
+    let (st, page) = acme_dns_get(&app, &reader, "/docker/local/loop").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(!page.contains(&format!("action=\"{action}\"")), "{page}");
+    let csrf = acme_ssl_csrf(&app, &reader).await;
+    let resp = acme_dns_post(
+        &app,
+        &reader,
+        action,
+        format!("_csrf={csrf}&hosting=old.example.cz&port=18080"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        docker_upstream_of(&sock, "old.example.cz").await.as_deref(),
+        Some("http://127.0.0.1:9000")
+    );
+
+    let editor = docker_caps_user(
+        &app,
+        &sock,
+        "dk-link-editor",
+        &[Capability::DockerView, Capability::HostingEditConfig],
+    )
+    .await;
+    let (_, page) = acme_dns_get(&app, &editor, "/docker/local/loop").await;
+    assert!(page.contains(&format!("action=\"{action}\"")), "{page}");
+
+    // Without DockerView the stack is not theirs to read, so neither is this.
+    let blind = docker_caps_user(
+        &app,
+        &sock,
+        "dk-link-blind",
+        &[Capability::HostingEditConfig],
+    )
+    .await;
+    let csrf = acme_ssl_csrf(&app, &blind).await;
+    let resp = acme_dns_post(
+        &app,
+        &blind,
+        action,
+        format!("_csrf={csrf}&hosting=old.example.cz&port=18080"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        docker_upstream_of(&sock, "old.example.cz").await.as_deref(),
+        Some("http://127.0.0.1:9000")
+    );
 }
 
 #[tokio::test]

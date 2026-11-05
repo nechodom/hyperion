@@ -380,6 +380,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/docker/:node/:project/forget",
             post(handlers::docker::post_forget),
         )
+        .route(
+            "/docker/:node/:project/link-proxy",
+            post(handlers::docker::post_link_proxy),
+        )
         .route("/trash", get(handlers::trash::get_trash))
         .route("/trash/restore", post(handlers::trash::post_trash_restore))
         .route("/trash/purge", post(handlers::trash::post_trash_purge))

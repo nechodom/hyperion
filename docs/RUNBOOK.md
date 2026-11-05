@@ -268,7 +268,8 @@ off until an administrator turns it on, and while it is off no node runs a
   registry.
 - Runs URL checks from the master (below), which replace an external uptime
   tool.
-- Starts a reverse-proxy hosting from a stack that publishes a port.
+- Starts a reverse-proxy hosting from a stack that publishes a port, or points
+  an existing one at it.
 
 It is read-only. Hyperion never starts, stops, restarts, pulls, execs or deletes
 anything in Docker, and it does not install or update Docker. Container
@@ -401,6 +402,13 @@ address, because that changes when the container is recreated. Ports 80 and 443
 are not offered since nginx owns them. To add one, open a stack that publishes
 a port and press **Add reverse proxy**: the new-site form opens with the type,
 upstream and node filled in, and you type the domain.
+
+A reverse-proxy hosting that already exists on the same node can be pointed at
+the stack instead: pick it next to the port and press **Point it here**. Its
+upstream changes to that port, as if you had changed it on the hosting's page,
+and its visitors reach the stack from then on. Only hostings on the stack's own
+node are offered, because `127.0.0.1` on another node is not this stack, and
+only to people allowed to change a hosting's configuration.
 
 ### Troubleshooting
 
