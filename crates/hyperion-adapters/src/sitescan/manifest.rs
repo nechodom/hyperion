@@ -545,15 +545,12 @@ fn split_entry_name(name: &str) -> Result<Option<(&str, &str)>, AdapterError> {
     Ok(Some((top, rest)))
 }
 
-pub(crate) fn manifest_from_zip_with(
+/// Open a package, refused before anything is decompressed if what it declares is
+/// over the caps.
+fn open_package(
     path: &Path,
-    expected: &ComponentKey,
-    source: ManifestSource,
     limits: ZipLimits,
-) -> Result<Manifest, AdapterError> {
-    if expected.kind == ComponentKind::Core {
-        return Err(zip_err("core has no package manifest"));
-    }
+) -> Result<zip::ZipArchive<std::fs::File>, AdapterError> {
     let mut file = std::fs::File::open(path)?;
     // Before the zip crate parses the central directory, whose size is
     // proportional to the entry count a file declares: measured, a 55 MB ZIP
@@ -585,6 +582,59 @@ pub(crate) fn manifest_from_zip_with(
     if declared_total > limits.max_total_bytes {
         return Err(zip_err("uncompressed size over the cap"));
     }
+    Ok(archive)
+}
+
+/// The folder a package unpacks into and the version its own header declares, read
+/// before anything trusts either. A vendor's package has no version to expect until
+/// this says so; `slug` picks which file holds a plugin's header.
+pub fn package_identity(
+    path: &Path,
+    kind: ComponentKind,
+    slug: &str,
+) -> Result<(String, String), AdapterError> {
+    if kind == ComponentKind::Core {
+        return Err(zip_err("core has no package manifest"));
+    }
+    let mut archive = open_package(path, ZipLimits::default())?;
+    let mut top_dir: Option<String> = None;
+    let mut index: BTreeMap<String, usize> = BTreeMap::new();
+    for i in 0..archive.len() {
+        let entry = archive.by_index_raw(i).map_err(zip_err)?;
+        let name = entry.name().to_string();
+        let Some((top, rest)) = split_entry_name(&name)? else {
+            continue;
+        };
+        match &top_dir {
+            None => top_dir = Some(top.to_string()),
+            Some(t) if t == top => {}
+            Some(_) => return Err(zip_err("more than one top-level folder")),
+        }
+        if !entry.is_dir() && !entry.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
+            index.insert(rest.to_string(), i);
+        }
+    }
+    let top = top_dir.ok_or_else(|| zip_err("no files"))?;
+    let key = ComponentKey {
+        kind,
+        slug: slug.to_string(),
+        version: String::new(),
+        locale: None,
+    };
+    let version = package_version(&mut archive, &index, &key)?;
+    Ok((top, version))
+}
+
+pub(crate) fn manifest_from_zip_with(
+    path: &Path,
+    expected: &ComponentKey,
+    source: ManifestSource,
+    limits: ZipLimits,
+) -> Result<Manifest, AdapterError> {
+    if expected.kind == ComponentKind::Core {
+        return Err(zip_err("core has no package manifest"));
+    }
+    let mut archive = open_package(path, limits)?;
 
     let mut top_dir: Option<String> = None;
     let mut files: BTreeMap<String, Digest> = BTreeMap::new();

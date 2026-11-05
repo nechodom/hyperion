@@ -227,6 +227,34 @@ pub trait AdapterPort: Send + Sync {
     /// Drop cached manifests nothing has read for 90 days.
     async fn site_scan_evict_manifests(&self, _cache_dir: &std::path::Path) {}
 
+    /// The `DB_NAME` and table prefix the docroot's `wp-config.php` claims. It's the
+    /// tenant's file: neither means anything until checked against what the
+    /// hosting owns.
+    async fn site_scan_wp_config_db(&self, _root: &std::path::Path) -> Option<(String, String)> {
+        None
+    }
+
+    /// An update transient from a database the caller has confirmed the hosting
+    /// owns.
+    async fn site_scan_read_option(
+        &self,
+        _db: &str,
+        _prefix: &str,
+        _option: &str,
+    ) -> Result<Option<String>, AdapterError> {
+        Err(AdapterError::Other("no database here".into()))
+    }
+
+    /// Download a vendor's package and cache its manifest. The agent does this, not
+    /// the worker, which has no network.
+    async fn site_scan_vendor_fetch(
+        &self,
+        _package: &hyperion_adapters::sitescan::vendor::PlannedPackage,
+        _cache_dir: &std::path::Path,
+    ) -> Result<(), hyperion_adapters::sitescan::vendor::VendorError> {
+        Err(hyperion_adapters::sitescan::vendor::VendorError::Local)
+    }
+
     /// Move one file out of a tenant's tree, into quarantine.
     async fn site_scan_quarantine(
         &self,
@@ -863,6 +891,8 @@ pub struct SiteScanShared {
     pub(crate) record: tokio::sync::Mutex<()>,
     /// Someone asked for a scan: the tick needn't wait out its ten minutes.
     pub(crate) wake: tokio::sync::Notify,
+    /// Vendor packages left to download until the next tick starts.
+    pub(crate) vendor_budget: std::sync::atomic::AtomicU32,
 }
 
 impl Default for SiteScanShared {
@@ -873,6 +903,7 @@ impl Default for SiteScanShared {
             clamav: Default::default(),
             record: Default::default(),
             wake: Default::default(),
+            vendor_budget: scan_queue::MAX_VENDOR_PER_TICK.into(),
         }
     }
 }

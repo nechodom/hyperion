@@ -10,6 +10,7 @@ pub mod quarantine;
 pub mod rules;
 pub mod runner;
 pub mod scan;
+pub mod vendor;
 pub mod walk;
 
 pub use scan::own_manifest;

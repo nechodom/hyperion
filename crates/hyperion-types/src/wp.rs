@@ -625,6 +625,16 @@ pub struct ScanCoverage {
     /// What couldn't be looked at. Non-empty means the scan is partial.
     #[serde(default)]
     pub partial_reasons: Vec<String>,
+    /// Hosts this site's package URLs name that aren't on the vendor list, so the
+    /// list can grow from real data. Validated hostnames, at most 20, for the
+    /// operator: no card shows them to a customer.
+    #[serde(default)]
+    pub unknown_vendor_hosts: Vec<String>,
+    /// Why this site's premium plugins and themes weren't compared with their
+    /// vendors' packages. Not a gap in the scan, so not a partial reason: they stay
+    /// watched like any custom code, and aren't counted as verified.
+    #[serde(default)]
+    pub vendor_note: Option<String>,
 }
 
 /// Result of a WordPress **integrity** scan — the sibling of
@@ -834,7 +844,20 @@ impl WpIntegrityScanResult {
     pub fn listed_findings(&self) -> impl Iterator<Item = &SiteFileFinding> {
         self.findings
             .iter()
-            .filter(|f| !f.is_comparison() || f.rule_id.is_some())
+            .filter(|f| !f.is_comparison() || f.rule_id.is_some() || self.held_back(f))
+    }
+
+    /// A plugin's difference from its vendor's package during the pilot: the new
+    /// layer's, so the plugin section (which alerts and reports read) doesn't hold
+    /// it and this list has to. A theme's section is the panel's alone and keeps its.
+    fn held_back(&self, f: &SiteFileFinding) -> bool {
+        self.report_only
+            && f.is_comparison()
+            && f.source_label.as_deref() == Some("vendor package")
+            && !self
+                .themes_failed
+                .iter()
+                .any(|t| f.component.as_deref() == Some(t.slug.as_str()))
     }
 
     /// The number in the headline: `shown_finding_count`, but never below what
@@ -852,7 +875,7 @@ impl WpIntegrityScanResult {
             + self.theme_issue_count()
             + self
                 .listed_findings()
-                .filter(|f| !f.is_comparison())
+                .filter(|f| !f.is_comparison() || self.held_back(f))
                 .count()
     }
 
@@ -1097,6 +1120,42 @@ mod tests {
         let kinds: Vec<FindingKind> = r.trust_all_items().map(|f| f.kind).collect();
         assert_eq!(kinds, [FindingKind::BaselineChange]);
         assert!(file(FindingKind::TooLargeToInspect).can_trust());
+    }
+
+    #[test]
+    fn a_vendor_difference_in_the_pilot_is_counted_once_on_the_card() {
+        let vendor = |rel: &str, component: &str| SiteFileFinding {
+            rel: rel.into(),
+            kind: FindingKind::UpstreamModified,
+            component: Some(component.into()),
+            source_label: Some("vendor package".into()),
+            ..Default::default()
+        };
+        let mut r = WpIntegrityScanResult {
+            native_scan_ran: true,
+            wp_cli_ok: true,
+            report_only: true,
+            findings: vec![vendor("a.php", "pro"), vendor("t.php", "divi")],
+            themes_failed: vec![WpIntegrityPluginResult {
+                slug: "divi".into(),
+                version: "1".into(),
+                issues: vec![WpIntegrityFileIssue {
+                    path: "t.php".into(),
+                    message: "x".into(),
+                }],
+            }],
+            ..Default::default()
+        };
+        // The theme's section shows its own, the list shows the plugin's.
+        let listed: Vec<&str> = r.listed_findings().map(|f| f.rel.as_str()).collect();
+        assert_eq!(listed, ["a.php"]);
+        assert_eq!(r.shown_finding_count(), 2);
+        assert_eq!(r.headline_count(), 2);
+        assert_eq!(r.verdict(), ScanVerdict::Findings);
+        assert_eq!(r.total_findings(), 0, "what alerts and reports read");
+        // Once live it's in the plugin section instead, like any comparison.
+        r.report_only = false;
+        assert_eq!(r.listed_findings().count(), 0);
     }
 
     #[test]

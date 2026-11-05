@@ -544,8 +544,9 @@ fn no_php_is_executed() {
             continue;
         }
         assert_eq!(spawns, curl, "{} spawns something else", path.display());
+        // `Stdio` is how a spawn already counted above is wired up.
         assert_eq!(
-            code.matches("process::").count(),
+            code.matches("process::").count() - code.matches("process::Stdio").count(),
             curl,
             "{} reaches for processes",
             path.display()

@@ -2045,6 +2045,7 @@ impl<'a> Scan<'a> {
             upstream_ran: ran,
             no_upstream: !d.is_wordpress,
             partial_reasons: reasons,
+            ..Default::default()
         };
         SiteScanOutcome {
             upstream,

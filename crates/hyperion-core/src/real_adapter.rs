@@ -332,13 +332,39 @@ impl AdapterPort for RealAdapter {
         hyperion_adapters::sitescan::manifest::wporg_slug_known(kind, slug, cache_dir).await
     }
 
+    async fn site_scan_wp_config_db(&self, root: &std::path::Path) -> Option<(String, String)> {
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::vendor::read_wp_config_db(&root)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn site_scan_read_option(
+        &self,
+        db: &str,
+        prefix: &str,
+        option: &str,
+    ) -> Result<Option<String>, AdapterError> {
+        hyperion_adapters::mariadb::read_option(db, prefix, option).await
+    }
+
+    async fn site_scan_vendor_fetch(
+        &self,
+        package: &hyperion_adapters::sitescan::vendor::PlannedPackage,
+        cache_dir: &std::path::Path,
+    ) -> Result<(), hyperion_adapters::sitescan::vendor::VendorError> {
+        hyperion_adapters::sitescan::vendor::fetch_package(package, cache_dir).await
+    }
+
     async fn site_scan_evict_manifests(&self, cache_dir: &std::path::Path) {
         let cache_dir = cache_dir.to_path_buf();
         let swept = tokio::task::spawn_blocking(move || {
-            hyperion_adapters::sitescan::manifest::evict_stale_manifests(
-                &cache_dir,
-                std::time::SystemTime::now(),
-            )
+            let now = std::time::SystemTime::now();
+            hyperion_adapters::sitescan::vendor::sweep_leftovers(&cache_dir, now);
+            hyperion_adapters::sitescan::manifest::evict_stale_manifests(&cache_dir, now)
         })
         .await
         .unwrap_or(0);

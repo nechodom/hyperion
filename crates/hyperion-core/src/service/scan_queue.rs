@@ -16,6 +16,7 @@ use hyperion_adapters::sitescan::runner::{WorkerJob, WorkerReply};
 use hyperion_adapters::sitescan::scan::{
     ScanInput, ScanMode, SiteScanOutcome, WriterAccepted, WriterKind,
 };
+use hyperion_adapters::sitescan::vendor::{self, VendorError};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -58,6 +59,16 @@ const CORE_HTTP_COST: u32 = 2;
 /// Failures in a row that mean wordpress.org is out of reach. The node's lock is
 /// held meanwhile, and each attempt can take a minute to give up.
 const NETWORK_GIVE_UP: u32 = 3;
+
+/// Vendor packages one site's scan may download. Each can take five minutes, with
+/// the node's lock held.
+const MAX_VENDOR_PER_SITE: u32 = 3;
+/// And all sites together, from one tick to the next.
+pub(super) const MAX_VENDOR_PER_TICK: u32 = 10;
+
+pub(super) const VENDOR_NO_CONFIG: &str = "wp-config.php couldn't be read here, so premium plugins and themes weren't compared with their vendors' packages";
+pub(super) const VENDOR_NOT_OWN_DB: &str = "wp-config.php doesn't name a database of this site's own, so premium plugins and themes weren't compared with their vendors' packages";
+pub(super) const VENDOR_DB_UNREADABLE: &str = "the site's database couldn't be read, so premium plugins and themes weren't compared with their vendors' packages";
 
 // What a reply may hold. An honest worker stays under these by its own limits.
 const MAX_ITEMS: usize = 1000;
@@ -167,6 +178,13 @@ pub(super) struct ManifestPass {
     pub(super) reasons: Vec<String>,
 }
 
+/// What trying the vendors' packages left for the coverage.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct VendorPass {
+    pub(super) unknown_hosts: Vec<String>,
+    pub(super) note: Option<String>,
+}
+
 impl<A: AdapterPort + 'static> HostingService<A> {
     /// Scan the sites someone asked for, then the ones due on this node,
     /// oldest-scanned first, asking again between sites, and tell admins about
@@ -190,6 +208,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         now: i64,
     ) -> Result<i64, RpcError> {
         self.site_scan_evict_daily(now).await;
+        self.site_scan
+            .vendor_budget
+            .store(MAX_VENDOR_PER_TICK, std::sync::atomic::Ordering::SeqCst);
         let started = std::time::Instant::now();
         let mut queue = self.site_scan_due_queue(tz, now).await?;
         // What this tick has answered, so a request that can't be cleared (a
@@ -751,6 +772,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let pass = self
             .site_scan_fetch_manifests(&discovery, &manifests_dir)
             .await;
+        let vendor_pass = self
+            .site_scan_vendor_pass(
+                detail,
+                &discovery,
+                &manifests_dir,
+                pass.known_slugs.as_ref(),
+            )
+            .await;
         let job = WorkerJob::Scan(ScanInput {
             root,
             discovery,
@@ -772,6 +801,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut reasons = pass.reasons;
         reasons.append(&mut outcome.coverage.partial_reasons);
         outcome.coverage.partial_reasons = reasons;
+        // The worker has no say in these: it never saw any of this.
+        outcome.coverage.unknown_vendor_hosts = vendor_pass.unknown_hosts;
+        outcome.coverage.vendor_note = vendor_pass.note;
         clamp_scan_outcome(&mut outcome);
         NativeScan::Ran(outcome)
     }
@@ -919,6 +951,122 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             known_slugs: known,
             reasons,
         }
+    }
+
+    /// Try to get a reference for what wordpress.org doesn't know, from the package
+    /// links WordPress holds for it. What this can't do leaves those components on
+    /// the baseline, and the scan goes on either way.
+    ///
+    /// The database is the only thing here that crosses from a tenant's text to
+    /// root's reach: `wp-config.php` can name anyone's database, so the name counts
+    /// only if it's one this hosting owns.
+    pub(super) async fn site_scan_vendor_pass(
+        &self,
+        detail: &HostingDetail,
+        discovery: &Discovery,
+        cache_dir: &Path,
+        wporg_known: Option<&BTreeSet<String>>,
+    ) -> VendorPass {
+        // Not knowing what wordpress.org knows is not knowing what's premium.
+        let Some(known) = wporg_known else {
+            return VendorPass::default();
+        };
+        let candidates = vendor::vendor_candidates(discovery, known);
+        if candidates.is_empty() {
+            return VendorPass::default();
+        }
+        let refused = |why: &str| VendorPass {
+            note: Some(why.to_string()),
+            ..Default::default()
+        };
+        let own = match databases::mariadb_names_for_hosting(&self.pool, &detail.id).await {
+            Ok(own) if !own.is_empty() => own,
+            Ok(_) => return refused(VENDOR_NOT_OWN_DB),
+            Err(e) => {
+                tracing::warn!(domain = %detail.domain, error = %e, "site scan: databases unreadable");
+                return refused(VENDOR_DB_UNREADABLE);
+            }
+        };
+        let Some((db, prefix)) = self
+            .adapters
+            .site_scan_wp_config_db(Path::new(&detail.root_dir))
+            .await
+        else {
+            return refused(VENDOR_NO_CONFIG);
+        };
+        if !own.contains(&db) {
+            return refused(VENDOR_NOT_OWN_DB);
+        }
+
+        let mut refs = Vec::new();
+        for (option, kind) in [
+            (
+                hyperion_adapters::mariadb::UPDATE_PLUGINS_OPTION,
+                ComponentKind::Plugin,
+            ),
+            (
+                hyperion_adapters::mariadb::UPDATE_THEMES_OPTION,
+                ComponentKind::Theme,
+            ),
+        ] {
+            match self
+                .adapters
+                .site_scan_read_option(&db, &prefix, option)
+                .await
+            {
+                Ok(Some(value)) => refs.extend(vendor::parse_update_transient(&value, kind)),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(domain = %detail.domain, error = %e, "site scan: option unreadable");
+                    return refused(VENDOR_DB_UNREADABLE);
+                }
+            }
+        }
+
+        let dir = cache_dir.to_path_buf();
+        let plan = tokio::task::spawn_blocking(move || {
+            vendor::plan_downloads(refs, &candidates, &dir, std::time::SystemTime::now())
+        })
+        .await
+        .unwrap_or_default();
+        let mut hosts: BTreeSet<String> = plan.unknown_hosts.into_iter().collect();
+        let mut left = MAX_VENDOR_PER_SITE;
+        for package in &plan.fetch {
+            if left == 0 || !self.take_vendor_download() {
+                tracing::debug!(domain = %detail.domain, "site scan: vendor downloads over budget; a later scan continues");
+                break;
+            }
+            left -= 1;
+            match self
+                .adapters
+                .site_scan_vendor_fetch(package, cache_dir)
+                .await
+            {
+                Ok(()) => {}
+                // A vendor's redirect to somewhere nobody listed.
+                Err(VendorError::UnknownHost(host)) => {
+                    hosts.insert(host);
+                }
+                Err(e) => {
+                    tracing::debug!(domain = %detail.domain, error = %e, "site scan: vendor package failed");
+                }
+            }
+        }
+        for host in &hosts {
+            tracing::info!(domain = %detail.domain, %host, "site scan: package URL on a host not on the vendor list");
+        }
+        VendorPass {
+            unknown_hosts: hosts.into_iter().take(vendor::MAX_UNKNOWN_HOSTS).collect(),
+            note: None,
+        }
+    }
+
+    fn take_vendor_download(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.site_scan
+            .vendor_budget
+            .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+            .is_ok()
     }
 
     /// Sweep the manifest cache, under the lock so never beneath a running worker,
@@ -1346,6 +1494,12 @@ pub(super) fn clamp_scan_outcome(o: &mut SiteScanOutcome) {
         c.partial_reasons.push(SITE_SCAN_CUT_SHORT.to_string());
     }
     clip_list(&mut c.partial_reasons, MAX_REASONS, MAX_REASON_BYTES);
+    clip_list(
+        &mut c.unknown_vendor_hosts,
+        vendor::MAX_UNKNOWN_HOSTS,
+        MAX_NAME_BYTES,
+    );
+    clip_opt(&mut c.vendor_note, MAX_REASON_BYTES);
 }
 
 /// What a purged site leaves here: its baseline, its writer's list and its quarantine. Neither may

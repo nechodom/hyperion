@@ -2725,4 +2725,448 @@ mod site_scan {
         assert_eq!(rec.result.core_modified, vec!["wp-login.php"], "kept");
         assert_eq!(rec.clamav_at, now);
     }
+
+    // ---- vendor packages ----
+
+    use crate::service::scan_queue::{
+        VendorPass, VENDOR_DB_UNREADABLE, VENDOR_NOT_OWN_DB, VENDOR_NO_CONFIG,
+    };
+    use hyperion_adapters::sitescan::vendor::{VendorError, MAX_UNKNOWN_HOSTS};
+    use std::collections::BTreeSet;
+
+    const PLUGINS_OPTION: &str = "_site_transient_update_plugins";
+    const THEMES_OPTION: &str = "_site_transient_update_themes";
+
+    fn php(v: &str) -> String {
+        format!("s:{}:\"{v}\";", v.len())
+    }
+
+    /// Hand-written to the shape `wp_update_plugins()` stores; not from a real site.
+    /// Entries are `(slug, version, url)`.
+    fn plugins_transient(
+        response: &[(&str, &str, &str)],
+        no_update: &[(&str, &str, &str)],
+    ) -> String {
+        let list = |entries: &[(&str, &str, &str)]| {
+            let body: String = entries
+                .iter()
+                .map(|(slug, version, url)| {
+                    format!(
+                        r#"{}O:8:"stdClass":3:{{{}{}{}{}{}{}}}"#,
+                        php(&format!("{slug}/{slug}.php")),
+                        php("slug"),
+                        php(slug),
+                        php("new_version"),
+                        php(version),
+                        php("package"),
+                        php(url),
+                    )
+                })
+                .collect();
+            format!("a:{}:{{{body}}}", entries.len())
+        };
+        format!(
+            r#"O:8:"stdClass":2:{{{}{}{}{}}}"#,
+            php("response"),
+            list(response),
+            php("no_update"),
+            list(no_update),
+        )
+    }
+
+    fn known_none() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
+    /// Everything the pass can ask for answered, the options by `plugins`.
+    fn vendor_mocks(
+        plugins: String,
+        fetched: Arc<StdMutex<Vec<(String, String, bool)>>>,
+    ) -> MockAdapterPort {
+        let mut a = happy_mocks();
+        a.expect_site_scan_wp_config_db()
+            .returning(|_| Some(("lm_a".to_string(), "wp_".to_string())));
+        a.expect_site_scan_read_option()
+            .returning(move |db, prefix, option| {
+                assert_eq!((db, prefix), ("lm_a", "wp_"));
+                Ok((option == PLUGINS_OPTION).then(|| plugins.clone()))
+            });
+        a.expect_site_scan_vendor_fetch().returning(move |p, _| {
+            fetched.lock().expect("lock").push((
+                p.slug.clone(),
+                p.version.clone(),
+                p.verifies_today,
+            ));
+            Ok(())
+        });
+        a
+    }
+
+    #[tokio::test]
+    async fn wp_config_naming_another_tenants_db_is_ignored() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        // Another hosting's database, by its exact name.
+        a.expect_site_scan_wp_config_db()
+            .returning(|_| Some(("lm_victim".to_string(), "wp_".to_string())));
+        a.expect_site_scan_read_option().never();
+        a.expect_site_scan_vendor_fetch().never();
+        let s = svc(pool, a);
+        let detail = site_named(&s, "a.test").await;
+        assert_eq!(detail.database.as_ref().expect("db").db_name, "lm_a");
+        let tmp = tempfile::tempdir().expect("tmp");
+        let pass = s
+            .site_scan_vendor_pass(
+                &detail,
+                &discovery_of(vec![plugin("pro")]),
+                tmp.path(),
+                Some(&known_none()),
+            )
+            .await;
+        assert_eq!(pass.note.as_deref(), Some(VENDOR_NOT_OWN_DB));
+        assert!(pass.unknown_hosts.is_empty());
+    }
+
+    /// An imported site with no database row: nothing to hold the file's claim
+    /// against, so the file isn't even asked.
+    #[tokio::test]
+    async fn a_hosting_with_no_database_of_its_own_has_no_vendor_step() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_site_scan_wp_config_db().never();
+        a.expect_site_scan_read_option().never();
+        a.expect_site_scan_vendor_fetch().never();
+        let s = svc(pool, a);
+        s.create(req_no_db("a.test")).await.expect("create");
+        let detail = s
+            .get(HostingSelector::Domain(
+                Domain::parse("a.test").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let tmp = tempfile::tempdir().expect("tmp");
+        let pass = s
+            .site_scan_vendor_pass(
+                &detail,
+                &discovery_of(vec![plugin("pro")]),
+                tmp.path(),
+                Some(&known_none()),
+            )
+            .await;
+        assert_eq!(pass.note.as_deref(), Some(VENDOR_NOT_OWN_DB));
+    }
+
+    #[tokio::test]
+    async fn nothing_is_read_for_a_site_with_no_candidates() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_site_scan_wp_config_db().never();
+        a.expect_site_scan_read_option().never();
+        a.expect_site_scan_vendor_fetch().never();
+        let s = svc(pool, a);
+        let detail = site_named(&s, "a.test").await;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let known: BTreeSet<String> = ["akismet".to_string()].into();
+        let d = discovery_of(vec![plugin("akismet")]);
+        let pass = s
+            .site_scan_vendor_pass(&detail, &d, tmp.path(), Some(&known))
+            .await;
+        assert_eq!(pass, VendorPass::default(), "wordpress.org's to answer for");
+
+        // Not knowing what wordpress.org knows is not knowing what's premium.
+        let d = discovery_of(vec![plugin("pro")]);
+        let pass = s.site_scan_vendor_pass(&detail, &d, tmp.path(), None).await;
+        assert_eq!(pass, VendorPass::default());
+    }
+
+    #[tokio::test]
+    async fn no_update_verifies_current_version_response_only_prepares_next() {
+        let pool = open_memory().await.expect("open");
+        let fetched = Arc::new(StdMutex::new(Vec::new()));
+        let text = plugins_transient(
+            &[("aaa", "2.0", "https://wpml.org/next.zip")],
+            &[("pro", "1.0", "https://my.elementor.com/today.zip?license=K")],
+        );
+        let s = svc(pool, vendor_mocks(text, fetched.clone()));
+        let detail = site_named(&s, "a.test").await;
+        let tmp = tempfile::tempdir().expect("tmp");
+        // `plugin()` is on version 1.0.
+        let d = discovery_of(vec![plugin("aaa"), plugin("pro")]);
+        let pass = s
+            .site_scan_vendor_pass(&detail, &d, tmp.path(), Some(&known_none()))
+            .await;
+        assert_eq!(pass, VendorPass::default());
+        assert_eq!(
+            *fetched.lock().expect("lock"),
+            [
+                ("pro".to_string(), "1.0".to_string(), true),
+                ("aaa".to_string(), "2.0".to_string(), false),
+            ],
+            "today's first"
+        );
+    }
+
+    fn packages(n: usize) -> Vec<(String, String, String)> {
+        (0..n)
+            .map(|i| {
+                (
+                    format!("p{i}"),
+                    "1.0".to_string(),
+                    "https://wpml.org/p.zip".to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn views(p: &[(String, String, String)]) -> Vec<(&str, &str, &str)> {
+        p.iter()
+            .map(|(a, b, c)| (a.as_str(), b.as_str(), c.as_str()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn downloads_stop_at_the_site_and_tick_budgets() {
+        let pool = open_memory().await.expect("open");
+        let fetched = Arc::new(StdMutex::new(Vec::new()));
+        let all = packages(8);
+        let text = plugins_transient(&[], &views(&all));
+        let mut a = vendor_mocks(text, fetched.clone());
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        a.expect_site_scan_worker()
+            .returning(|_| WorkerReply::Failed("not this test's concern".into()));
+        let s = svc(pool, a);
+        let detail = site_named(&s, "a.test").await;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = discovery_of(all.iter().map(|(slug, _, _)| plugin(slug)).collect());
+        let known = known_none();
+        let count = || fetched.lock().expect("lock").len();
+
+        // Three per site's scan, ten until the next tick: 3, 3, 3, 1, then none.
+        for expected in [3, 6, 9, 10, 10] {
+            s.site_scan_vendor_pass(&detail, &d, tmp.path(), Some(&known))
+                .await;
+            assert_eq!(count(), expected);
+        }
+        // Whatever scan spent it, a tick starts with a full budget.
+        s.site_scan_tick_at(&chrono::Utc, 2_000_000)
+            .await
+            .expect("tick");
+        s.site_scan_vendor_pass(&detail, &d, tmp.path(), Some(&known))
+            .await;
+        assert_eq!(count(), 13);
+    }
+
+    #[tokio::test]
+    async fn unknown_hosts_reach_the_coverage_and_are_no_failure() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        let text = plugins_transient(
+            &[],
+            &[
+                (
+                    "aaa",
+                    "1.0",
+                    "https://updates.vendor.example/a.zip?license=K",
+                ),
+                ("pro", "1.0", "https://wpml.org/p.zip"),
+            ],
+        );
+        a.expect_site_scan_wp_config_db()
+            .returning(|_| Some(("lm_a".to_string(), "wp_".to_string())));
+        a.expect_site_scan_read_option()
+            .returning(move |_, _, option| Ok((option == PLUGINS_OPTION).then(|| text.clone())));
+        // The listed host redirected off the list.
+        a.expect_site_scan_vendor_fetch()
+            .times(1)
+            .returning(|_, _| Err(VendorError::UnknownHost("cdn.vendor.example".into())));
+        let s = svc(pool, a);
+        let detail = site_named(&s, "a.test").await;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = discovery_of(vec![plugin("aaa"), plugin("pro")]);
+        let pass = s
+            .site_scan_vendor_pass(&detail, &d, tmp.path(), Some(&known_none()))
+            .await;
+        assert_eq!(
+            pass.unknown_hosts,
+            ["cdn.vendor.example", "updates.vendor.example"]
+        );
+        assert_eq!(pass.note, None, "the step ran");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_database_is_a_note_and_nothing_else() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_site_scan_wp_config_db()
+            .returning(|_| Some(("lm_a".to_string(), "wp_".to_string())));
+        a.expect_site_scan_read_option()
+            .returning(|_, _, _| Err(hyperion_adapters::AdapterError::Other("down".into())));
+        a.expect_site_scan_vendor_fetch().never();
+        let s = svc(pool, a);
+        let detail = site_named(&s, "a.test").await;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = discovery_of(vec![plugin("pro")]);
+        let pass = s
+            .site_scan_vendor_pass(&detail, &d, tmp.path(), Some(&known_none()))
+            .await;
+        assert_eq!(pass.note.as_deref(), Some(VENDOR_DB_UNREADABLE));
+    }
+
+    #[tokio::test]
+    async fn both_transients_are_read_and_a_missing_config_is_a_note() {
+        let pool = open_memory().await.expect("open");
+        let asked = Arc::new(StdMutex::new(Vec::new()));
+        let asked2 = asked.clone();
+        let mut a = happy_mocks();
+        let config = Arc::new(AtomicUsize::new(0));
+        let config2 = config.clone();
+        a.expect_site_scan_wp_config_db().returning(move |_| {
+            // Found once, then gone.
+            (config2.fetch_add(1, Ordering::SeqCst) == 0)
+                .then(|| ("lm_a".to_string(), "wp_".to_string()))
+        });
+        a.expect_site_scan_read_option()
+            .returning(move |_, _, option| {
+                asked2.lock().expect("lock").push(option.to_string());
+                Ok(None)
+            });
+        a.expect_site_scan_vendor_fetch().never();
+        let s = svc(pool, a);
+        let detail = site_named(&s, "a.test").await;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = discovery_of(vec![plugin("pro")]);
+        let known = known_none();
+        let pass = s
+            .site_scan_vendor_pass(&detail, &d, tmp.path(), Some(&known))
+            .await;
+        assert_eq!(
+            pass,
+            VendorPass::default(),
+            "no transient yet is no problem"
+        );
+        assert_eq!(
+            *asked.lock().expect("lock"),
+            [PLUGINS_OPTION, THEMES_OPTION]
+        );
+        let pass = s
+            .site_scan_vendor_pass(&detail, &d, tmp.path(), Some(&known))
+            .await;
+        assert_eq!(pass.note.as_deref(), Some(VENDOR_NO_CONFIG));
+    }
+
+    /// Runs between discover and scan, and what it found is the agent's to report:
+    /// the worker can't add to it, and a note doesn't make a scan partial.
+    #[tokio::test]
+    async fn the_download_comes_between_discover_and_scan() {
+        let pool = open_memory().await.expect("open");
+        let events = Arc::new(StdMutex::new(Vec::<&str>::new()));
+        let (e1, e2) = (events.clone(), events.clone());
+        let mut a = happy_mocks();
+        a.expect_site_scan_cached_manifest()
+            .returning(|_, _| Some(None));
+        a.expect_site_scan_cached_slug()
+            .returning(|_, _, _| Some(false));
+        a.expect_site_scan_wp_config_db()
+            .returning(|_| Some(("lm_a".to_string(), "wp_".to_string())));
+        let text = plugins_transient(&[], &[("pro", "1.0", "https://wpml.org/p.zip")]);
+        a.expect_site_scan_read_option()
+            .returning(move |_, _, option| Ok((option == PLUGINS_OPTION).then(|| text.clone())));
+        a.expect_site_scan_vendor_fetch().returning(move |_, _| {
+            e1.lock().expect("lock").push("fetch");
+            Ok(())
+        });
+        a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::Discover { .. } => {
+                e2.lock().expect("lock").push("discover");
+                WorkerReply::Discovery(discovery_of(vec![plugin("pro")]))
+            }
+            WorkerJob::Scan(_) => {
+                e2.lock().expect("lock").push("scan");
+                let mut o = upstream_verified(1);
+                o.coverage.unknown_vendor_hosts = vec!["forged.example".into()];
+                o.coverage.vendor_note = Some("forged".into());
+                WorkerReply::Scan(o)
+            }
+            WorkerJob::WriterHash { .. } => WorkerReply::Failed("unexpected".into()),
+        });
+        let s = svc(pool, a);
+        let detail = site_named(&s, "a.test").await;
+        let SiteScanRun::Finished { result, native_ran } = s
+            .site_scan_locked(&detail, ScanMode::Delta, None, 2_000_000)
+            .await
+        else {
+            panic!("the scan ran");
+        };
+        assert!(native_ran);
+        assert_eq!(*events.lock().expect("lock"), ["discover", "fetch", "scan"]);
+        assert!(result.coverage.unknown_vendor_hosts.is_empty());
+        assert_eq!(result.coverage.vendor_note, None);
+        assert!(!result.scan_partial());
+    }
+
+    /// New layers are report-only until the pilot flag flips, and a difference from
+    /// a vendor's package is one: no alert and no report, only the panel.
+    #[test]
+    fn a_vendor_difference_stays_in_the_panel_through_the_pilot() {
+        let issue = |slug: &str| hyperion_types::WpIntegrityPluginResult {
+            slug: slug.into(),
+            version: "1.0".into(),
+            issues: vec![hyperion_types::WpIntegrityFileIssue {
+                path: format!("wp-content/plugins/{slug}/a.php"),
+                message: "modified".into(),
+            }],
+        };
+        let finding = |slug: &str, label: &str| hyperion_types::SiteFileFinding {
+            rel: format!("wp-content/plugins/{slug}/a.php"),
+            kind: hyperion_types::FindingKind::UpstreamModified,
+            component: Some(slug.into()),
+            source_label: Some(label.into()),
+            ..Default::default()
+        };
+        let outcome = || {
+            let mut o = upstream_verified(2);
+            o.upstream.plugins_failed = vec![issue("pro"), issue("akismet")];
+            o.findings = vec![
+                finding("pro", "vendor package"),
+                finding("akismet", "wordpress.org"),
+            ];
+            o
+        };
+
+        let pilot = assemble_integrity_result(outcome(), vec![], true, true);
+        let slugs: Vec<&str> = pilot
+            .plugins_failed
+            .iter()
+            .map(|p| p.slug.as_str())
+            .collect();
+        assert_eq!(slugs, ["akismet"], "wordpress.org's alert as it always has");
+        let keys = integrity_finding_keys(&pilot);
+        assert!(!keys.iter().any(|k| k.contains("pro")), "{keys:?}");
+        assert_eq!(pilot.findings.len(), 2, "the panel still has it");
+        let listed: Vec<&str> = pilot
+            .listed_findings()
+            .filter_map(|f| f.component.as_deref())
+            .collect();
+        assert_eq!(listed, ["pro"]);
+        assert_eq!(pilot.headline_count(), 2);
+
+        let live = assemble_integrity_result(outcome(), vec![], true, false);
+        assert_eq!(
+            live.plugins_failed.len(),
+            2,
+            "after the pilot, like any other"
+        );
+        assert_eq!(live.listed_findings().count(), 0);
+    }
+
+    #[test]
+    fn the_coverage_lists_are_clamped() {
+        let mut o = upstream_verified(0);
+        o.coverage.unknown_vendor_hosts = vec!["h".repeat(1000); 100];
+        o.coverage.vendor_note = Some("n".repeat(5000));
+        clamp_scan_outcome(&mut o);
+        assert_eq!(o.coverage.unknown_vendor_hosts.len(), MAX_UNKNOWN_HOSTS);
+        assert!(o.coverage.unknown_vendor_hosts[0].len() <= 256);
+        assert!(o.coverage.vendor_note.expect("note").len() <= 512);
+    }
 }

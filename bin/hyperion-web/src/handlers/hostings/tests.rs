@@ -1047,6 +1047,31 @@ fn card_for(can_manage: bool, can_trust: bool) -> String {
     .expect("renders")
 }
 
+/// Why the vendor step didn't run is the site's own business. Which hosts its
+/// package links name is the operator's, and no card shows it.
+#[test]
+fn the_card_shows_the_vendor_note_and_never_the_unlisted_hosts() {
+    let mut scan = native_scan();
+    scan.coverage.vendor_note = Some("wp-config.php couldn't be read here".into());
+    scan.coverage.unknown_vendor_hosts = vec!["updates.vendor.example".into()];
+    let html = IntegrityCardTpl {
+        scan,
+        selector: "example.com".into(),
+        csrf_token: "t".into(),
+        can_manage: true,
+        can_trust: true,
+        ..Default::default()
+    }
+    .render()
+    .expect("renders");
+    assert!(html.contains("be read here."), "{html}");
+    assert!(!html.contains("updates.vendor.example"), "{html}");
+    assert!(
+        !html.contains("didn't finish"),
+        "the note isn't a partial scan"
+    );
+}
+
 /// A stolen customer login can move a file out of harm's way and can't approve
 /// one: no Trust anywhere on the card, and it says who is going to look.
 #[test]

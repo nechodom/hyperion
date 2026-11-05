@@ -162,6 +162,10 @@
     <p class="chk-note">A scan has been queued and runs in the background. {% if scan.scanned_at != 0 %}What's listed here is from the previous scan; this {% else %}This {% endif %}card refreshes by itself when the new result is stored.</p>
     {% endif %}
 
+    {% if let Some(note) = scan.coverage.vendor_note %}
+    <p class="chk-note">{{ note|tenant_text }}.</p>
+    {% endif %}
+
     {# Coverage line: what actually ran, on every state. "No findings" only
        means something once you know what was looked at. #}
     <p class="chk-note">
