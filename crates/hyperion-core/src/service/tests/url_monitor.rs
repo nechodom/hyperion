@@ -1609,3 +1609,14 @@ async fn a_certificate_on_a_plain_http_check_never_warns() {
     s.url_cert_alerts(now).await.expect("pass");
     assert!(url_bells(&pool).await.is_empty());
 }
+
+/// The certificate read on a real node, against the real site named by
+/// `CERT_URL`: this box's curl build has to print a date the parser reads.
+#[tokio::test]
+#[ignore = "needs CERT_URL pointing at an https site"]
+async fn the_certificate_of_a_real_site_is_read() {
+    let url = std::env::var("CERT_URL").expect("set CERT_URL");
+    let expires = read_cert_expiry(&url).await.expect("an expiry was read");
+    println!("{url}: expires at {expires}");
+    assert!(expires > now_secs(), "{url} has expired: {expires}");
+}

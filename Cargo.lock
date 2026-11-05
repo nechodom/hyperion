@@ -1529,6 +1529,7 @@ dependencies = [
  "hyperion-auth",
  "hyperion-import",
  "hyperion-rpc",
+ "hyperion-rpc-client",
  "hyperion-state",
  "hyperion-types",
  "hyperion-validate",
