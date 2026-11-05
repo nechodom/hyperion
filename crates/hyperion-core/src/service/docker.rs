@@ -39,7 +39,7 @@ const OTHER_KIND_SUBJECT: &str = "(other)";
 const OTHER_DISPLAY: &str = "other containers";
 const ALERT_HREF: &str = "/docker";
 
-fn db_err(what: &str, e: hyperion_state::StateError) -> RpcError {
+pub(super) fn db_err(what: &str, e: hyperion_state::StateError) -> RpcError {
     RpcError::Internal_with(format!("{what}: {e}"))
 }
 
@@ -477,10 +477,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// overview's first read, before the tick has run.
     async fn docker_apply(
         &self,
-        containers: Vec<DockerContainer>,
+        mut containers: Vec<DockerContainer>,
         now: i64,
         commit: bool,
     ) -> Result<Vec<DockerProject>, RpcError> {
+        self.docker_attach_updates(&mut containers).await;
         let rows: HashMap<String, ProjectRow> = hyperion_state::docker::list_projects(&self.pool)
             .await
             .map_err(|e| db_err("docker projects", e))?

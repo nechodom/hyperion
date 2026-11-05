@@ -594,6 +594,13 @@ impl AdapterPort for RealAdapter {
         hyperion_adapters::docker::run(&cmd, max_bytes).await
     }
 
+    async fn docker_remote_digest(
+        &self,
+        image: hyperion_adapters::docker::ImageRef,
+    ) -> Result<String, hyperion_adapters::docker_registry::RemoteDigestError> {
+        hyperion_adapters::docker_registry::remote_digest(&image).await
+    }
+
     async fn fpm_recover_failed(&self) -> Result<usize, AdapterError> {
         let mut recovered = 0usize;
         for ver in PhpVersion::all() {

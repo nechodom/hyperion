@@ -1021,9 +1021,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 }
 
 /// Docker alerts that are sent beyond the bell: the `docker.` family
-/// (`docker.project:<name>`, `docker.daemon`, `docker.node:<id>`).
+/// (`docker.project:<name>`, `docker.daemon`, `docker.node:<id>`). Image
+/// update notices (`docker.update:<node>`) are news for the bell only; they
+/// would reach Slack every day otherwise.
 pub fn is_outbound_docker_kind(kind: &str) -> bool {
-    kind.starts_with("docker.")
+    kind.starts_with("docker.") && !kind.starts_with("docker.update")
 }
 
 /// Most Docker alerts one collected batch may send outbound. The rows of a

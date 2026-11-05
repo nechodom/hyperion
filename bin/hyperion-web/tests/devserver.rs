@@ -1994,6 +1994,21 @@ async fn seed_demo_docker(svc: &StubService) {
     let mut worker = c("shop", "worker", "running", 180, 95);
     worker.log_size_bytes = 2 * 1024 * 1024 * 1024;
     worker.log_max_size = None;
+    // The daily image check: one update, one pulled-not-recreated, one that
+    // cannot be checked, one current.
+    web.update = Some(hyperion_types::docker::ImageUpdateState::UpdateAvailable);
+    web.update_checked_at = now - 5 * 3600;
+    worker.update = Some(hyperion_types::docker::ImageUpdateState::NotRecreated);
+    worker.update_checked_at = now - 5 * 3600;
+    let mut cache = c("shop", "cache", "running", 24, 8);
+    cache.update = Some(hyperion_types::docker::ImageUpdateState::CannotVerify {
+        reason: "unauthorized: the registry wants a login that Docker on this node does not have"
+            .into(),
+    });
+    cache.update_checked_at = now - 5 * 3600;
+    let mut wordpress = c("blog", "wordpress", "running", 140, 30);
+    wordpress.update = Some(hyperion_types::docker::ImageUpdateState::UpToDate);
+    wordpress.update_checked_at = now - 5 * 3600;
     let mut db = c("blog", "db", "exited", 0, 0);
     db.exit_code = 137;
     db.oom_killed = true;
@@ -2014,13 +2029,13 @@ async fn seed_demo_docker(svc: &StubService) {
         projects: vec![
             DockerProject {
                 name: "shop".into(),
-                containers: vec![web, worker, c("shop", "cache", "running", 24, 8)],
+                containers: vec![web, worker, cache],
                 verdict: "ok".into(),
                 ..Default::default()
             },
             DockerProject {
                 name: "blog".into(),
-                containers: vec![db, c("blog", "wordpress", "running", 140, 30)],
+                containers: vec![db, wordpress],
                 verdict: "problem".into(),
                 summary: "db: exit 137, out of memory".into(),
                 ..Default::default()

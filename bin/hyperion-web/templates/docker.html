@@ -96,7 +96,7 @@
     {% for s in n.stacks %}
     <div class="item svc-row">
       <div class="svc-main">
-        <div class="svc-title"><a class="svc-link" href="{{ s.href }}"><strong>{{ s.name }}</strong></a>{% if s.containers > 1 %} <span class="text-soft small">{{ s.containers }} containers</span>{% endif %}</div>
+        <div class="svc-title"><a class="svc-link" href="{{ s.href }}"><strong>{{ s.name }}</strong></a>{% if s.containers > 1 %} <span class="text-soft small">{{ s.containers }} containers</span>{% endif %}{% for u in s.updates %} <span class="pill {{ u.tone }}">{{ u.label }}</span>{% endfor %}</div>
         {% if !s.services.is_empty() %}<div class="svc-facts small"><span>{{ s.services }}</span></div>{% endif %}
         {% if !s.summary.is_empty() %}<div class="small" style="color:var(--danger)">{{ s.summary }}</div>{% endif %}
         {% if !s.gone.is_empty() %}<div class="text-soft small">{{ s.gone }}</div>{% endif %}
@@ -118,6 +118,12 @@
       </div>
     </div>
     {% endfor %}
+
+    {% if n.has_updates %}
+    <div class="item">
+      <p class="text-soft small" style="margin:0">Image updates are checked once a day, for the same tag a container runs; a newer version number is not looked for. Hyperion does not pull images or restart containers. Pull and recreate them yourself when you want the update.</p>
+    </div>
+    {% endif %}
 
     {% if !n.logs.is_empty() || n.disk.is_some() %}
     <div class="item">

@@ -44,9 +44,14 @@ async fn every_read_command_parses_against_real_docker() {
         docker::run(&logs, MAX).await.unwrap();
 
         let img = docker::ImageRef::parse(&cs[0].image_id).unwrap();
-        docker::run(&DockerCmd::ImageInspect(img), MAX)
+        let raw = docker::run(&DockerCmd::ImageInspect(img), MAX)
             .await
             .unwrap();
+        // The tag the container names, read the way the update check reads it.
+        let local = docker::parse_image_inspect(&raw, &cs[0].image_id)
+            .unwrap()
+            .expect("the container's image exists");
+        assert_eq!(local.image_id, cs[0].image_id);
     }
 
     let st = docker::run(&DockerCmd::Stats, MAX).await.unwrap();

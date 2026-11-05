@@ -350,6 +350,110 @@ pub async fn put_watch(pool: &SqlitePool, r: &WatchRow) -> Result<(), StateError
     Ok(())
 }
 
+/// One row of `docker_image_checks`: what the daily check last learnt about
+/// one image reference (`nginx:alpine`, as a container names it).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImageCheckRow {
+    pub image_ref: String,
+    /// The `Id` of the image the tag pointed at on this node when it was read.
+    pub local_digest: String,
+    /// The digest the registry answered with. Kept across failed checks, so
+    /// the last answer can still be told.
+    pub remote_digest: String,
+    /// `current`, `update`, `cannot:<reason>` or `unknown`.
+    pub state: String,
+    /// Unix seconds of the last answer, or of the last try when there never
+    /// was one.
+    pub checked_at: i64,
+    /// The remote digest the operator was already told about.
+    pub notified_digest: String,
+    /// Unix seconds; the registry is not asked again before this.
+    pub retry_after: i64,
+}
+
+type ImageCheckTuple = (String, String, String, String, i64, String, i64);
+
+fn image_check_of(r: ImageCheckTuple) -> ImageCheckRow {
+    ImageCheckRow {
+        image_ref: r.0,
+        local_digest: r.1,
+        remote_digest: r.2,
+        state: r.3,
+        checked_at: r.4,
+        notified_digest: r.5,
+        retry_after: r.6,
+    }
+}
+
+const IMAGE_CHECK_COLS: &str =
+    "image_ref, local_digest, remote_digest, state, checked_at, notified_digest, retry_after";
+
+pub async fn get_image_check(
+    pool: &SqlitePool,
+    image_ref: &str,
+) -> Result<Option<ImageCheckRow>, StateError> {
+    let row: Option<ImageCheckTuple> = sqlx::query_as(&format!(
+        "SELECT {IMAGE_CHECK_COLS} FROM docker_image_checks WHERE image_ref = ?"
+    ))
+    .bind(image_ref)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(image_check_of))
+}
+
+pub async fn list_image_checks(pool: &SqlitePool) -> Result<Vec<ImageCheckRow>, StateError> {
+    let rows: Vec<ImageCheckTuple> = sqlx::query_as(&format!(
+        "SELECT {IMAGE_CHECK_COLS} FROM docker_image_checks ORDER BY image_ref"
+    ))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(image_check_of).collect())
+}
+
+pub async fn put_image_check(pool: &SqlitePool, r: &ImageCheckRow) -> Result<(), StateError> {
+    sqlx::query(
+        "INSERT INTO docker_image_checks \
+           (image_ref, local_digest, remote_digest, state, checked_at, notified_digest, retry_after) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(image_ref) DO UPDATE SET \
+           local_digest = excluded.local_digest, remote_digest = excluded.remote_digest, \
+           state = excluded.state, checked_at = excluded.checked_at, \
+           notified_digest = excluded.notified_digest, retry_after = excluded.retry_after",
+    )
+    .bind(&r.image_ref)
+    .bind(&r.local_digest)
+    .bind(&r.remote_digest)
+    .bind(&r.state)
+    .bind(r.checked_at)
+    .bind(&r.notified_digest)
+    .bind(r.retry_after)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Forget references no container uses any more. A row is kept for as long
+/// as `keep` names it, and for a while after, because a stack that is taken
+/// down and brought back must not be told about the same digest twice.
+/// Returns how many rows went.
+pub async fn prune_image_checks(
+    pool: &SqlitePool,
+    keep: &[String],
+    older_than: i64,
+) -> Result<u64, StateError> {
+    let mut gone = 0;
+    for r in list_image_checks(pool).await? {
+        if r.checked_at < older_than && !keep.contains(&r.image_ref) {
+            gone += sqlx::query("DELETE FROM docker_image_checks WHERE image_ref = ?")
+                .bind(&r.image_ref)
+                .execute(pool)
+                .await?
+                .rows_affected();
+        }
+    }
+    Ok(gone)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +565,54 @@ mod tests {
             .expect("damage");
         let got = load_watch(&pool).await.expect("load");
         assert_eq!((got[0].restart_count, got[0].rises.is_empty()), (7, true));
+    }
+
+    #[tokio::test]
+    async fn image_checks_round_trip_and_old_unused_rows_are_pruned() {
+        let pool = crate::db::open_memory().await.expect("open");
+        assert!(get_image_check(&pool, "a:1").await.expect("get").is_none());
+        for (r, at) in [("a:1", 10), ("b:1", 10), ("c:1", 500)] {
+            put_image_check(
+                &pool,
+                &ImageCheckRow {
+                    image_ref: r.into(),
+                    state: "current".into(),
+                    checked_at: at,
+                    remote_digest: "sha256:x".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("put");
+        }
+        let mut a = get_image_check(&pool, "a:1")
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!((a.state.as_str(), a.checked_at), ("current", 10));
+        a.notified_digest = "sha256:x".into();
+        a.retry_after = 99;
+        put_image_check(&pool, &a).await.expect("again");
+        assert_eq!(list_image_checks(&pool).await.expect("list").len(), 3);
+
+        let gone = prune_image_checks(&pool, &["a:1".to_string()], 100)
+            .await
+            .expect("prune");
+        assert_eq!(gone, 1, "b:1 is old and unused; a:1 is used; c:1 is recent");
+        let left: Vec<_> = list_image_checks(&pool)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|r| r.image_ref)
+            .collect();
+        assert_eq!(left, ["a:1", "c:1"]);
+        let a = get_image_check(&pool, "a:1")
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(
+            (a.notified_digest.as_str(), a.retry_after),
+            ("sha256:x", 99)
+        );
     }
 }

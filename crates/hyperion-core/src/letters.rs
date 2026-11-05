@@ -1669,6 +1669,20 @@ pub static STRINGS: &[LetterString] = &[
         cs: "{node} opět odpovídá masteru a jeho Docker kontejnery se zase sledují.",
     },
     LetterString {
+        id: "ops.docker_updates.title",
+        group: "Operator alerts — Docker",
+        note: "Bell only, never Slack or mail. One card per server, replaced when there is news again.",
+        en: "Docker image updates available",
+        cs: "Jsou dostupné aktualizace Docker obrazů",
+    },
+    LetterString {
+        id: "ops.docker_updates.body",
+        group: "Operator alerts — Docker",
+        note: "Tokens: {node} {count}. {count} is how many images have a newer version under the same tag.",
+        en: "{node}: images with a newer version under the tag they run: {count}. Hyperion only reports this; it never pulls an image or recreates a container.",
+        cs: "{node}: obrazy s novější verzí pod stejným tagem, který běží: {count}. Hyperion to jen hlásí, nikdy nestahuje obraz ani nevytváří kontejner znovu.",
+    },
+    LetterString {
         id: "ops.docker_more.title",
         group: "Operator alerts — Docker",
         note: "Sent instead of the Docker alerts of one batch that are past the sending cap.",

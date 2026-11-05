@@ -47,12 +47,14 @@ mod database;
 mod dkim;
 mod docker;
 mod docker_logs;
+mod docker_updates;
 mod docker_verdict;
 mod files;
 mod firewall;
 mod fs_health;
 pub use cpu_usage::{CpuClass, CpuTracker, ProcSample, ProcSnapshot, TICK_SECS as CPU_TICK_SECS};
 pub use docker::{loopback_port, proxy_offer, ProxyOffer};
+pub use docker_updates::image_state;
 pub use fs_health::check_usr_writable;
 mod fs_util;
 mod ftp;
@@ -309,6 +311,16 @@ pub trait AdapterPort: Send + Sync {
         _max_bytes: usize,
     ) -> Result<Vec<u8>, hyperion_adapters::docker::DockerError> {
         Err(hyperion_adapters::docker::DockerError::NotInstalled)
+    }
+
+    /// The digest a registry holds under an image reference's tag. Asks the
+    /// registry only; nothing is pulled. Default impl cannot ask, so stub
+    /// adapters need no change.
+    async fn docker_remote_digest(
+        &self,
+        _image: hyperion_adapters::docker::ImageRef,
+    ) -> Result<String, hyperion_adapters::docker_registry::RemoteDigestError> {
+        Err(hyperion_adapters::docker_registry::RemoteDigestError::Unsupported)
     }
 
     async fn nginx_write_vhost(&self, detail: &HostingDetail) -> Result<(), AdapterError>;

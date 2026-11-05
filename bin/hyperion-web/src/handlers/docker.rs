@@ -20,7 +20,7 @@ use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_state::capabilities::Capability;
 use hyperion_types::docker::{
     DockerContainer, DockerLogRequest, DockerNodeEntry, DockerNodeList, DockerNodeStatus,
-    DockerProject, DEFAULT_LOG_LINES, MAX_LOG_LINES,
+    DockerProject, ImageUpdateState, DEFAULT_LOG_LINES, MAX_LOG_LINES,
 };
 use hyperion_types::NodeSummary;
 use serde::Deserialize;
@@ -276,6 +276,67 @@ struct StackView {
     forget_action: Option<String>,
     /// Hostings that reverse-proxy to a port this stack publishes.
     hostings: Vec<HostingLink>,
+    /// Image updates worth a badge on the list: an update at the registry,
+    /// or a pulled image the container was not recreated on. "Cannot verify"
+    /// is not one; its reason is on the stack page.
+    updates: Vec<UpdatePill>,
+}
+
+/// A small badge about an image.
+struct UpdatePill {
+    tone: &'static str,
+    label: String,
+}
+
+/// The longest reason text shown. It comes from a node.
+const REASON_MAX_CHARS: usize = 300;
+
+fn update_pill(u: &ImageUpdateState) -> UpdatePill {
+    let (tone, label) = match u {
+        ImageUpdateState::UpToDate => ("muted", "up to date"),
+        ImageUpdateState::UpdateAvailable => ("info", "update available"),
+        ImageUpdateState::NotRecreated => ("warn", "pulled, not recreated"),
+        ImageUpdateState::CannotVerify { .. } => ("muted", "cannot verify"),
+    };
+    UpdatePill {
+        tone,
+        label: label.to_string(),
+    }
+}
+
+/// Badges for a stack on the list: how many of its containers run an image
+/// that has an update, and how many were not recreated after a pull.
+fn stack_updates(p: &DockerProject) -> Vec<UpdatePill> {
+    let count = |want: &ImageUpdateState| {
+        p.containers
+            .iter()
+            .filter(|c| c.update.as_ref() == Some(want))
+            .count()
+    };
+    let mut out = Vec::new();
+    let n = count(&ImageUpdateState::UpdateAvailable);
+    if n > 0 {
+        out.push(UpdatePill {
+            tone: "info",
+            label: if n == 1 {
+                "update available".to_string()
+            } else {
+                format!("{n} updates available")
+            },
+        });
+    }
+    let n = count(&ImageUpdateState::NotRecreated);
+    if n > 0 {
+        out.push(UpdatePill {
+            tone: "warn",
+            label: if n == 1 {
+                "pulled, not recreated".to_string()
+            } else {
+                format!("{n} pulled, not recreated")
+            },
+        });
+    }
+    out
 }
 
 /// A hosting named on a Docker page, linking to its detail page.
@@ -320,6 +381,8 @@ struct NodeView {
     logs: Vec<LogView>,
     log_warnings: usize,
     disk: Option<DiskView>,
+    /// Some stack here has an image badge, so the page says what it means.
+    has_updates: bool,
     remove_action: String,
     remove_body: String,
 }
@@ -411,6 +474,7 @@ fn stack_view(node_id: &str, p: &DockerProject) -> StackView {
         forget_action: (p.verdict == "gone" && !p.name.is_empty())
             .then(|| format!("/docker/{}/{}/forget", enc(node_id), enc(&p.name))),
         hostings: hosting_links(p),
+        updates: stack_updates(p),
     }
 }
 
@@ -469,6 +533,7 @@ fn node_view(row: &NodeDockerRow) -> NodeView {
         logs: Vec::new(),
         log_warnings: 0,
         disk: None,
+        has_updates: false,
         remove_action: format!("/docker/nodes/{id}/remove"),
         remove_body: remove_body(&row.label),
     };
@@ -506,6 +571,7 @@ fn node_view(row: &NodeDockerRow) -> NodeView {
                 .filter(|c| log_warns(c))
                 .count();
             v.disk = disk_view(st);
+            v.has_updates = v.stacks.iter().any(|s| !s.updates.is_empty());
         }
     }
     v
@@ -696,6 +762,12 @@ struct ContainerView {
     memory: String,
     log: String,
     log_warn: bool,
+    /// What the daily image check says about this container's image.
+    update: Option<UpdatePill>,
+    /// Why it could not be checked, for "cannot verify" only.
+    update_reason: String,
+    /// "3 hours ago", when there is an answer.
+    update_checked: String,
 }
 
 #[derive(Template)]
@@ -718,6 +790,8 @@ struct StackTpl<'a> {
     containers: Vec<ContainerView>,
     /// Some container logs past 1 GiB with no `max-size`.
     log_warning: bool,
+    /// Some container has an image answer, so the page says how it is made.
+    update_note: bool,
     disk: Option<DiskView>,
     read: String,
     stats_note: String,
@@ -885,6 +959,20 @@ fn container_view(c: &DockerContainer) -> ContainerView {
             String::new()
         },
         log_warn: log_warns(c),
+        update: c.update.as_ref().map(update_pill),
+        update_reason: match &c.update {
+            Some(ImageUpdateState::CannotVerify { reason }) => reason
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(REASON_MAX_CHARS)
+                .collect(),
+            _ => String::new(),
+        },
+        update_checked: if c.update.is_some() && c.update_checked_at > 0 {
+            crate::handlers::stats::fmt_ago(&c.update_checked_at)
+        } else {
+            String::new()
+        },
     }
 }
 
@@ -964,6 +1052,7 @@ pub async fn get_docker_stack(
         forget_action: sv.forget_action,
         can_forget: ctx.is_admin_or_higher(),
         log_warning: containers.iter().any(|c| c.log_warn),
+        update_note: containers.iter().any(|c| c.update.is_some()),
         containers,
         disk: disk_view(&st),
         read: crate::handlers::stats::fmt_ago(&st.read_at),
@@ -2045,5 +2134,75 @@ mod tests {
         c.log_max_size = None;
         c.log_size_bytes = LOG_WARN_BYTES;
         assert!(!log_warns(&c), "exactly 1 GiB is not over it");
+    }
+
+    fn container_with(update: Option<ImageUpdateState>) -> DockerContainer {
+        DockerContainer {
+            name: "shop-web-1".into(),
+            image: "nginx:alpine".into(),
+            update,
+            update_checked_at: 1_000_000,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_list_badges_updates_and_stays_quiet_about_the_rest() {
+        let mut p = proj("shop", "ok");
+        p.containers = vec![
+            container_with(Some(ImageUpdateState::UpdateAvailable)),
+            container_with(Some(ImageUpdateState::UpdateAvailable)),
+            container_with(Some(ImageUpdateState::NotRecreated)),
+            container_with(Some(ImageUpdateState::UpToDate)),
+            container_with(Some(ImageUpdateState::CannotVerify {
+                reason: "pinned".into(),
+            })),
+            container_with(None),
+        ];
+        let labels: Vec<String> = stack_updates(&p).into_iter().map(|u| u.label).collect();
+        assert_eq!(labels, ["2 updates available", "pulled, not recreated"][..]);
+        p.containers.truncate(1);
+        let labels: Vec<String> = stack_updates(&p).into_iter().map(|u| u.label).collect();
+        assert_eq!(labels, ["update available"]);
+        p.containers = vec![container_with(Some(ImageUpdateState::CannotVerify {
+            reason: "built on this node".into(),
+        }))];
+        assert!(
+            stack_updates(&p).is_empty(),
+            "no badge noise on the list for cannot verify"
+        );
+    }
+
+    #[test]
+    fn the_stack_page_gives_the_reason_for_cannot_verify() {
+        let v = container_view(&container_with(Some(ImageUpdateState::CannotVerify {
+            reason: "pinned to a digest, so the tag cannot move\u{7}".into(),
+        })));
+        assert_eq!(v.update.expect("pill").label, "cannot verify");
+        assert_eq!(
+            v.update_reason,
+            "pinned to a digest, so the tag cannot move"
+        );
+        assert!(!v.update_checked.is_empty());
+        let v = container_view(&container_with(Some(ImageUpdateState::UpdateAvailable)));
+        assert_eq!(v.update.expect("pill").label, "update available");
+        assert!(v.update_reason.is_empty());
+        let v = container_view(&container_with(None));
+        assert!(v.update.is_none() && v.update_checked.is_empty());
+    }
+
+    #[test]
+    fn a_node_row_says_what_the_badges_mean_only_when_there_are_some() {
+        let mut p = proj("shop", "ok");
+        p.containers = vec![container_with(Some(ImageUpdateState::UpdateAvailable))];
+        let st = |p: DockerProject| {
+            NodeDockerState::Ok(DockerNodeStatus {
+                daemon_ok: true,
+                projects: vec![p],
+                ..Default::default()
+            })
+        };
+        assert!(node_view(&row("web-1", st(p))).has_updates);
+        assert!(!node_view(&row("web-1", st(proj("quiet", "ok")))).has_updates);
     }
 }

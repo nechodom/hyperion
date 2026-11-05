@@ -45,6 +45,30 @@ pub struct DockerContainer {
     pub log_size_bytes: u64,
     /// The json-file `max-size` option, when set.
     pub log_max_size: Option<String>,
+    /// What the daily image check says about this container's image. `None`
+    /// until the image has been checked, and for a container that was
+    /// started after that check.
+    pub update: Option<ImageUpdateState>,
+    /// Unix seconds of the check `update` comes from; 0 when there is none.
+    pub update_checked_at: i64,
+}
+
+/// Whether the tag a container runs has moved on at its registry. Digests of
+/// the same tag are compared; a newer version tag (`1.2` to `1.3`) is never
+/// looked for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageUpdateState {
+    UpToDate,
+    /// The registry has a different image under the tag now.
+    UpdateAvailable,
+    /// The tag was pulled again on the node, but this container still runs
+    /// the image it started with.
+    NotRecreated,
+    /// No answer; `reason` says why, in a sentence for the operator.
+    CannotVerify {
+        reason: String,
+    },
 }
 
 /// Disk use as `docker system df` reports it.

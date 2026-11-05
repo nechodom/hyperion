@@ -1,7 +1,11 @@
 //! Tests for `service::docker`: the module's install state.
 
 use super::*;
-use hyperion_adapters::docker::{DockerCmd, DockerError};
+use crate::service::docker_updates::image_state;
+use hyperion_adapters::docker::{DockerCmd, DockerError, LocalImage};
+use hyperion_adapters::docker_registry::RemoteDigestError;
+use hyperion_state::docker::ImageCheckRow;
+use hyperion_types::docker::ImageUpdateState;
 
 const VERSION_JSON: &[u8] = br#"{"Client":{"Version":"27.3.1"},"Server":{"Version":"27.3.1"}}"#;
 
@@ -223,6 +227,8 @@ struct Ct {
     oneoff: bool,
     oom: bool,
     log_path: String,
+    image: String,
+    image_id: String,
 }
 
 impl Ct {
@@ -251,6 +257,13 @@ impl Ct {
             ..self
         }
     }
+    fn on_image(self, image: &str, image_id: &str) -> Self {
+        Self {
+            image: image.into(),
+            image_id: image_id.into(),
+            ..self
+        }
+    }
 }
 
 fn ct(n: u32, project: &'static str, service: &'static str) -> Ct {
@@ -266,6 +279,8 @@ fn ct(n: u32, project: &'static str, service: &'static str) -> Ct {
         oneoff: false,
         oom: false,
         log_path: String::new(),
+        image: "img".into(),
+        image_id: format!("sha256:{n:064x}"),
     }
 }
 
@@ -284,6 +299,13 @@ struct World {
     logs_fail: Vec<u32>,
     /// The byte limit each `docker logs` was given.
     log_limits: Vec<usize>,
+    /// What `docker image inspect <ref>` finds locally: the image id and its
+    /// repo digests. A reference that is not here is not on the node.
+    locals: std::collections::HashMap<String, (String, Vec<String>)>,
+    /// What the registry answers for a reference.
+    remote: std::collections::HashMap<String, Result<String, RemoteDigestError>>,
+    /// The references the registry was asked about, in order.
+    lookups: Vec<String>,
 }
 
 type Shared = Arc<Mutex<World>>;
@@ -332,13 +354,14 @@ fn inspect_json(c: &Ct) -> serde_json::Value {
         "LogPath": c.log_path,
         "State": state,
         "HostConfig": {"RestartPolicy": {"Name": c.policy}},
-        "Config": {"Image": "img", "Labels": labels, "Env": ["SECRET_VALUE=do-not-leak-7f3a"]},
+        "Image": c.image_id,
+        "Config": {"Image": c.image, "Labels": labels, "Env": ["SECRET_VALUE=do-not-leak-7f3a"]},
     })
 }
 
 /// A daemon that answers from `w` and records what it was asked.
-fn world_mock(w: &Shared) -> MockAdapterPort {
-    let w = w.clone();
+fn world_mock(world: &Shared) -> MockAdapterPort {
+    let w = world.clone();
     let mut a = happy_mocks();
     a.expect_docker_read().returning(move |cmd, max| {
         let mut w = w.lock().expect("world");
@@ -380,6 +403,20 @@ fn world_mock(w: &Shared) -> MockAdapterPort {
                 Ok(out.into_bytes())
             }
             DockerCmd::SystemDf => Ok(b"{\"Type\":\"Images\",\"Size\":\"1GB\"}\n".to_vec()),
+            DockerCmd::ImageInspect(r) => match w.locals.get(r.as_str()) {
+                Some((id, digests)) => Ok(serde_json::to_vec(&serde_json::json!([{
+                    "Id": id,
+                    "RepoTags": [r.as_str()],
+                    "RepoDigests": digests,
+                    "Config": {
+                        "Env": ["SECRET_VALUE=do-not-leak-7f3a"],
+                        "Labels": {"secret.label": "do-not-leak-7f3a"},
+                    },
+                }]))
+                .expect("json")),
+                // What docker prints for an image it does not have.
+                None => Ok(b"[]\n".to_vec()),
+            },
             DockerCmd::Logs { id, tail, .. } => {
                 w.log_limits.push(max);
                 if let Some(e) = w.logs_err.clone() {
@@ -408,6 +445,15 @@ fn world_mock(w: &Shared) -> MockAdapterPort {
             }
             other => panic!("the tick may only list, inspect and measure: {other:?}"),
         }
+    });
+    let w = world.clone();
+    a.expect_docker_remote_digest().returning(move |image| {
+        let mut w = w.lock().expect("world");
+        w.lookups.push(image.as_str().to_string());
+        w.remote
+            .get(image.as_str())
+            .cloned()
+            .unwrap_or_else(|| Err(RemoteDigestError::Unavailable("no route".into())))
     });
     a
 }
@@ -2330,4 +2376,628 @@ async fn overview_links_the_hosting_that_proxies_to_a_published_port() {
         fixture.hostings,
         vec!["app.cz".to_string(), "second.cz".to_string()]
     );
+}
+
+// ---------------------------------------------------------------------------
+// Image updates
+// ---------------------------------------------------------------------------
+
+const NEW_D: &str = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+const OLD_D: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+fn local_of(image_ref: &str, repo_digests: &[&str], id: &str) -> LocalImage {
+    LocalImage {
+        image_ref: image_ref.into(),
+        repo_digests: repo_digests.iter().map(|s| s.to_string()).collect(),
+        image_id: id.into(),
+        pinned: image_ref.contains("@sha256:"),
+    }
+}
+
+fn nginx_local(d: &str) -> LocalImage {
+    local_of("nginx:alpine", &[&format!("nginx@{d}")], d)
+}
+
+fn cannot(s: &ImageUpdateState) -> &str {
+    match s {
+        ImageUpdateState::CannotVerify { reason } => reason,
+        other => panic!("expected cannot verify, got {other:?}"),
+    }
+}
+
+#[test]
+fn same_digest_is_up_to_date() {
+    let l = nginx_local(OLD_D);
+    assert_eq!(
+        image_state(&l, OLD_D, Ok(OLD_D), None),
+        ImageUpdateState::UpToDate
+    );
+}
+
+#[test]
+fn new_digest_is_update_available() {
+    let l = nginx_local(OLD_D);
+    assert_eq!(
+        image_state(&l, OLD_D, Ok(NEW_D), None),
+        ImageUpdateState::UpdateAvailable
+    );
+}
+
+#[test]
+fn the_fixtures_repo_digest_is_the_index_digest_and_compares_equal() {
+    let raw =
+        include_bytes!("../../../../hyperion-adapters/tests/fixtures/docker/image_inspect.json");
+    let l = hyperion_adapters::docker::parse_image_inspect(raw, "nginx:alpine")
+        .expect("parse")
+        .expect("one image");
+    let index = "sha256:785835ea65db4bba6f021acc0f3be91b0fef76a53fe41f8588c6698d2aed0606";
+    assert_eq!(l.repo_digests, [format!("nginx@{index}")]);
+    assert_eq!(
+        image_state(&l, &l.image_id, Ok(index), None),
+        ImageUpdateState::UpToDate
+    );
+    assert_eq!(
+        image_state(&l, &l.image_id, Ok(NEW_D), None),
+        ImageUpdateState::UpdateAvailable
+    );
+}
+
+#[test]
+fn a_digest_is_matched_by_repository_name() {
+    // The same image can carry digests of several repositories. Only the
+    // repository the container names counts, whatever the order.
+    let l = local_of(
+        "nginx:alpine",
+        &[&format!("other/thing@{NEW_D}"), &format!("nginx@{OLD_D}")],
+        OLD_D,
+    );
+    assert_eq!(
+        image_state(&l, OLD_D, Ok(OLD_D), None),
+        ImageUpdateState::UpToDate
+    );
+    assert_eq!(
+        image_state(&l, OLD_D, Ok(NEW_D), None),
+        ImageUpdateState::UpdateAvailable,
+        "a digest of another repository is not this tag's"
+    );
+    // Hub spellings of one repository are one repository.
+    let l = local_of(
+        "docker.io/library/nginx:alpine",
+        &[&format!("nginx@{OLD_D}")],
+        OLD_D,
+    );
+    assert_eq!(
+        image_state(&l, OLD_D, Ok(OLD_D), None),
+        ImageUpdateState::UpToDate
+    );
+    let l = local_of(
+        "ghcr.io/o/app:1",
+        &[&format!("ghcr.io/o/app@{OLD_D}")],
+        OLD_D,
+    );
+    assert_eq!(
+        image_state(&l, OLD_D, Ok(OLD_D), None),
+        ImageUpdateState::UpToDate
+    );
+    // Nothing from this repository at all: it was pulled under another name.
+    let l = local_of("mine/app:1", &[&format!("nginx@{OLD_D}")], OLD_D);
+    assert!(cannot(&image_state(&l, OLD_D, Ok(OLD_D), None)).contains("another repository"));
+}
+
+#[test]
+fn local_build_cannot_verify() {
+    let l = local_of("shop-web:latest", &[], "sha256:abc");
+    let s = image_state(&l, "sha256:abc", Ok(NEW_D), None);
+    assert!(cannot(&s).contains("built on this node"), "{s:?}");
+}
+
+#[test]
+fn digest_pinned_cannot_verify() {
+    let l = local_of(
+        &format!("nginx@{OLD_D}"),
+        &[&format!("nginx@{OLD_D}")],
+        OLD_D,
+    );
+    assert!(l.pinned);
+    let s = image_state(&l, OLD_D, Ok(NEW_D), None);
+    assert!(cannot(&s).contains("pinned"), "{s:?}");
+}
+
+#[test]
+fn registry_error_never_says_up_to_date() {
+    let l = nginx_local(OLD_D);
+    for (e, word) in [
+        (RemoteDigestError::RateLimited, "rate limit"),
+        (RemoteDigestError::Unauthorized, "unauthorized"),
+        (
+            RemoteDigestError::Unavailable("timed out".into()),
+            "timed out",
+        ),
+        (RemoteDigestError::Unsupported, "buildx missing"),
+    ] {
+        let s = image_state(&l, OLD_D, Err(&e), None);
+        assert!(cannot(&s).contains(word), "{e:?}: {s:?}");
+    }
+}
+
+#[test]
+fn failed_check_keeps_last_answer() {
+    let l = nginx_local(OLD_D);
+    let update = ImageCheckRow {
+        image_ref: "nginx:alpine".into(),
+        remote_digest: NEW_D.into(),
+        state: "update".into(),
+        checked_at: 5,
+        ..Default::default()
+    };
+    for e in [
+        RemoteDigestError::RateLimited,
+        RemoteDigestError::Unauthorized,
+        RemoteDigestError::Unavailable("x".into()),
+        RemoteDigestError::Unsupported,
+    ] {
+        assert_eq!(
+            image_state(&l, OLD_D, Err(&e), Some(&update)),
+            ImageUpdateState::UpdateAvailable,
+            "{e:?}"
+        );
+    }
+    let current = ImageCheckRow {
+        remote_digest: OLD_D.into(),
+        state: "current".into(),
+        ..update.clone()
+    };
+    assert_eq!(
+        image_state(
+            &l,
+            OLD_D,
+            Err(&RemoteDigestError::RateLimited),
+            Some(&current)
+        ),
+        ImageUpdateState::UpToDate
+    );
+    // The last answer is told against what is local NOW: the node has pulled
+    // the digest that was waiting.
+    let pulled = nginx_local(NEW_D);
+    assert_eq!(
+        image_state(
+            &pulled,
+            NEW_D,
+            Err(&RemoteDigestError::RateLimited),
+            Some(&update)
+        ),
+        ImageUpdateState::UpToDate
+    );
+    // A last row that never got an answer is no answer.
+    let none = ImageCheckRow {
+        state: "cannot:x".into(),
+        ..Default::default()
+    };
+    assert!(matches!(
+        image_state(&l, OLD_D, Err(&RemoteDigestError::RateLimited), Some(&none)),
+        ImageUpdateState::CannotVerify { .. }
+    ));
+}
+
+#[test]
+fn pulled_not_recreated_is_told_before_anything_else() {
+    let l = nginx_local(NEW_D);
+    assert_eq!(
+        image_state(&l, OLD_D, Ok(NEW_D), None),
+        ImageUpdateState::NotRecreated
+    );
+    assert_eq!(
+        image_state(&l, OLD_D, Err(&RemoteDigestError::Unauthorized), None),
+        ImageUpdateState::NotRecreated
+    );
+}
+
+fn nginx_world(n: u32) -> Shared {
+    let w = world(
+        (1..=n)
+            .map(|i| {
+                ct(
+                    i,
+                    "shop",
+                    ["web", "api", "worker", "x", "y", "z"][i as usize % 6],
+                )
+                .on_image("nginx:alpine", OLD_D)
+            })
+            .collect(),
+    );
+    {
+        let mut g = w.lock().expect("world");
+        g.locals.insert(
+            "nginx:alpine".into(),
+            (OLD_D.into(), vec![format!("nginx@{OLD_D}")]),
+        );
+        g.remote.insert("nginx:alpine".into(), Ok(NEW_D.into()));
+    }
+    w
+}
+
+fn lookups(w: &Shared) -> Vec<String> {
+    w.lock().expect("world").lookups.clone()
+}
+
+async fn updates_at(s: &HostingService<MockAdapterPort>, t: i64) {
+    s.docker_updates_tick_at(t).await.expect("updates tick");
+}
+
+async fn update_cards(
+    s: &HostingService<MockAdapterPort>,
+) -> Vec<(String, String, String, String)> {
+    alerts(s)
+        .await
+        .into_iter()
+        .filter(|a| a.0.starts_with("docker.update:"))
+        .collect()
+}
+
+async fn container_updates(s: &HostingService<MockAdapterPort>) -> Vec<Option<ImageUpdateState>> {
+    let st = s.docker_overview().await.expect("overview");
+    st.projects
+        .iter()
+        .flat_map(|p| p.containers.iter())
+        .map(|c| c.update.clone())
+        .collect()
+}
+
+const DAY: i64 = 86_400;
+
+#[tokio::test]
+async fn updates_tick_does_nothing_when_not_installed() {
+    let pool = open_memory().await.expect("open");
+    let mut a = happy_mocks();
+    a.expect_docker_read().times(0);
+    a.expect_docker_remote_digest().times(0);
+    let s = svc(pool, a);
+    s.docker_updates_tick()
+        .await
+        .expect("an off module is a no-op");
+}
+
+#[tokio::test]
+async fn one_lookup_per_unique_image() {
+    let w = nginx_world(3);
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    assert_eq!(
+        lookups(&w),
+        ["nginx:alpine"],
+        "three containers, one question"
+    );
+    assert_eq!(reads_of(&w, "ImageInspect"), 1);
+    assert_eq!(
+        container_updates(&s).await,
+        vec![Some(ImageUpdateState::UpdateAvailable); 3]
+    );
+}
+
+#[tokio::test]
+async fn only_images_of_known_containers_are_looked_up() {
+    let w = nginx_world(1);
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    hyperion_state::docker::put_image_check(
+        &s.pool,
+        &ImageCheckRow {
+            image_ref: "gone/app:1".into(),
+            state: "current".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("seed");
+    updates_at(&s, T0).await;
+    assert_eq!(lookups(&w), ["nginx:alpine"]);
+}
+
+#[tokio::test]
+async fn a_node_with_a_hundred_and_ten_images_looks_up_a_hundred() {
+    let w = world(
+        (1..=110)
+            .map(|i| ct(i, "p", "s").on_image(&format!("reg.example/app{i:03}:1"), OLD_D))
+            .collect(),
+    );
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    {
+        let mut g = w.lock().expect("world");
+        for i in 1..=110 {
+            g.locals.insert(
+                format!("reg.example/app{i:03}:1"),
+                (OLD_D.into(), vec![format!("reg.example/app{i:03}@{OLD_D}")]),
+            );
+        }
+    }
+    updates_at(&s, T0).await;
+    assert_eq!(lookups(&w).len(), 100);
+}
+
+#[tokio::test]
+async fn a_checked_reference_is_not_asked_again_within_twenty_hours() {
+    let w = nginx_world(1);
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    // A restart of the agent: the books are in the database.
+    updates_at(&s, T0 + 19 * 3600).await;
+    assert_eq!(lookups(&w).len(), 1);
+    updates_at(&s, T0 + 21 * 3600).await;
+    assert_eq!(lookups(&w).len(), 2);
+}
+
+#[tokio::test]
+async fn rate_limit_backs_off_a_day() {
+    let w = nginx_world(1);
+    w.lock()
+        .expect("world")
+        .remote
+        .insert("nginx:alpine".into(), Err(RemoteDigestError::RateLimited));
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    assert_eq!(lookups(&w).len(), 1);
+
+    let row = hyperion_state::docker::get_image_check(&s.pool, "nginx:alpine")
+        .await
+        .expect("row")
+        .expect("exists");
+    let next_midnight = (T0 / DAY + 1) * DAY;
+    assert!(
+        row.retry_after >= next_midnight && row.retry_after >= T0 + 20 * 3600,
+        "{} is not past the next day",
+        row.retry_after
+    );
+    updates_at(&s, T0 + 3600).await;
+    updates_at(&s, row.retry_after - 1).await;
+    assert_eq!(lookups(&w).len(), 1, "no call before retry_after");
+    // The shown state is not "up to date" and not an alarm: no answer yet.
+    assert!(
+        cannot(&container_updates(&s).await[0].clone().expect("a state")).contains("rate limit")
+    );
+
+    w.lock()
+        .expect("world")
+        .remote
+        .insert("nginx:alpine".into(), Ok(NEW_D.into()));
+    updates_at(&s, row.retry_after).await;
+    assert_eq!(lookups(&w).len(), 2);
+}
+
+#[tokio::test]
+async fn one_rate_limit_ends_the_pass() {
+    let w = world(vec![
+        ct(1, "p", "a").on_image("a/one:1", OLD_D),
+        ct(2, "p", "b").on_image("b/two:1", OLD_D),
+    ]);
+    {
+        let mut g = w.lock().expect("world");
+        for r in ["a/one:1", "b/two:1"] {
+            g.locals.insert(
+                r.into(),
+                (
+                    OLD_D.into(),
+                    vec![format!("{r}@{OLD_D}").replace(":1@", "@")],
+                ),
+            );
+            g.remote
+                .insert(r.into(), Err(RemoteDigestError::RateLimited));
+        }
+    }
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    assert_eq!(
+        lookups(&w).len(),
+        1,
+        "the registry said stop; the rest wait for tomorrow"
+    );
+}
+
+#[tokio::test]
+async fn failed_check_keeps_last_answer_across_ticks() {
+    let w = nginx_world(1);
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    assert_eq!(
+        container_updates(&s).await,
+        vec![Some(ImageUpdateState::UpdateAvailable)]
+    );
+    w.lock()
+        .expect("world")
+        .remote
+        .insert("nginx:alpine".into(), Err(RemoteDigestError::RateLimited));
+    updates_at(&s, T0 + 2 * DAY).await;
+    assert_eq!(lookups(&w).len(), 2);
+    assert_eq!(
+        container_updates(&s).await,
+        vec![Some(ImageUpdateState::UpdateAvailable)],
+        "an error does not erase what was learnt"
+    );
+}
+
+#[tokio::test]
+async fn unreachable_registry_without_history_is_cannot_verify() {
+    let w = nginx_world(1);
+    w.lock()
+        .expect("world")
+        .remote
+        .insert("nginx:alpine".into(), Err(RemoteDigestError::Unauthorized));
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    let st = container_updates(&s).await;
+    assert!(cannot(st[0].as_ref().expect("state")).contains("unauthorized"));
+    assert!(update_cards(&s).await.is_empty(), "no news, no card");
+}
+
+#[tokio::test]
+async fn pinned_and_local_images_ask_nobody() {
+    let w = world(vec![
+        ct(1, "p", "pinned").on_image(&format!("nginx@{OLD_D}"), OLD_D),
+        ct(2, "p", "built").on_image("shop-web:latest", "sha256:built"),
+        ct(3, "p", "byid").on_image("sha256:0123456789ab", "sha256:0123456789ab"),
+    ]);
+    {
+        let mut g = w.lock().expect("world");
+        g.locals.insert(
+            format!("nginx@{OLD_D}"),
+            (OLD_D.into(), vec![format!("nginx@{OLD_D}")]),
+        );
+        g.locals
+            .insert("shop-web:latest".into(), ("sha256:built".into(), vec![]));
+    }
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    assert!(lookups(&w).is_empty(), "nothing a registry could answer");
+    let st = s.docker_overview().await.expect("overview");
+    let reason = |service: &str| {
+        let c = st
+            .projects
+            .iter()
+            .flat_map(|p| p.containers.iter())
+            .find(|c| c.service == service)
+            .expect("container");
+        cannot(c.update.as_ref().expect("a state")).to_string()
+    };
+    assert!(reason("pinned").contains("pinned"));
+    assert!(reason("built").contains("built on this node"));
+    assert!(reason("byid").contains("no tag"));
+}
+
+#[tokio::test]
+async fn pulled_not_recreated() {
+    let w = nginx_world(2);
+    {
+        let mut g = w.lock().expect("world");
+        // The node pulled the tag again; one container was recreated on it.
+        g.locals.insert(
+            "nginx:alpine".into(),
+            (NEW_D.into(), vec![format!("nginx@{NEW_D}")]),
+        );
+        g.cts[1].image_id = NEW_D.into();
+    }
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    let mut states = container_updates(&s).await;
+    states.sort_by_key(|s| format!("{s:?}"));
+    assert_eq!(
+        states,
+        vec![
+            Some(ImageUpdateState::NotRecreated),
+            Some(ImageUpdateState::UpToDate)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn the_marks_survive_the_next_ordinary_tick_and_a_restart() {
+    let w = nginx_world(1);
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    tick_at(&s, T0 + 30).await;
+    assert_eq!(
+        container_updates(&s).await,
+        vec![Some(ImageUpdateState::UpdateAvailable)],
+        "the 30 s tick keeps the answers"
+    );
+    // An agent that restarted has no snapshot; what it reads first still
+    // carries the answers, because they are in the database.
+    *s.docker_snapshot.write().await = None;
+    assert_eq!(
+        container_updates(&s).await,
+        vec![Some(ImageUpdateState::UpdateAvailable)]
+    );
+}
+
+#[tokio::test]
+async fn notifies_once_per_digest() {
+    let w = nginx_world(1);
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    let cards = update_cards(&s).await;
+    assert_eq!(cards.len(), 1);
+    let (kind, severity, title, body) = &cards[0];
+    assert!(kind.starts_with("docker.update:"), "{kind}");
+    assert_eq!(severity, "info");
+    assert!(!title.is_empty() && body.contains('1'), "{title} / {body}");
+
+    // The next day: same digest, nothing new to say.
+    updates_at(&s, T0 + DAY + 600).await;
+    assert_eq!(lookups(&w).len(), 2, "it did ask again");
+    assert_eq!(update_cards(&s).await.len(), 1);
+
+    // A newer digest is news again.
+    let newer = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+    w.lock()
+        .expect("world")
+        .remote
+        .insert("nginx:alpine".into(), Ok(newer.into()));
+    updates_at(&s, T0 + 2 * DAY + 1200).await;
+    assert_eq!(update_cards(&s).await.len(), 2);
+}
+
+#[tokio::test]
+async fn the_update_card_counts_images_and_is_bell_only() {
+    let w = world(vec![
+        ct(1, "p", "a").on_image("a/one:1", OLD_D),
+        ct(2, "p", "b").on_image("b/two:1", OLD_D),
+        ct(3, "p", "c").on_image("c/three:1", OLD_D),
+    ]);
+    {
+        let mut g = w.lock().expect("world");
+        for r in ["a/one:1", "b/two:1", "c/three:1"] {
+            let name = r.split(':').next().expect("name");
+            g.locals
+                .insert(r.into(), (OLD_D.into(), vec![format!("{name}@{OLD_D}")]));
+        }
+        g.remote.insert("a/one:1".into(), Ok(NEW_D.into()));
+        g.remote.insert("b/two:1".into(), Ok(NEW_D.into()));
+        g.remote.insert("c/three:1".into(), Ok(OLD_D.into()));
+    }
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    let cards = update_cards(&s).await;
+    assert_eq!(cards.len(), 1, "one folded card per node");
+    assert!(
+        cards[0].3.contains('2'),
+        "two images have updates: {}",
+        cards[0].3
+    );
+}
+
+#[test]
+fn update_notices_never_leave_the_bell() {
+    assert!(!is_outbound_docker_kind("docker.update:s4"));
+    assert!(!is_outbound_docker_kind("docker.update:"));
+    assert!(
+        is_outbound_docker_kind("docker.project:x"),
+        "the rest is unchanged"
+    );
+    assert!(is_outbound_docker_kind("docker.daemon"));
+}
+
+#[tokio::test]
+async fn an_ingested_update_notice_sends_nothing_outbound() {
+    // A worker's update card reaches the master's bell like any alert, and
+    // stops there: Slack and mail stay quiet, and the same item sent again
+    // is still not news.
+    let s = outbound_master(&["boss"]).await;
+    let n = s
+        .notifications_ingest("node_a", vec![outbox_item(1, "docker.update:node_a")])
+        .await
+        .expect("ingest");
+    assert_eq!(n, 1, "the bell gets it");
+    assert_eq!(slack_sends(&s).await, 0);
+    assert!(mail_sends(&s).await.is_empty());
+}
+
+#[test]
+fn the_wire_field_is_optional() {
+    let c: hyperion_types::docker::DockerContainer =
+        serde_json::from_str(r#"{"name":"x"}"#).expect("an older node's container");
+    assert_eq!(c.update, None);
+    let c: hyperion_types::docker::DockerContainer =
+        serde_json::from_str(r#"{"name":"x","update":{"cannot_verify":{"reason":"pinned"}}}"#)
+            .expect("with a state");
+    assert!(matches!(
+        c.update,
+        Some(ImageUpdateState::CannotVerify { .. })
+    ));
 }

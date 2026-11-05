@@ -1,6 +1,7 @@
 //! Read-only Docker adapter. This is the only code in Hyperion that runs
 //! `docker`, and every command it can build is a read (`version`, `ps`,
-//! `inspect`, `logs`, `stats`, `system df`, `image inspect`).
+//! `inspect`, `logs`, `stats`, `system df`, `image inspect`, `buildx
+//! imagetools inspect`).
 //!
 //! Secrets stay out by construction: inspect output is deserialised into
 //! private structs that have no `Env` field and that keep only
@@ -18,6 +19,8 @@ use tokio::process::Command;
 const DOCKER_PATHS: &[&str] = &["/usr/bin/docker", "/usr/local/bin/docker"];
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const SYSTEM_DF_TIMEOUT: Duration = Duration::from_secs(120);
+/// A registry round trip, token included, on a slow link.
+const IMAGETOOLS_TIMEOUT: Duration = Duration::from_secs(45);
 /// Longest stderr text carried in `DockerError::Failed`.
 const FAILED_TEXT_MAX: usize = 2000;
 
@@ -90,6 +93,10 @@ pub enum DockerCmd {
     Stats,
     SystemDf,
     ImageInspect(ImageRef),
+    /// Ask a registry for the digest of a tag, with whatever credentials
+    /// Docker's own store holds. Reads the registry's manifest; it pulls no
+    /// layer.
+    ImagetoolsInspect(ImageRef),
 }
 
 impl DockerCmd {
@@ -122,12 +129,18 @@ impl DockerCmd {
                 a.push(r.0.clone());
                 a
             }
+            Self::ImagetoolsInspect(r) => {
+                let mut a = s(&["buildx", "imagetools", "inspect"]);
+                a.push(r.0.clone());
+                a
+            }
         }
     }
 
     fn timeout(&self) -> Duration {
         match self {
             Self::SystemDf => SYSTEM_DF_TIMEOUT,
+            Self::ImagetoolsInspect(_) => IMAGETOOLS_TIMEOUT,
             _ => DEFAULT_TIMEOUT,
         }
     }
@@ -479,6 +492,8 @@ fn container_of(r: InspectRow) -> DockerContainer {
             .log_config
             .config
             .and_then(|m| m.get("max-size").cloned()),
+        update: None,
+        update_checked_at: 0,
         id: r.id,
     }
 }
@@ -579,6 +594,43 @@ pub fn parse_system_df(bytes: &[u8]) -> Result<DockerDisk, DockerError> {
     Ok(d)
 }
 
+/// What the update check needs to know about the local copy of an image, and
+/// nothing else: `Config.Env`, labels, history and layers are never read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalImage {
+    /// The reference the container names, as it was asked for.
+    pub image_ref: String,
+    /// `name@sha256:...` entries. Empty for an image that was built here.
+    pub repo_digests: Vec<String>,
+    /// `Id`: what a container created from this image reports as its image.
+    pub image_id: String,
+    /// The reference names a digest itself, so there is no tag to move.
+    pub pinned: bool,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "PascalCase")]
+struct ImageInspectRow {
+    id: String,
+    repo_digests: Option<Vec<String>>,
+}
+
+/// Facts from `docker image inspect <image_ref>`. `None` when the node has no
+/// such image (docker prints `[]`). Only the image id and its repo digests are
+/// read, so `Config.Env` and every label stay where they were.
+pub fn parse_image_inspect(
+    bytes: &[u8],
+    image_ref: &str,
+) -> Result<Option<LocalImage>, DockerError> {
+    let rows: Vec<ImageInspectRow> = serde_json::from_slice(bytes).map_err(jerr)?;
+    Ok(rows.into_iter().next().map(|r| LocalImage {
+        image_ref: image_ref.to_string(),
+        repo_digests: r.repo_digests.unwrap_or_default(),
+        image_id: r.id,
+        pinned: image_ref.contains("@sha256:"),
+    }))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockerVersion {
     pub client: String,
@@ -636,6 +688,7 @@ mod tests {
             DockerCmd::Stats,
             DockerCmd::SystemDf,
             DockerCmd::ImageInspect(ImageRef::parse("nginx:alpine").unwrap()),
+            DockerCmd::ImagetoolsInspect(ImageRef::parse("ghcr.io/o/app:1").unwrap()),
         ]
     }
 
@@ -650,6 +703,7 @@ mod tests {
             &["stats"],
             &["system", "df"],
             &["image", "inspect"],
+            &["buildx", "imagetools", "inspect"],
         ];
         for cmd in sample_of_every_variant() {
             let args = cmd.args();
@@ -740,6 +794,96 @@ mod tests {
         assert_eq!(d.volumes_bytes, 0);
         assert_eq!(d.build_cache_bytes, 0);
         assert!(d.read_at > 1_700_000_000);
+    }
+
+    #[test]
+    fn imagetools_asks_the_registry_for_one_reference() {
+        let args = DockerCmd::ImagetoolsInspect(ImageRef::parse("ghcr.io/o/app:1").unwrap()).args();
+        assert_eq!(
+            args,
+            ["buildx", "imagetools", "inspect", "ghcr.io/o/app:1"],
+            "no pull, no create, no push"
+        );
+    }
+
+    #[test]
+    fn image_inspect_reads_id_and_repo_digests_only() {
+        let img = parse_image_inspect(
+            include_bytes!("../tests/fixtures/docker/image_inspect.json"),
+            "nginx:alpine",
+        )
+        .unwrap()
+        .expect("one image");
+        assert_eq!(
+            img.image_id,
+            "sha256:785835ea65db4bba6f021acc0f3be91b0fef76a53fe41f8588c6698d2aed0606"
+        );
+        assert_eq!(
+            img.repo_digests,
+            ["nginx@sha256:785835ea65db4bba6f021acc0f3be91b0fef76a53fe41f8588c6698d2aed0606"]
+        );
+        assert_eq!(img.image_ref, "nginx:alpine");
+        assert!(!img.pinned);
+    }
+
+    #[test]
+    fn image_inspect_drops_env_and_labels() {
+        // Destructuring names every field the type has: a new one would stop
+        // this from compiling until somebody decided it may leave the adapter.
+        let raw = br#"[{
+            "Id": "sha256:aa",
+            "RepoTags": ["x:1"],
+            "RepoDigests": ["x@sha256:bb"],
+            "Config": {
+                "Env": ["DB_PASSWORD=do-not-leak-7f3a"],
+                "Labels": {"secret.label": "do-not-leak-7f3a"},
+                "Cmd": ["--token=do-not-leak-7f3a"]
+            },
+            "Comment": "do-not-leak-7f3a"
+        }]"#;
+        let img = parse_image_inspect(raw, "x:1").unwrap().expect("image");
+        let LocalImage {
+            image_ref,
+            repo_digests,
+            image_id,
+            pinned,
+        } = &img;
+        let everything = format!("{image_ref} {repo_digests:?} {image_id} {pinned} {img:?}");
+        assert!(!everything.contains("do-not-leak-7f3a"), "{everything}");
+        assert!(!everything.contains("DB_PASSWORD"), "{everything}");
+    }
+
+    #[test]
+    fn image_inspect_of_a_missing_or_local_image() {
+        // `docker image inspect nosuch` prints `[]` and exits 1.
+        assert_eq!(parse_image_inspect(b"[]\n", "nosuch:1").unwrap(), None);
+        // No RepoDigests (null or absent): built here.
+        for raw in [
+            &br#"[{"Id":"sha256:aa","RepoDigests":null}]"#[..],
+            &br#"[{"Id":"sha256:aa"}]"#[..],
+        ] {
+            let img = parse_image_inspect(raw, "app:latest")
+                .unwrap()
+                .expect("image");
+            assert!(img.repo_digests.is_empty());
+        }
+        assert!(matches!(
+            parse_image_inspect(b"nope", "x:1"),
+            Err(DockerError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn a_reference_with_a_digest_is_pinned() {
+        let raw = br#"[{"Id":"sha256:aa","RepoDigests":["nginx@sha256:aa"]}]"#;
+        let img = parse_image_inspect(raw, "nginx@sha256:aa")
+            .unwrap()
+            .expect("image");
+        assert!(img.pinned);
+        let img = parse_image_inspect(raw, "nginx:1.2@sha256:aa")
+            .unwrap()
+            .expect("image");
+        assert!(img.pinned);
     }
 
     #[test]

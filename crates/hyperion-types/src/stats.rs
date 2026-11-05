@@ -2181,14 +2181,15 @@ pub fn notification_topic(kind: &str) -> (&'static str, &'static str) {
 /// recovery share one card that always says how it stands now. The Docker
 /// daemon is one subject per node, so `docker.daemon` has no suffix (the
 /// master keeps one card per node already). `docker.node:<id>` (a node that
-/// went silent, and its return) folds the same way, and so do the two
+/// went silent, and its return) folds the same way, and so does
+/// `docker.update:<node>` (the images with an update, one card per node), and so do the two
 /// states of a URL check (`url.monitor:<id>`: down, then back up). A
 /// certificate warning (`url.cert:<id>`) is its own event and does not fold.
 pub fn notification_replaces(kind: &str) -> bool {
     kind == "docker.daemon"
         || matches!(
             kind.split_once(':'),
-            Some(("php_workers" | "docker.project" | "docker.node" | "url.monitor", subject)) if !subject.is_empty()
+            Some(("php_workers" | "docker.project" | "docker.node" | "docker.update" | "url.monitor", subject)) if !subject.is_empty()
         )
 }
 
@@ -3172,6 +3173,7 @@ mod notification_topic_tests {
             ("docker.project:shop", "docker"),
             ("docker.daemon", "docker"),
             ("docker.node:node_a", "docker"),
+            ("docker.update:node_a", "docker"),
             ("url.monitor:7", "uptime"),
             ("url.cert:7", "uptime"),
             ("hosting.something_else", "other"),
@@ -3197,6 +3199,9 @@ mod notification_topic_tests {
         assert!(notification_replaces("docker.project:(other)"));
         assert!(notification_replaces("docker.daemon"));
         assert!(notification_replaces("docker.node:node_a"));
+        assert!(notification_replaces("docker.update:node_a"));
+        assert!(!notification_replaces("docker.update"));
+        assert!(!notification_replaces("docker.update:"));
         assert!(notification_replaces("url.monitor:7"));
         assert!(!notification_replaces("url.monitor"));
         assert!(!notification_replaces("url.monitor:"));

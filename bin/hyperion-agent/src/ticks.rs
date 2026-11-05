@@ -65,6 +65,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_snapshot_retention(svc);
     spawn_os_updates(svc);
     spawn_docker(svc);
+    spawn_docker_updates(svc);
 }
 
 /// Background-job closures run in the hyperion-web process, so a web
@@ -454,6 +455,28 @@ fn spawn_docker(svc: &Svc) {
     every(svc, 25, 30, |svc| async move {
         if let Err(e) = svc.docker_tick().await {
             tracing::warn!(error=%e, "docker tick failed");
+        }
+    });
+}
+
+/// The daily image check. The delay after boot is drawn once, here, under six
+/// hours, so a fleet that restarts together (an update does that) does not
+/// ask the registries at the same moment; then it repeats every 24 hours. A
+/// restart does not repeat work: a reference answered within the last 20
+/// hours is skipped inside the tick. The module being off makes the tick a
+/// no-op before it runs `docker`.
+fn spawn_docker_updates(svc: &Svc) {
+    use std::hash::{BuildHasher, Hasher};
+    // `RandomState` is seeded per process from the OS, which is all the
+    // spread this needs.
+    let draw = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    let offset = 5 * MIN + draw % (6 * HOUR - 5 * MIN);
+    tracing::info!(offset_secs = offset, "docker image check scheduled");
+    every(svc, offset, DAY, |svc| async move {
+        if let Err(e) = svc.docker_updates_tick().await {
+            tracing::warn!(error=%e, "docker image check failed");
         }
     });
 }
