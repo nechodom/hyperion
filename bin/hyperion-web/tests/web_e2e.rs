@@ -8386,7 +8386,7 @@ async fn a_wordpress_plugin_upload_becomes_an_importable_bundle() {
             &token,
             Method::POST,
             format!(
-                r#"{{"db_bytes":{},"files_bytes":{files},"files_members":1}}"#,
+                r#"{{"db_bytes":{},"files_bytes":{files},"files_members":1,"warnings":["a late note"]}}"#,
                 db.len()
             )
             .into_bytes(),
@@ -8426,6 +8426,240 @@ async fn a_wordpress_plugin_upload_becomes_an_importable_bundle() {
     assert_eq!(ir.source.kind, "wordpress");
     assert_eq!(ir.hostings[0].domain, "source-site.cz");
     assert_eq!(ir.hostings[0].aliases, vec!["www.source-site.cz"]);
+    assert!(
+        ir.unsupported.iter().any(|u| u.detail == "a late note"),
+        "what the plugin noticed after begin must reach the operator"
+    );
+}
+
+/// The bundle routes take a manifest naming any hostings and paths. A code that
+/// may be pasted into a stranger's wp-admin must not open them.
+#[tokio::test]
+async fn a_plugin_code_cannot_drive_the_bundle_routes() {
+    let (_dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let (token, _id) = mint_wordpress_token(&sock).await;
+    let app = build_app(sock, admin);
+
+    let sha = "0".repeat(64);
+    for req in [
+        upload_req(
+            "/import/upload/begin",
+            &token,
+            Method::POST,
+            format!("bytes 10\nsha256 {sha}\n").into_bytes(),
+        ),
+        upload_req("/import/upload/chunk", &token, Method::PUT, b"x".to_vec()),
+        upload_req(
+            "/import/upload/commit",
+            &token,
+            Method::POST,
+            format!("bytes 1\nsha256 {sha}\n").into_bytes(),
+        ),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/import/ingest/{token}"))
+            .body(Body::from("x"))
+            .unwrap(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/import/manifest/{token}"))
+            .body(Body::from("[]"))
+            .unwrap(),
+    ] {
+        let path = req.uri().path().to_string();
+        let r = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+
+    // None of that spent it.
+    let r = app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+/// nginx streams this route and hyper drops a handler whose client went away, so
+/// a source killed mid-chunk runs no error path here. Its bytes must not land on
+/// the stream: the plugin can only resend whole slices, so it could never resume.
+#[tokio::test]
+async fn a_chunk_cut_off_mid_body_leaves_the_stream_where_it_was() {
+    let (dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let (token, id) = mint_wordpress_token(&sock).await;
+    let app = build_app(sock, admin);
+    app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+
+    let db = gz_member(b"whole slice");
+    let sha = sha256_hex(&db);
+    let (half, _) = db.split_at(db.len() / 2);
+    // Half the body, then nothing, then the handler is dropped as hyper would.
+    let (mut sender, received) = tokio::io::duplex(64 * 1024);
+    tokio::io::AsyncWriteExt::write_all(&mut sender, half)
+        .await
+        .unwrap();
+    let mut req = wp_chunk(&token, "db", 0, &sha, Vec::new());
+    *req.body_mut() = Body::from_stream(tokio_util::io::ReaderStream::new(received));
+    let cut = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        app.clone().oneshot(req),
+    )
+    .await;
+    assert!(cut.is_err(), "the handler should still be waiting for body");
+
+    let stream = dir.path().join(format!("bundle-wp-{id}/db.sql.gz"));
+    assert_eq!(std::fs::metadata(&stream).map(|m| m.len()).unwrap_or(0), 0);
+
+    // The lock went with the handler, and the same slice now goes through.
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(&token, "db", 0, &sha, db.clone()))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(std::fs::read(&stream).unwrap(), db);
+}
+
+/// A retry can arrive while the request it gave up on is still running.
+#[tokio::test]
+async fn a_second_request_for_a_busy_transfer_waits_its_turn() {
+    let (dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let (token, id) = mint_wordpress_token(&sock).await;
+    let app = build_app(sock, admin);
+    app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+
+    let db = gz_member(b"whole slice");
+    let sha = sha256_hex(&db);
+    let (mut sender, received) = tokio::io::duplex(64 * 1024);
+    let mut first = wp_chunk(&token, "db", 0, &sha, Vec::new());
+    *first.body_mut() = Body::from_stream(tokio_util::io::ReaderStream::new(received));
+    let running = tokio::spawn(app.clone().oneshot(first));
+
+    // The side file only appears once the first request holds the lock. Sending the
+    // retry any sooner is a race the retry can win.
+    let part = dir.path().join(format!("bundle-wp-{id}/chunk.part"));
+    for _ in 0..1000 {
+        if part.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(part.exists(), "the first request never took the lock");
+
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(&token, "db", 0, &sha, db.clone()))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::LOCKED);
+
+    tokio::io::AsyncWriteExt::write_all(&mut sender, &db)
+        .await
+        .unwrap();
+    drop(sender);
+    let r = running.await.unwrap().unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    // And the lock is free again for the next slice.
+    let next = gz_member(b"next slice");
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(
+            &token,
+            "db",
+            db.len() as u64,
+            &sha256_hex(&next),
+            next,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+/// A reloaded tab calls begin again, as does a new try after Cancel. Forgetting
+/// "Import as" there would import the site under its old name.
+#[tokio::test]
+async fn import_as_survives_every_later_begin() {
+    let (_dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let (token, id) = mint_wordpress_token(&sock).await;
+    hyperion_rpc_client::call(
+        &sock,
+        hyperion_rpc::codec::Request::ImportToken(hyperion_types::ImportTokenOp::SetSelection {
+            id,
+            selection_json: r#"[{"source_domain":"","target_domain":"new-name.cz"}]"#.into(),
+        }),
+    )
+    .await
+    .expect("set selection");
+    let app = build_app(sock, admin);
+
+    let domain_after = |req: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let r = app.oneshot(req).await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&body)
+                .lines()
+                .find_map(|l| l.strip_prefix("domain ").map(str::to_owned))
+                .expect("a domain line")
+        }
+    };
+
+    assert_eq!(domain_after(wp_begin(&token, "runA")).await, "new-name.cz");
+    assert_eq!(domain_after(wp_begin(&token, "runA")).await, "new-name.cz");
+    let r = app
+        .clone()
+        .oneshot(upload_req(
+            "/import/upload/wp/abort",
+            &token,
+            Method::POST,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(domain_after(wp_begin(&token, "runB")).await, "new-name.cz");
+}
+
+/// Cancelling in the plugin must not leave the site's database on the panel.
+#[tokio::test]
+async fn aborting_discards_what_arrived_but_leaves_the_code_usable() {
+    let (dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let (token, id) = mint_wordpress_token(&sock).await;
+    let app = build_app(sock, admin);
+    app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+    let db = gz_member(b"partial");
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(&token, "db", 0, &sha256_hex(&db), db))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let r = app
+        .clone()
+        .oneshot(upload_req(
+            "/import/upload/wp/abort",
+            &token,
+            Method::POST,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(!dir.path().join(format!("bundle-wp-{id}")).exists());
+
+    let r = app.clone().oneshot(wp_begin(&token, "runB")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -8463,6 +8697,190 @@ async fn a_new_run_discards_what_the_previous_one_staged() {
         field(&body_text(r).await, "offset_db").as_deref(),
         Some("0")
     );
+}
+
+/// A transfer the panel has handed to a job, for any import kind.
+async fn committed_transfer(sock: &std::path::Path, kind: &str) -> String {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    use hyperion_types::{ImportTokenOp, ImportTokenResult};
+    let id = match hyperion_rpc_client::call(
+        sock,
+        RpcReq::ImportToken(ImportTokenOp::Mint {
+            target_node: "local".into(),
+            source_kind: kind.into(),
+            created_by: "kevin".into(),
+            ttl_secs: 3600,
+        }),
+    )
+    .await
+    .expect("mint rpc")
+    {
+        RpcResp::ImportToken(ImportTokenResult::Minted { id, .. }) => id,
+        other => panic!("unexpected mint reply: {other:?}"),
+    };
+    let job = match hyperion_rpc_client::call(
+        sock,
+        RpcReq::JobStart {
+            kind: "panel_import".into(),
+            target: None,
+            payload_json: "{}".into(),
+            actor_label: "kevin".into(),
+            actor_uid: 0,
+        },
+    )
+    .await
+    .expect("job rpc")
+    {
+        RpcResp::JobStarted { job_id } => job_id,
+        other => panic!("unexpected job reply: {other:?}"),
+    };
+    hyperion_rpc_client::call(
+        sock,
+        RpcReq::ImportToken(ImportTokenOp::Update {
+            id,
+            status: Some("importing".into()),
+            job_id: Some(job.clone()),
+            received_bytes: None,
+        }),
+    )
+    .await
+    .expect("update rpc");
+    job
+}
+
+async fn finish_job(sock: &std::path::Path, job: &str, ok: bool) {
+    hyperion_rpc_client::call(
+        sock,
+        hyperion_rpc::codec::Request::JobFinish {
+            id: job.to_string(),
+            ok,
+            error: (!ok).then(|| "the node refused".to_string()),
+        },
+    )
+    .await
+    .expect("finish rpc");
+}
+
+/// The table row that links to `job`.
+async fn transfer_row(app: &axum::Router, cookie: &str, job: &str) -> String {
+    let (status, html) = acme_dns_get(app, cookie, "/import/wizard/transfers").await;
+    assert_eq!(status, StatusCode::OK);
+    html.split("<tr>")
+        .find(|row| row.contains(&format!("/jobs/{job}")))
+        .unwrap_or_else(|| panic!("no row for job {job} in: {html}"))
+        .to_string()
+}
+
+/// Nothing writes the outcome of an import back onto its transfer, so the row has
+/// to follow the job. That has to hold for every source, not only the plugin.
+#[tokio::test]
+async fn a_transfer_row_follows_its_import_job_for_every_source() {
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "pw").await;
+
+    for kind in ["cloudpanel", "hestiacp", "wordpress"] {
+        let job = committed_transfer(&sock, kind).await;
+        let row = transfer_row(&app, &cookie, &job).await;
+        assert!(row.contains("importing"), "{kind} while running: {row}");
+
+        finish_job(&sock, &job, false).await;
+        let row = transfer_row(&app, &cookie, &job).await;
+        assert!(row.contains("pill err"), "{kind} after failing: {row}");
+        assert!(!row.contains("importing"), "{kind} after failing: {row}");
+
+        let job = committed_transfer(&sock, kind).await;
+        finish_job(&sock, &job, true).await;
+        let row = transfer_row(&app, &cookie, &job).await;
+        assert!(row.contains("pill ok"), "{kind} after finishing: {row}");
+        assert!(!row.contains("importing"), "{kind} after finishing: {row}");
+    }
+}
+
+/// A plugin transfer whose job fails: the table says so, and the plugin is told
+/// the same on every route that used to go on answering `importing`.
+#[tokio::test]
+async fn a_failed_plugin_import_shows_as_failed_everywhere() {
+    let (_dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agent_dir) = start_agent().await;
+    let (token, _id) = mint_wordpress_token(&sock).await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "pw").await;
+
+    let r = app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    // No end marker: a dump that stopped early, which the job refuses to assemble.
+    let db = gz_member(b"CREATE TABLE t(i int);\n");
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(&token, "db", 0, &sha256_hex(&db), db.clone()))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let files = gz_member(&[0u8; 1024]);
+    let r = app
+        .clone()
+        .oneshot(wp_chunk(
+            &token,
+            "files",
+            0,
+            &sha256_hex(&files),
+            files.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let commit = || {
+        upload_req(
+            "/import/upload/wp/commit",
+            &token,
+            Method::POST,
+            format!(
+                r#"{{"db_bytes":{},"files_bytes":{},"files_members":1,"warnings":[]}}"#,
+                db.len(),
+                files.len()
+            )
+            .into_bytes(),
+        )
+    };
+    let r = app.clone().oneshot(commit()).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let job = field(&body_text(r).await, "job").expect("job id");
+    assert_eq!(acme_ssl_wait_job(&sock, &job).await, "failed");
+
+    let row = transfer_row(&app, &cookie, &job).await;
+    assert!(row.contains("pill err"), "got: {row}");
+    assert!(row.contains("new code"), "got: {row}");
+    assert!(!row.contains("importing"), "got: {row}");
+
+    let r = app
+        .clone()
+        .oneshot(upload_req(
+            "/import/upload/status",
+            &token,
+            Method::GET,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        field(&body_text(r).await, "state").as_deref(),
+        Some("failed")
+    );
+
+    let r = app.clone().oneshot(wp_begin(&token, "runA")).await.unwrap();
+    let body = body_text(r).await;
+    assert_eq!(field(&body, "state").as_deref(), Some("failed"));
+    assert_eq!(field(&body, "job"), Some(job.clone()));
+
+    // Still one job: a failed import is not a second chance to import.
+    let r = app.clone().oneshot(commit()).await.unwrap();
+    let body = body_text(r).await;
+    assert_eq!(field(&body, "state").as_deref(), Some("failed"));
+    assert_eq!(field(&body, "job"), Some(job));
 }
 
 #[tokio::test]

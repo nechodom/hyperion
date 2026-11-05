@@ -95,11 +95,21 @@ pub fn resolve_target(home_url: &str, import_as: Option<&str>) -> Result<WpTarge
         return Err(format!("home URL {home_url:?} has no host"));
     }
     let path = path.trim_end_matches('/');
-    let from = if path.is_empty() {
-        authority.clone()
-    } else {
-        format!("{authority}/{path}")
+    // The path comes from the source and ends up as a search-replace argument.
+    if path
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '"' | '\'' | '\\'))
+    {
+        return Err(format!("home URL {home_url:?} has an unusable path"));
+    }
+    let with_path = |h: &str| {
+        if path.is_empty() {
+            h.to_string()
+        } else {
+            format!("{h}/{path}")
+        }
     };
+    let from = with_path(&authority);
 
     let bare = |h: &str| h.strip_prefix("www.").unwrap_or(h).to_string();
     let source = bare(&host);
@@ -118,14 +128,15 @@ pub fn resolve_target(home_url: &str, import_as: Option<&str>) -> Result<WpTarge
     if from != to {
         url_rewrites.push((from, to.clone()));
     }
-    if renamed {
-        // The other spelling of the old name still appears in old content.
+    if renamed || !path.is_empty() {
+        // The other spelling of the old name still appears in old content, and
+        // it has to lose the same folder or its links lead nowhere.
         let other = if host == source {
             format!("www.{source}")
         } else {
             source.clone()
         };
-        url_rewrites.push((other, to));
+        url_rewrites.push((with_path(&other), to));
     }
 
     // `www.` on a third-level name is rarely real, and an alias with no DNS makes
@@ -171,8 +182,9 @@ fn clean(raw: &str, max: usize) -> String {
         .collect()
 }
 
-/// The manifest for one site. `db_bytes` is the dump's size once decompressed.
-pub fn manifest(source: &WpSource, target: &WpTarget, db_bytes: u64) -> ImportIR {
+/// The manifest for one site. Both sizes are measured from what arrived, not what
+/// the source claimed, because the import's disk check goes by them.
+pub fn manifest(source: &WpSource, target: &WpTarget, files_bytes: u64, db_bytes: u64) -> ImportIR {
     let source_url = clean(&source.home_url, MAX_NOTE_CHARS);
     let mut unsupported: Vec<IrUnsupported> = source
         .warnings
@@ -216,7 +228,7 @@ pub fn manifest(source: &WpSource, target: &WpTarget, db_bytes: u64) -> ImportIR
             crons: Vec::new(),
             tls: None,
             ssh_keys: Vec::new(),
-            docroot_bytes: source.files_bytes,
+            docroot_bytes: files_bytes,
             db_bytes,
         }],
         unsupported,
@@ -225,7 +237,10 @@ pub fn manifest(source: &WpSource, target: &WpTarget, db_bytes: u64) -> ImportIR
 }
 
 /// Decompress the dump to `out` and prove it is complete. Returns its size.
-fn unpack_dump(gz: &Path, out: &Path) -> Result<u64, String> {
+///
+/// `max_bytes` is what the disk can spare. Gzip reaches about 1000:1, so a small
+/// stream from a hostile source could otherwise fill the disk from here.
+fn unpack_dump(gz: &Path, out: &Path, max_bytes: Option<u64>) -> Result<u64, String> {
     let open_err = |e: std::io::Error| format!("read the database stream: {e}");
     let mut decoder = flate2::read::MultiGzDecoder::new(std::fs::File::open(gz).map_err(open_err)?);
     let mut file = std::fs::File::options()
@@ -235,8 +250,18 @@ fn unpack_dump(gz: &Path, out: &Path) -> Result<u64, String> {
         .read(true)
         .open(out)
         .map_err(|e| format!("write the database dump: {e}"))?;
-    let bytes = std::io::copy(&mut decoder, &mut file)
+    let limit = max_bytes.unwrap_or(u64::MAX);
+    let mut capped = (&mut decoder).take(limit.saturating_add(1));
+    let bytes = std::io::copy(&mut capped, &mut file)
         .map_err(|e| format!("the database stream is corrupt: {e}"))?;
+    if bytes > limit {
+        drop(file);
+        let _ = std::fs::remove_file(out);
+        return Err(format!(
+            "the database dump does not fit on this disk: it is over {} once unpacked.",
+            crate::progress::human_bytes(limit)
+        ));
+    }
     file.flush()
         .map_err(|e| format!("write the database dump: {e}"))?;
 
@@ -256,21 +281,22 @@ fn unpack_dump(gz: &Path, out: &Path) -> Result<u64, String> {
     Ok(bytes)
 }
 
-/// Read the whole files stream and count its members. The gzip checksums catch
-/// corruption, the tar reader catches truncation inside a member, and the count
-/// catches a stream cut at a clean member boundary.
-fn count_file_members(gz: &Path) -> Result<u64, String> {
+/// Read the whole files stream, returning its member count and the size of its
+/// contents. The gzip checksums catch corruption, the tar reader catches truncation
+/// inside a member, and the count catches a stream cut at a clean member boundary.
+fn measure_files(gz: &Path) -> Result<(u64, u64), String> {
     let file = std::fs::File::open(gz).map_err(|e| format!("read the files stream: {e}"))?;
     let mut archive = tar::Archive::new(flate2::read::MultiGzDecoder::new(file));
-    let mut count = 0u64;
+    let (mut count, mut bytes) = (0u64, 0u64);
     let entries = archive
         .entries()
         .map_err(|e| format!("the files stream is not a tar archive: {e}"))?;
     for entry in entries {
-        entry.map_err(|e| format!("the files stream is corrupt: {e}"))?;
+        let entry = entry.map_err(|e| format!("the files stream is corrupt: {e}"))?;
+        bytes = bytes.saturating_add(entry.size());
         count += 1;
     }
-    Ok(count)
+    Ok((count, bytes))
 }
 
 /// Turn the two streams in `dir` into a `bundle.tar` at `out`.
@@ -284,23 +310,24 @@ pub fn assemble_bundle(
     source: &WpSource,
     target: &WpTarget,
     files_members: u64,
+    max_dump_bytes: Option<u64>,
 ) -> Result<(), String> {
     let files_gz = dir.join(FILES_STREAM);
     let db_gz = dir.join(DB_STREAM);
     let dump = dir.join("db.sql");
 
-    let got = count_file_members(&files_gz)?;
+    let (got, files_bytes) = measure_files(&files_gz)?;
     if got != files_members {
         return Err(format!(
             "the source sent {files_members} files and folders but {got} arrived. Run the \
              transfer again."
         ));
     }
-    let db_bytes = unpack_dump(&db_gz, &dump)?;
+    let db_bytes = unpack_dump(&db_gz, &dump, max_dump_bytes)?;
     let _ = std::fs::remove_file(&db_gz);
 
     let write_err = |e: std::io::Error| format!("write the bundle: {e}");
-    let manifest_json = serde_json::to_vec_pretty(&manifest(source, target, db_bytes))
+    let manifest_json = serde_json::to_vec_pretty(&manifest(source, target, files_bytes, db_bytes))
         .map_err(|e| format!("encode the manifest: {e}"))?;
     let file = {
         use std::os::unix::fs::OpenOptionsExt;
@@ -365,8 +392,29 @@ mod tests {
         assert_eq!(t.domain, "example.cz");
         assert_eq!(
             t.url_rewrites,
-            pairs(&[("www.example.cz/blog", "www.example.cz")])
+            pairs(&[
+                ("www.example.cz/blog", "www.example.cz"),
+                ("example.cz/blog", "www.example.cz"),
+            ])
         );
+    }
+
+    /// Left on the folder, `www.old.cz/blog/page` would become `new.cz/blog/page`,
+    /// which is a 404: the site is at the root now.
+    #[test]
+    fn a_renamed_subfolder_site_loses_the_folder_on_both_spellings() {
+        let t = resolve_target("https://old.cz/blog", Some("new.cz")).unwrap();
+        assert_eq!(
+            t.url_rewrites,
+            pairs(&[("old.cz/blog", "new.cz"), ("www.old.cz/blog", "new.cz")])
+        );
+    }
+
+    #[test]
+    fn a_home_url_path_that_could_not_be_a_folder_is_refused() {
+        assert!(resolve_target("https://example.cz/a b", None).is_err());
+        assert!(resolve_target("https://example.cz/a\nb", None).is_err());
+        assert!(resolve_target("https://example.cz/a'b", None).is_err());
     }
 
     #[test]
@@ -455,7 +503,7 @@ mod tests {
         let (d, source, target) =
             fixture("CREATE TABLE t(i int);\n-- hyperion-migrate: dump complete tables=1\n");
         let out = d.path().join("bundle.tar");
-        assemble_bundle(d.path(), &out, &source, &target, 2).unwrap();
+        assemble_bundle(d.path(), &out, &source, &target, 2, None).unwrap();
 
         let staged = d.path().join("staged");
         std::fs::create_dir_all(&staged).unwrap();
@@ -485,16 +533,54 @@ mod tests {
     #[test]
     fn a_dump_with_no_end_marker_is_refused() {
         let (d, source, target) = fixture("CREATE TABLE t(i int);\n");
-        let err =
-            assemble_bundle(d.path(), &d.path().join("b.tar"), &source, &target, 2).unwrap_err();
+        let err = assemble_bundle(d.path(), &d.path().join("b.tar"), &source, &target, 2, None)
+            .unwrap_err();
         assert!(err.contains("end marker"), "got: {err}");
     }
 
     #[test]
     fn a_files_stream_short_of_members_is_refused() {
         let (d, source, target) = fixture("-- hyperion-migrate: dump complete tables=0\n");
-        let err =
-            assemble_bundle(d.path(), &d.path().join("b.tar"), &source, &target, 3).unwrap_err();
+        let err = assemble_bundle(d.path(), &d.path().join("b.tar"), &source, &target, 3, None)
+            .unwrap_err();
         assert!(err.contains("3 files"), "got: {err}");
+    }
+
+    /// A few KB of gzip can unpack to the whole disk.
+    #[test]
+    fn a_dump_larger_than_the_disk_can_spare_is_refused_and_removed() {
+        let dump = format!(
+            "{}\n-- hyperion-migrate: dump complete tables=1\n",
+            "x".repeat(100_000)
+        );
+        let (d, source, target) = fixture(&dump);
+        let err = assemble_bundle(
+            d.path(),
+            &d.path().join("b.tar"),
+            &source,
+            &target,
+            2,
+            Some(1000),
+        )
+        .unwrap_err();
+        assert!(err.contains("does not fit"), "got: {err}");
+        assert!(!d.path().join("db.sql").exists());
+    }
+
+    /// The import's disk check goes by these, and a source can claim anything.
+    #[tokio::test]
+    async fn the_manifest_states_what_arrived_not_what_the_source_claimed() {
+        let (d, mut source, target) =
+            fixture("CREATE TABLE t(i int);\n-- hyperion-migrate: dump complete tables=1\n");
+        source.files_bytes = 1;
+        let out = d.path().join("bundle.tar");
+        assemble_bundle(d.path(), &out, &source, &target, 2, None).unwrap();
+        let staged = d.path().join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        tar::Archive::new(std::fs::File::open(&out).unwrap())
+            .unpack(&staged)
+            .unwrap();
+        let ir = bundle::read_manifest(&staged).await.expect("manifest");
+        assert_eq!(ir.hostings[0].docroot_bytes, 10, "two 5-byte files");
     }
 }

@@ -1485,6 +1485,11 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/import/upload/wp/commit",
             post(handlers::import_wordpress::post_commit)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/import/upload/wp/abort",
+            post(handlers::import_wordpress::post_abort)
                 .layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
         )
         .route(

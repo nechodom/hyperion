@@ -889,7 +889,7 @@ pub async fn get_job_progress(
     Ok(resp)
 }
 
-async fn fetch_job(
+pub(crate) async fn fetch_job(
     state: &SharedState,
     id: &str,
 ) -> Result<Option<hyperion_types::JobView>, AppError> {
