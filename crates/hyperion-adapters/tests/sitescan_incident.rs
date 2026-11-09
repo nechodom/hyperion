@@ -171,6 +171,11 @@ impl Site {
             ("wp-includes/version.php", version_php.into_bytes()),
             ("wp-includes/load.php", b"<?php // helpers\n".to_vec()),
             ("wp-admin/admin.php", b"<?php // admin\n".to_vec()),
+            ("license.txt", b"GPLv2\n".to_vec()),
+            (
+                "readme.html",
+                b"<html><body>WordPress</body></html>\n".to_vec(),
+            ),
         ];
         let mut files: BTreeMap<String, Digest> = tree
             .iter()
@@ -1117,6 +1122,54 @@ fn churn_paths_get_rules_but_no_change_detection() {
 }
 
 #[test]
+fn upgrade_temp_backup_is_churn() {
+    // WordPress copies a plugin here before updating it and removes the copy
+    // after; an interrupted update leaves it behind. Not a change to review,
+    // but its PHP is still inspected.
+    let s = Site::new();
+    s.wordpress();
+    s.scan();
+    settle();
+    s.write(
+        "wp-content/upgrade-temp-backup/plugins/p/p.php",
+        "<?php echo 1;\n",
+    );
+    s.write("wp-content/upgrade-temp-backup/plugins/p/x.php", SHELL);
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert_eq!(
+        rels(&out.findings),
+        ["wp-content/upgrade-temp-backup/plugins/p/x.php"]
+    );
+}
+
+#[test]
+fn removed_license_and_readme_are_not_missing_core() {
+    // Removed on purpose to hide the version; nothing runs from them.
+    let s = Site::new();
+    s.wordpress();
+    s.rm("license.txt");
+    s.rm("readme.html");
+    let out = s.scan();
+    assert!(
+        out.upstream.core_missing.is_empty(),
+        "{:?}",
+        out.upstream.core_missing
+    );
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    // A changed readme.html is still a change to core.
+    s.write(
+        "readme.html",
+        "<script src=\"https://evil.example/x.js\"></script>\n",
+    );
+    let out = s.scan();
+    assert_eq!(
+        item(&out.findings, "readme.html").kind,
+        FindingKind::CoreModified
+    );
+}
+
+#[test]
 fn php_in_uploads_is_reported_until_dealt_with() {
     let s = Site::new();
     s.wordpress();
@@ -1217,7 +1270,7 @@ fn hard_linked_php_is_reported() {
     let out = s.scan();
     assert_eq!(
         out.files_hashed,
-        6 + 1,
+        8 + 1,
         "core plus wp-config, nothing linked"
     );
     let r = item(&out.review, "wp-content/mu-plugins/link.php");

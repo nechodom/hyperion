@@ -86,10 +86,16 @@ const ROOT_EXEMPT: [&str; 4] = [WP_CONFIG, ".htaccess", ".user.ini", MAINTENANCE
 /// In `wp-admin` and `wp-includes` only these are: a `wp-config.php` there isn't
 /// the real one.
 const CORE_DIR_EXEMPT: [&str; 2] = [".htaccess", ".user.ini"];
-const CHURN_DIRS: [&str; 8] = [
+/// Core files a site may delete on purpose (they reveal the version) and that
+/// nothing loads: gone is not a finding, changed still is.
+const CORE_OPTIONAL: [&str; 2] = ["license.txt", "readme.html"];
+const CHURN_DIRS: [&str; 9] = [
     "wp-content/cache/",
     "wp-content/wflogs/",
     "wp-content/upgrade/",
+    // WordPress's copy of a plugin or theme during its update, left behind
+    // when the update is cut short.
+    "wp-content/upgrade-temp-backup/",
     "wp-content/languages/",
     "wp-content/et-cache/",
     "wp-content/litespeed/",
@@ -1799,9 +1805,10 @@ impl<'a> Scan<'a> {
     /// Manifest files the walk never met.
     fn add_missing(&mut self) {
         for i in 0..self.comps.len() {
+            let core = self.comps[i].is_core();
             let mut missing = Vec::new();
             for (_, rel) in self.comps[i].in_scope_files() {
-                if self.seen.visited(&rel) {
+                if self.seen.visited(&rel) || (core && CORE_OPTIONAL.contains(&rel.as_str())) {
                     continue;
                 }
                 if self.seen.may_exist(&rel) {
@@ -1810,7 +1817,6 @@ impl<'a> Scan<'a> {
                     missing.push(rel);
                 }
             }
-            let core = self.comps[i].is_core();
             let kind = if core {
                 FindingKind::CoreMissing
             } else {
