@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use regex::bytes::{Regex, RegexSet, RegexSetBuilder};
 
 /// Bumped whenever a rule changes; a bump re-inspects the Layer B scope once.
-pub const RULE_PACK_VERSION: u32 = 3;
+pub const RULE_PACK_VERSION: u32 = 4;
 
 /// Bytes of one file that are inspected. A larger inspected file (PHP,
 /// JavaScript, HTML, PHP settings) is reported as `too_large_to_inspect` (never
@@ -259,11 +259,80 @@ fn under_uploads(rel_path: &str) -> bool {
 /// Bytes an `index.php` stub may have; plugins' are a line or two.
 const STUB_MAX_BYTES: usize = 512;
 
-/// An `index.php` that only stops directory listing: `<?php`, comments, and
-/// optionally `?>` with nothing after it. Plugins drop one into every folder
-/// they make under uploads (WP All Import, one per import). A `?>` inside a
-/// line comment ends PHP mode there, so such a file is not a stub; nor is a
-/// `#[` attribute, an unclosed block comment, or any output.
+/// Bytes a guard `.htaccess` may have; All-in-One WP Migration's is about 600.
+const GUARD_HTACCESS_MAX_BYTES: usize = 2048;
+
+/// A small file a plugin writes to keep people out of a folder, which neither
+/// runs code nor changes what runs: an `index.php` stub (see
+/// [`is_silence_stub`]) or an `.htaccess` that only denies access (see
+/// [`is_deny_htaccess`]). All-in-One WP Migration writes both into its own
+/// `storage/` at runtime, so they are never in the wordpress.org manifest.
+pub fn is_access_guard(rel_path: &str, bytes: &[u8]) -> bool {
+    match rel_path.rsplit('/').next() {
+        Some("index.php") => is_silence_stub(rel_path, bytes),
+        Some(".htaccess") => is_deny_htaccess(bytes),
+        _ => false,
+    }
+}
+
+/// An `.htaccess` whose every line is access control, a listing switch-off,
+/// or a harmless type: `Require all …`, `Order`/`Deny`/`Allow`/`Satisfy`,
+/// `Options` that only remove, `DirectoryIndex`, `AddType text/plain` or
+/// `application/octet-stream`, and `<IfModule>`/`<Files>`/`<FilesMatch>`
+/// sections. A handler, a rewrite, a PHP setting, an error document, or a
+/// continued line is not.
+fn is_deny_htaccess(bytes: &[u8]) -> bool {
+    if bytes.len() > GUARD_HTACCESS_MAX_BYTES {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    // A bare CR: where one line ends is then a matter of who reads it.
+    if text.replace("\r\n", "\n").contains('\r') {
+        return false;
+    }
+    text.trim_start_matches('\u{feff}')
+        .lines()
+        .all(|raw| {
+            let line = raw.trim();
+            if line.ends_with('\\') {
+                return false;
+            }
+            if line.is_empty() || line.starts_with('#') {
+                return true;
+            }
+            let mut words = line.split_ascii_whitespace();
+            let Some(first) = words.next() else {
+                return true;
+            };
+            let args: Vec<String> = words.map(str::to_ascii_lowercase).collect();
+            match first.to_ascii_lowercase().as_str() {
+                "</ifmodule>" | "</files>" | "</filesmatch>" => args.is_empty(),
+                "<ifmodule" | "<files" | "<filesmatch" => line.ends_with('>'),
+                "require" => {
+                    matches!(args.as_slice(), [all, v] if all == "all" && (v == "denied" || v == "granted"))
+                }
+                "order" | "satisfy" => true,
+                "deny" | "allow" => args.first().is_some_and(|a| a == "from"),
+                "options" => !args.is_empty() && args.iter().all(|a| a.starts_with('-')),
+                "directoryindex" => !args.is_empty(),
+                "addtype" => matches!(
+                    args.first().map(String::as_str),
+                    Some("text/plain" | "application/octet-stream")
+                ),
+                _ => false,
+            }
+        })
+}
+
+/// An `index.php` that only stops directory listing. Plugins drop one into
+/// every folder they make: empty (WP All Import `touch()`es it), plain text
+/// with no markup (All-in-One WP Migration), or `<?php`, comments, and
+/// optionally `?>` with nothing after it. Text with no `<` in it can't open PHP
+/// mode and isn't markup when served. A `?>` inside a line comment ends PHP
+/// mode there, so such a file is not a stub; nor is a `#[` attribute, an
+/// unclosed block comment, or any output.
 fn is_silence_stub(rel_path: &str, bytes: &[u8]) -> bool {
     if rel_path.rsplit('/').next() != Some("index.php") || bytes.len() > STUB_MAX_BYTES {
         return false;
@@ -271,6 +340,9 @@ fn is_silence_stub(rel_path: &str, bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
     };
+    if !text.contains('<') {
+        return true;
+    }
     let Some(mut rest) = text
         .trim_start_matches('\u{feff}')
         .trim_start()
@@ -1152,10 +1224,88 @@ return () => {
             b"\xEF\xBB\xBF<?php\n/* nothing */\n?>\n",
             b"<?php\n# keep out\n// and again\n",
             b"<?php\n",
+            // WP All Import `touch()`es its index.php: an empty file.
+            b"",
+            b" \n",
+            // All-in-One WP Migration's: plain text, nothing PHP runs.
+            b"Kangaroos cannot jump here",
+            b"\xEF\xBB\xBFSilence is golden.\n",
         ] {
             let h = inspect("wp-content/uploads/wpallimport/logs/abc/index.php", src);
             assert!(h.is_empty(), "{:?}: {h:?}", String::from_utf8_lossy(src));
+            assert!(
+                is_access_guard("wp-content/plugins/p/storage/index.php", src),
+                "{:?}",
+                String::from_utf8_lossy(src)
+            );
         }
+    }
+
+    #[test]
+    fn index_with_markup_is_not_a_stub() {
+        // Served as HTML: a redirect or a script is not a stub, PHP or not.
+        for src in [
+            &b"<script src=\"https://evil.example/x.js\"></script>"[..],
+            b"<meta http-equiv=\"refresh\" content=\"0;url=https://evil.example\">",
+            b"<? system($_GET['c']);",
+        ] {
+            let h = inspect("wp-content/uploads/x/index.php", src);
+            assert_eq!(
+                ids(&h)[0],
+                "php_in_uploads",
+                "{:?}",
+                String::from_utf8_lossy(src)
+            );
+            assert!(!is_access_guard("wp-content/plugins/p/index.php", src));
+        }
+    }
+
+    /// All-in-One WP Migration's `storage/.htaccess`, as it writes it.
+    const AI1WM_STORAGE_HTACCESS: &str = "<IfModule mod_authz_core.c>\n\t<FilesMatch \".*\">\n\t\tRequire all denied\n\t</FilesMatch>\n\t<FilesMatch \"\\.log$\">\n\t\tRequire all granted\n\t</FilesMatch>\n</IfModule>\n<IfModule !mod_authz_core.c>\n\tOrder allow,deny\n\tDeny from all\n\t<FilesMatch \"\\.log$\">\n\t\tOrder allow,deny\n\t\tAllow from all\n\t</FilesMatch>\n</IfModule>\n<IfModule mod_mime.c>\n\tAddType text/plain .log\n</IfModule>\n<IfModule mod_dir.c>\n\tDirectoryIndex index.php\n</IfModule>\n<IfModule mod_autoindex.c>\n\tOptions -Indexes\n</IfModule>";
+
+    #[test]
+    fn access_only_htaccess_is_a_guard() {
+        for src in [
+            AI1WM_STORAGE_HTACCESS,
+            "deny from all\n",
+            "# keep out\nOrder Deny,Allow\r\nDeny from all\n",
+            "<Files *.php>\nRequire all denied\n</Files>\n",
+            "Options -Indexes -ExecCGI\n",
+            "",
+        ] {
+            assert!(
+                is_access_guard("wp-content/plugins/p/storage/.htaccess", src.as_bytes()),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn htaccess_that_changes_what_runs_is_not_a_guard() {
+        for src in [
+            "AddHandler application/x-httpd-php .jpg\n",
+            "AddType application/x-httpd-php .jpg\n",
+            "<FilesMatch \"\\.jpg$\">\nSetHandler application/x-httpd-php\n</FilesMatch>\n",
+            "php_value auto_prepend_file /tmp/x\n",
+            "RewriteEngine On\nRewriteRule .* https://evil.example [R]\n",
+            "Options +Indexes\n",
+            "Options ExecCGI\n",
+            "ErrorDocument 404 /x.php\n",
+            // A continued line hides what follows it.
+            "Deny from all \\\nAddHandler php .jpg\n",
+            "Require expr true\n",
+            "Deny from all\rAddHandler application/x-httpd-php .jpg\n",
+        ] {
+            assert!(
+                !is_access_guard("wp-content/plugins/p/storage/.htaccess", src.as_bytes()),
+                "{src:?}"
+            );
+        }
+        // Other names are never guards, and a guard is small.
+        assert!(!is_access_guard("wp-content/plugins/p/x.php", b""));
+        assert!(!is_access_guard("wp-content/plugins/p/.user.ini", b""));
+        let big = "deny from all\n".repeat(400);
+        assert!(!is_access_guard("p/.htaccess", big.as_bytes()));
     }
 
     #[test]
