@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use regex::bytes::{Regex, RegexSet, RegexSetBuilder};
 
 /// Bumped whenever a rule changes; a bump re-inspects the Layer B scope once.
-pub const RULE_PACK_VERSION: u32 = 2;
+pub const RULE_PACK_VERSION: u32 = 3;
 
 /// Bytes of one file that are inspected. A larger inspected file (PHP,
 /// JavaScript, HTML, PHP settings) is reported as `too_large_to_inspect` (never
@@ -100,6 +100,10 @@ const CLEANUP_AFTER_APPEND: &str = r"(?-u)appendChild\s*\([^)]{0,64}\)\s*[,;]?\s
 /// An encoded string literal over about 3 kB. A `data:` URI never matches: the
 /// run of base64 starts after a comma, not after the opening quote.
 const BIG_LITERAL: &str = r#"['"][A-Za-z0-9+/=]{3000,}['"]"#;
+/// Base64 that decodes to an image or font header (SVG, `<?xml`, PNG, GIF,
+/// JPEG, RIFF/WebP, WOFF, WOFF2): plugins inline their admin menu icon so.
+const ENCODED_MEDIA: &str =
+    r#"(?-u)^['"](?:PHN2Zy|PD94bWw|iVBORw0KGgo|R0lGOD|/9j/|UklGR|d09GRg|d09GMg)"#;
 const PAYLOAD_LITERAL: &str = r#"['"][A-Za-z0-9+/=]{256,}['"]"#;
 
 /// High rules first: when a file hits the cap, the worst findings survive.
@@ -154,7 +158,7 @@ const RULES: &[Rule] = &[
         severity: Severity::Medium,
         scope: Scope::Php,
         pattern: BIG_LITERAL,
-        guard: None,
+        guard: Some(Guard::Unless(ENCODED_MEDIA)),
     },
     Rule {
         id: "js_remote_script",
@@ -252,6 +256,57 @@ fn under_uploads(rel_path: &str) -> bool {
     parts.any(|c| c == "uploads")
 }
 
+/// Bytes an `index.php` stub may have; plugins' are a line or two.
+const STUB_MAX_BYTES: usize = 512;
+
+/// An `index.php` that only stops directory listing: `<?php`, comments, and
+/// optionally `?>` with nothing after it. Plugins drop one into every folder
+/// they make under uploads (WP All Import, one per import). A `?>` inside a
+/// line comment ends PHP mode there, so such a file is not a stub; nor is a
+/// `#[` attribute, an unclosed block comment, or any output.
+fn is_silence_stub(rel_path: &str, bytes: &[u8]) -> bool {
+    if rel_path.rsplit('/').next() != Some("index.php") || bytes.len() > STUB_MAX_BYTES {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let Some(mut rest) = text
+        .trim_start_matches('\u{feff}')
+        .trim_start()
+        .strip_prefix("<?php")
+    else {
+        return false;
+    };
+    // `<?php` must be followed by whitespace or end the file to be an open tag.
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return false;
+    }
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return true;
+        }
+        if let Some(after) = rest.strip_prefix("?>") {
+            return after.trim().is_empty();
+        }
+        if let Some(body) = rest.strip_prefix("/*") {
+            let Some(end) = body.find("*/") else {
+                return false;
+            };
+            rest = &body[end + 2..];
+        } else if rest.starts_with("//") || (rest.starts_with('#') && !rest.starts_with("#[")) {
+            let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+            if line.contains("?>") {
+                return false;
+            }
+            rest = &rest[line.len()..];
+        } else {
+            return false;
+        }
+    }
+}
+
 fn is_script_like(rel_path: &str) -> bool {
     rel_path
         .rsplit_once('.')
@@ -302,7 +357,7 @@ fn inspect_with(rel_path: &str, bytes: &[u8], php: bool) -> Vec<RuleHit> {
     let body = &bytes[..bytes.len().min(INSPECT_MAX_BYTES)];
 
     let mut hits: Vec<RuleHit> = Vec::new();
-    if php && under_uploads(rel_path) {
+    if php && under_uploads(rel_path) && !is_silence_stub(rel_path, bytes) {
         hits.push(path_hit("php_in_uploads", Severity::High, rel_path));
     }
     if (script || settings) && bytes.len() > INSPECT_MAX_BYTES {
@@ -1058,6 +1113,82 @@ return () => {
         src.extend(std::iter::repeat_n(b'a', 2900));
         src.extend_from_slice(b"\";");
         assert!(inspect("a.php", &src).is_empty());
+    }
+
+    #[test]
+    fn large_encoded_image_or_font_is_clean() {
+        // An admin menu icon: base64 of `<svg …`. Same for PNG, GIF, JPEG,
+        // `<?xml`, WebP and WOFF/WOFF2 headers.
+        for prefix in [
+            "PHN2Zy",
+            "iVBORw0KGgo",
+            "R0lGODlh",
+            "/9j/4AAQ",
+            "PD94bWwg",
+            "UklGRg",
+            "d09GRg",
+            "d09GMg",
+        ] {
+            let mut src = format!("<?php $icon = '{prefix}").into_bytes();
+            src.extend(std::iter::repeat_n(b'a', 3500));
+            src.extend_from_slice(b"';");
+            assert!(
+                inspect("wp-content/plugins/p/menu.php", &src).is_empty(),
+                "{prefix}"
+            );
+        }
+        // The same length of anything else still counts.
+        let mut src = b"<?php $d = 'ZXZhbCgk".to_vec();
+        src.extend(std::iter::repeat_n(b'a', 3500));
+        src.extend_from_slice(b"';");
+        assert_eq!(ids(&inspect("a.php", &src)), ["encoded_literal_large"]);
+    }
+
+    #[test]
+    fn silence_stub_index_under_uploads_is_clean() {
+        for src in [
+            &b"<?php\n// Silence is golden.\n"[..],
+            b"<?php // Silence is golden",
+            b"\xEF\xBB\xBF<?php\n/* nothing */\n?>\n",
+            b"<?php\n# keep out\n// and again\n",
+            b"<?php\n",
+        ] {
+            let h = inspect("wp-content/uploads/wpallimport/logs/abc/index.php", src);
+            assert!(h.is_empty(), "{:?}: {h:?}", String::from_utf8_lossy(src));
+        }
+    }
+
+    #[test]
+    fn index_with_code_or_tricks_under_uploads_is_still_high() {
+        for src in [
+            // `?>` inside a line comment ends PHP mode: what follows runs.
+            &b"<?php // x ?><?php system($_GET['c']);\n"[..],
+            b"<?php // ok\necho 1;\n",
+            b"<?php /* open comment\n",
+            b"<?php ?>\n<h1>hi</h1>\n",
+            b"<?php\n#[Attr]\n",
+            b"<?= 'x' ?>\n",
+        ] {
+            let h = inspect("wp-content/uploads/x/index.php", src);
+            assert_eq!(
+                ids(&h)[0],
+                "php_in_uploads",
+                "{:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+        // Only `index.php` is a stub; any other name is reported however empty.
+        let h = inspect("wp-content/uploads/x/functions.php", b"<?php\n// nothing\n");
+        assert_eq!(ids(&h), ["php_in_uploads"]);
+        // A stub is short.
+        let mut big = b"<?php\n".to_vec();
+        for _ in 0..100 {
+            big.extend_from_slice(b"// padding padding\n");
+        }
+        assert_eq!(
+            ids(&inspect("wp-content/uploads/x/index.php", &big)),
+            ["php_in_uploads"]
+        );
     }
 
     #[test]
