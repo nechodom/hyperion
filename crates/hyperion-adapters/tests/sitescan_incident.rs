@@ -1187,6 +1187,72 @@ fn php_in_uploads_is_reported_until_dealt_with() {
 }
 
 #[test]
+fn empty_index_under_uploads_is_quiet() {
+    // WP All Import `touch()`es an index.php into every folder it makes.
+    let s = Site::new();
+    s.wordpress();
+    let first = "wp-content/uploads/wpallimport/logs/aaa/index.php";
+    s.write(first, "");
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    settle();
+    let later = "wp-content/uploads/wpallimport/logs/bbb/index.php";
+    s.write(later, "");
+    for _ in 0..2 {
+        let out = s.scan();
+        assert_eq!(rels(&out.findings), Vec::<&str>::new());
+        assert_eq!(rels(&out.review), Vec::<&str>::new());
+    }
+    // Code written into it later is found.
+    settle();
+    s.write(later, "<?php system($_GET['c']);\n");
+    let f = item(&s.scan().findings, later).clone();
+    assert_eq!(f.rule_id.as_deref(), Some("php_in_uploads"));
+}
+
+/// All-in-One WP Migration's `storage/.htaccess`, as it writes it.
+const AI1WM_HTACCESS: &str = "<IfModule mod_authz_core.c>\n\t<FilesMatch \".*\">\n\t\tRequire all denied\n\t</FilesMatch>\n\t<FilesMatch \"\\.log$\">\n\t\tRequire all granted\n\t</FilesMatch>\n</IfModule>\n<IfModule !mod_authz_core.c>\n\tOrder allow,deny\n\tDeny from all\n\t<FilesMatch \"\\.log$\">\n\t\tOrder allow,deny\n\t\tAllow from all\n\t</FilesMatch>\n</IfModule>\n<IfModule mod_mime.c>\n\tAddType text/plain .log\n</IfModule>\n<IfModule mod_dir.c>\n\tDirectoryIndex index.php\n</IfModule>\n<IfModule mod_autoindex.c>\n\tOptions -Indexes\n</IfModule>";
+
+#[test]
+fn guard_files_a_plugin_writes_into_itself_are_not_added() {
+    let s = Site::new();
+    s.wordpress();
+    s.verified_plugin(
+        "all-in-one-wp-migration",
+        "7.0",
+        &[("lib/a.php", b"<?php // a\n")],
+    );
+    let dir = "wp-content/plugins/all-in-one-wp-migration/storage";
+    s.write(&format!("{dir}/index.php"), "Kangaroos cannot jump here");
+    s.write(&format!("{dir}/.htaccess"), AI1WM_HTACCESS);
+    s.write(&format!("{dir}/index.html"), "Kangaroos cannot jump here");
+    for _ in 0..2 {
+        let out = s.scan();
+        assert_eq!(rels(&out.findings), Vec::<&str>::new());
+        assert_eq!(rels(&out.review), Vec::<&str>::new());
+        assert!(
+            out.upstream.plugins_failed.is_empty(),
+            "{:?}",
+            out.upstream.plugins_failed
+        );
+        settle();
+    }
+    // Anything that does more than keep people out is still an added file.
+    s.write(&format!("{dir}/index.php"), "<?php system($_GET['c']);\n");
+    s.write(
+        &format!("{dir}/.htaccess"),
+        "AddHandler application/x-httpd-php .log\n",
+    );
+    let out = s.scan();
+    for rel in ["index.php", ".htaccess"] {
+        assert_eq!(
+            item(&out.findings, &format!("{dir}/{rel}")).kind,
+            FindingKind::UpstreamAdded
+        );
+    }
+}
+
+#[test]
 fn verified_tree_files_are_not_rule_inspected() {
     // Upstream's own file that happens to trip a rule: the comparison speaks for it.
     let s = Site::new();

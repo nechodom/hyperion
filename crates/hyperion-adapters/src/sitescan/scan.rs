@@ -36,7 +36,8 @@ use super::manifest::{
     Manifest, ManifestSource,
 };
 use super::rules::{
-    inspect, inspect_as_php, is_php_like, RuleHit, Severity, INSPECT_MAX_BYTES, RULE_PACK_VERSION,
+    inspect, inspect_as_php, is_access_guard, is_php_like, RuleHit, Severity, INSPECT_MAX_BYTES,
+    RULE_PACK_VERSION,
 };
 use super::walk::{FileMeta, SkipReason, TenantRoot, WalkEvent, WalkOpts, WalkStats};
 use crate::wpplugin::{managed_files, status_shape_ok, ManagedContent};
@@ -410,6 +411,14 @@ fn is_js(rel: &str) -> bool {
 
 fn is_php_settings(rel: &str) -> bool {
     matches!(base_name(rel), ".htaccess" | ".user.ini")
+}
+
+/// Bytes read to tell whether an unlisted file is a plugin's keep-out file;
+/// [`is_access_guard`] refuses anything bigger anyway.
+const GUARD_READ_MAX: u64 = 4096;
+
+fn may_be_guard(rel: &str) -> bool {
+    matches!(base_name(rel), "index.php" | ".htaccess")
 }
 
 fn runs_as_php(rel: &str) -> bool {
@@ -1525,6 +1534,23 @@ impl<'a> Scan<'a> {
             // Some premium plugins write into their own folder.
             return self.watch(m, Some(i));
         }
+        // A plugin's own keep-out files (All-in-One WP Migration's `storage/`
+        // index.php and .htaccess) are written at runtime, so never listed.
+        // They are read every scan like any unlisted file: one that grows
+        // into anything else is an added file again.
+        let guard_read = if !comp.is_core() && m.size <= GUARD_READ_MAX && may_be_guard(&m.rel) {
+            let Some(read) = self.read(m, false) else {
+                return;
+            };
+            let hits = rules_for(&m.rel, &read.head);
+            if hits.is_empty() && is_access_guard(&m.rel, &read.head) {
+                self.forget(&m.rel);
+                return;
+            }
+            Some((read, hits))
+        } else {
+            None
+        };
         self.forget(&m.rel);
         self.comps[i].added += 1;
         let core = self.comps[i].is_core();
@@ -1536,10 +1562,16 @@ impl<'a> Scan<'a> {
             let meta = metadata_hash_of(m);
             return self.stage(i, m, added_kind(core), Some(&meta), &[]);
         }
-        let Some(read) = self.read(m, false) else {
-            return;
+        let (read, hits) = match guard_read {
+            Some(done) => done,
+            None => {
+                let Some(read) = self.read(m, false) else {
+                    return;
+                };
+                let hits = rules_for(&m.rel, &read.head);
+                (read, hits)
+            }
         };
-        let hits = rules_for(&m.rel, &read.head);
         self.stage(i, m, added_kind(core), Some(&read.sha256), &hits);
     }
 
@@ -1723,6 +1755,15 @@ impl<'a> Scan<'a> {
         let hits = rules_for(&m.rel, &read.head);
         if !hits.is_empty() {
             return self.report_hits(m, owner, &read.sha256, &hits);
+        }
+        // A new empty or comment-only index.php, a new deny-only .htaccess:
+        // plugins write these by the hundred (WP All Import, one per import
+        // folder under uploads) and nothing in them runs. Remembered, so a
+        // later change to one is a change like any other. A watched file
+        // that turns into one (the site's own index.php emptied) is still a
+        // change.
+        if !self.baseline.entries.contains_key(&m.rel) && is_access_guard(&m.rel, &read.head) {
+            return self.remember_entry(m, &read);
         }
         let accept = owner.is_some_and(|i| self.comps[i].accept_update);
         if self.first || accept {
