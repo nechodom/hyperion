@@ -36,8 +36,8 @@ use super::manifest::{
     Manifest, ManifestSource,
 };
 use super::rules::{
-    inspect, inspect_as_php, is_access_guard, is_php_like, RuleHit, Severity, INSPECT_MAX_BYTES,
-    RULE_PACK_VERSION,
+    inspect, inspect_as_php, is_access_guard, is_php_like, is_twig_cache,
+    is_wp_all_import_functions, RuleHit, Severity, INSPECT_MAX_BYTES, RULE_PACK_VERSION,
 };
 use super::walk::{FileMeta, SkipReason, TenantRoot, WalkEvent, WalkOpts, WalkStats};
 use crate::wpplugin::{managed_files, status_shape_ok, ManagedContent};
@@ -1763,6 +1763,16 @@ impl<'a> Scan<'a> {
         // that turns into one (the site's own index.php emptied) is still a
         // change.
         if !self.baseline.entries.contains_key(&m.rel) && is_access_guard(&m.rel, &read.head) {
+            return self.remember_entry(m, &read);
+        }
+        // Twig's compiled templates (WPML keeps them under uploads) are
+        // rewritten in place whenever a template changes, so a change to one
+        // is as expected as a new one. WP All Import's functions.php is the
+        // admin's own code: a new one is the plugin's, a later edit is a
+        // change like any other.
+        if is_twig_cache(&m.rel, &read.head)
+            || (!self.baseline.entries.contains_key(&m.rel) && is_wp_all_import_functions(&m.rel))
+        {
             return self.remember_entry(m, &read);
         }
         let accept = owner.is_some_and(|i| self.comps[i].accept_update);

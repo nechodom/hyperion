@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use regex::bytes::{Regex, RegexSet, RegexSetBuilder};
 
 /// Bumped whenever a rule changes; a bump re-inspects the Layer B scope once.
-pub const RULE_PACK_VERSION: u32 = 4;
+pub const RULE_PACK_VERSION: u32 = 5;
 
 /// Bytes of one file that are inspected. A larger inspected file (PHP,
 /// JavaScript, HTML, PHP settings) is reported as `too_large_to_inspect` (never
@@ -379,6 +379,73 @@ fn is_silence_stub(rel_path: &str, bytes: &[u8]) -> bool {
     }
 }
 
+/// Bytes of a Twig cache file searched for its class line; Twig writes it after
+/// a dozen `use` lines.
+const TWIG_HEAD_BYTES: usize = 4096;
+
+/// Twig's class line: `__TwigTemplate_` and a sha256 (Twig 1 and 2, and 3 on
+/// PHP before 8.1) or xxh128 (Twig 3 on 8.1+) of the cache key, `___<n>` for an
+/// embedded template. WPML's prefixed copy writes the same line after
+/// `namespace WPML\Core;`.
+#[allow(clippy::expect_used)]
+static TWIG_CLASS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\nclass __TwigTemplate_[0-9a-f]{32}(?:[0-9a-f]{32})?(?:___[0-9]{1,6})? extends ")
+        .expect("twig class regex")
+});
+
+/// A template Twig compiled into its file cache. WPML keeps one in
+/// `uploads/cache/wpml/twig/`, so every screen it renders leaves a PHP file
+/// under uploads, and recompiles it in place (`auto_reload`) when the template
+/// changes. Twig names it `<h0h1>/<hash>.php`, the hash of the class name, and
+/// opens it with `<?php` and a class line (see [`TWIG_CLASS`]).
+///
+/// The shape says who wrote it, not that it is harmless: the content rules still
+/// read it like any other PHP file.
+pub fn is_twig_cache(rel_path: &str, bytes: &[u8]) -> bool {
+    let mut parts = rel_path.rsplit('/');
+    let (Some(name), Some(dir)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    let Some(hash) = name.strip_suffix(".php") else {
+        return false;
+    };
+    let lower_hex = |s: &str| s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !matches!(hash.len(), 32 | 64)
+        || !lower_hex(hash)
+        || dir.len() != 2
+        || !hash.starts_with(dir)
+    {
+        return false;
+    }
+    let head = &bytes[..bytes.len().min(TWIG_HEAD_BYTES)];
+    head.starts_with(b"<?php") && TWIG_CLASS.is_match(head)
+}
+
+/// WP All Import's Function Editor: PHP the site's admin writes, which the
+/// plugin `require_once`s on every import from `<uploads>/wpallimport/` (a
+/// multisite's `uploads/sites/<n>/` too). Its own code, not a drop.
+pub fn is_wp_all_import_functions(rel_path: &str) -> bool {
+    let mut parts = rel_path.rsplit('/');
+    if parts.next() != Some("functions.php") || parts.next() != Some("wpallimport") {
+        return false;
+    }
+    match parts.next() {
+        Some("uploads") => true,
+        Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+            parts.next() == Some("sites") && parts.next() == Some("uploads")
+        }
+        _ => false,
+    }
+}
+
+/// PHP a known plugin keeps under uploads by design. Not a `php_in_uploads`
+/// finding; the content rules still apply.
+fn is_plugin_php_in_uploads(rel_path: &str, bytes: &[u8]) -> bool {
+    is_silence_stub(rel_path, bytes)
+        || is_twig_cache(rel_path, bytes)
+        || is_wp_all_import_functions(rel_path)
+}
+
 fn is_script_like(rel_path: &str) -> bool {
     rel_path
         .rsplit_once('.')
@@ -406,7 +473,9 @@ fn is_core_lookalike(rel_path: &str) -> bool {
 
 /// Inspect one file. `rel_path` is relative to the document root. Only PHP-like,
 /// JavaScript, HTML and PHP settings files get content rules; any PHP-like file
-/// under a directory named `uploads` is a finding by its path alone. Never panics and
+/// under a directory named `uploads` is a finding by its path alone, unless a
+/// known plugin keeps it there (an `index.php` stub, a Twig cache file, WP All
+/// Import's functions.php). Never panics and
 /// never returns more than 20 hits, sorted by line.
 ///
 /// Only the first `INSPECT_MAX_BYTES` are matched. The caller must pass up to
@@ -429,7 +498,7 @@ fn inspect_with(rel_path: &str, bytes: &[u8], php: bool) -> Vec<RuleHit> {
     let body = &bytes[..bytes.len().min(INSPECT_MAX_BYTES)];
 
     let mut hits: Vec<RuleHit> = Vec::new();
-    if php && under_uploads(rel_path) && !is_silence_stub(rel_path, bytes) {
+    if php && under_uploads(rel_path) && !is_plugin_php_in_uploads(rel_path, bytes) {
         hits.push(path_hit("php_in_uploads", Severity::High, rel_path));
     }
     if (script || settings) && bytes.len() > INSPECT_MAX_BYTES {
@@ -1339,6 +1408,112 @@ return () => {
             ids(&inspect("wp-content/uploads/x/index.php", &big)),
             ["php_in_uploads"]
         );
+    }
+
+    /// A compiled template as WPML's bundled Twig 1 writes it
+    /// (`ModuleNode::compileClassHeader`): no indent at the top level, the
+    /// class name cut out of `\WPML\Core\__TwigTemplate_<sha256>`.
+    const WPML_TWIG: &str = "<?php\n\nnamespace WPML\\Core;\n\nuse \\WPML\\Core\\Twig\\Environment;\nuse \\WPML\\Core\\Twig\\Error\\LoaderError;\nuse \\WPML\\Core\\Twig\\Error\\RuntimeError;\nuse \\WPML\\Core\\Twig\\Markup;\nuse \\WPML\\Core\\Twig\\Sandbox\\SecurityError;\nuse \\WPML\\Core\\Twig\\Sandbox\\SecurityNotAllowedTagError;\nuse \\WPML\\Core\\Twig\\Sandbox\\SecurityNotAllowedFilterError;\nuse \\WPML\\Core\\Twig\\Sandbox\\SecurityNotAllowedFunctionError;\nuse \\WPML\\Core\\Twig\\Source;\nuse \\WPML\\Core\\Twig\\Template;\n\n/* language-switcher.twig */\nclass __TwigTemplate_9f2c7e1b4a0d8c3e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a extends \\WPML\\Core\\Twig\\Template\n{\n    public function __construct(Environment $env)\n    {\n        parent::__construct($env);\n\n        $this->parent = false;\n\n        $this->blocks = [\n        ];\n    }\n\n    protected function doDisplay(array $context, array $blocks = [])\n    {\n        // line 1\n        echo \"<div class=\\\"wpml-ls\\\">\";\n        echo \\WPML\\Core\\twig_escape_filter($this->env, $this->getAttribute(($context[\"strings\"] ?? null), \"title\", []), \"html\", null, true);\n        echo \"</div>\";\n    }\n\n    public function getTemplateName()\n    {\n        return \"language-switcher.twig\";\n    }\n}\n";
+    const WPML_TWIG_PATH: &str = "wp-content/uploads/cache/wpml/twig/3b/3b64bae642a1aad834561a17143cac388fa0098b3b821c673e2c7cb3f7edd923.php";
+
+    #[test]
+    fn twig_cache_under_uploads_is_not_php_in_uploads() {
+        assert!(is_twig_cache(WPML_TWIG_PATH, WPML_TWIG.as_bytes()));
+        let h = inspect(WPML_TWIG_PATH, WPML_TWIG.as_bytes());
+        assert!(h.is_empty(), "{h:?}");
+        // Twig 3 on PHP 8.1+ hashes with xxh128, and an embedded template
+        // gets `___<n>`.
+        let x = WPML_TWIG.replace(
+            "9f2c7e1b4a0d8c3e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a",
+            "0a1b2c3d4e5f60718293a4b5c6d7e8f9___1",
+        );
+        for p in [
+            "wp-content/uploads/cache/timber/c0/c0d9751840e38e635a0a6877a2948ae8.php",
+            "wp-content/uploads/sites/2/cache/wpml/twig/c0/c0d9751840e38e635a0a6877a2948ae815af7578988ce54088f68ead70eda61a.php",
+        ] {
+            assert!(is_twig_cache(p, x.as_bytes()), "{p}");
+            assert!(inspect(p, x.as_bytes()).is_empty(), "{p}");
+        }
+    }
+
+    #[test]
+    fn only_twigs_own_shape_is_a_twig_cache() {
+        let ok = "wp-content/uploads/cache/wpml/twig/3b/3b64bae642a1aad834561a17143cac388fa0098b3b821c673e2c7cb3f7edd923.php";
+        for p in [
+            // The folder must be the hash's first two characters.
+            "wp-content/uploads/cache/wpml/twig/3c/3b64bae642a1aad834561a17143cac388fa0098b3b821c673e2c7cb3f7edd923.php",
+            "wp-content/uploads/cache/wpml/twig/3b64bae642a1aad834561a17143cac388fa0098b3b821c673e2c7cb3f7edd923.php",
+            // Lower-case hex of 32 or 64, `.php`.
+            "wp-content/uploads/cache/wpml/twig/3B/3B64BAE642A1AAD834561A17143CAC388FA0098B3B821C673E2C7CB3F7EDD923.php",
+            "wp-content/uploads/cache/wpml/twig/3b/3b64bae642a1aad834561a17143cac388fa0098b3b821c673e2c7cb3f7edd92.php",
+            "wp-content/uploads/cache/wpml/twig/3b/3b64bae642a1aad834561a17143cac388fa0098b3b821c673e2c7cb3f7edd9zz.php",
+            "wp-content/uploads/cache/wpml/twig/3b/3b64bae642a1aad834561a17143cac388fa0098b3b821c673e2c7cb3f7edd923.phtml",
+            "wp-content/uploads/cache/wpml/twig/3b/shell.php",
+        ] {
+            assert!(!is_twig_cache(p, WPML_TWIG.as_bytes()), "{p}");
+            assert_eq!(ids(&inspect(p, WPML_TWIG.as_bytes())), ["php_in_uploads"], "{p}");
+        }
+        for src in [
+            // No class line, or one that isn't Twig's.
+            "<?php\n\nnamespace WPML\\Core;\n\n/* x.twig */\n".to_string(),
+            WPML_TWIG.replace("class __TwigTemplate_", "class TwigTemplate_"),
+            WPML_TWIG.replace("\nclass __TwigTemplate_", "\n// class __TwigTemplate_"),
+            // Something before the open tag.
+            format!("GIF89a{WPML_TWIG}"),
+            format!(" {WPML_TWIG}"),
+            // A class line past the head is not Twig's header.
+            format!("<?php\n{}\n{}", "// pad\n".repeat(600), &WPML_TWIG[6..]),
+        ] {
+            assert!(!is_twig_cache(ok, src.as_bytes()), "{src:.80?}");
+            assert_eq!(
+                ids(&inspect(ok, src.as_bytes())),
+                ["php_in_uploads"],
+                "{src:.80?}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_in_a_twig_cache_file_is_still_found() {
+        let src = WPML_TWIG.replace(
+            "// line 1\n",
+            "// line 1\n        eval(base64_decode($_POST['x']));\n",
+        );
+        assert!(is_twig_cache(WPML_TWIG_PATH, src.as_bytes()));
+        let h = inspect(WPML_TWIG_PATH, src.as_bytes());
+        assert_eq!(worst(&h), Some(Severity::High), "{h:?}");
+        assert!(!ids(&h).contains(&"php_in_uploads"), "{h:?}");
+    }
+
+    #[test]
+    fn wp_all_import_functions_is_not_php_in_uploads() {
+        let src = b"<?php\nfunction my_price($p) { return round((float) $p * 1.21, 2); }\n";
+        for p in [
+            "wp-content/uploads/wpallimport/functions.php",
+            "wp-content/uploads/sites/3/wpallimport/functions.php",
+            "blog/wp-content/uploads/wpallimport/functions.php",
+        ] {
+            assert!(is_wp_all_import_functions(p), "{p}");
+            assert!(inspect(p, src).is_empty(), "{p}");
+        }
+        for p in [
+            "wp-content/uploads/wpallimport/other.php",
+            "wp-content/uploads/wpallimport/files/functions.php",
+            "wp-content/uploads/2026/wpallimport/functions.php",
+            "wp-content/uploads/sites/x/wpallimport/functions.php",
+            "wp-content/uploads/sites//wpallimport/functions.php",
+            "wp-content/uploads/wpallimport/functions.php.jpg",
+            "wp-content/uploads/xwpallimport/functions.php",
+        ] {
+            assert!(!is_wp_all_import_functions(p), "{p}");
+            assert_eq!(ids(&inspect(p, src)), ["php_in_uploads"], "{p}");
+        }
+        // Its code is still read.
+        let h = inspect(
+            "wp-content/uploads/wpallimport/functions.php",
+            b"<?php\neval(base64_decode($_POST['x']));\n",
+        );
+        assert_eq!(worst(&h), Some(Severity::High), "{h:?}");
     }
 
     #[test]
