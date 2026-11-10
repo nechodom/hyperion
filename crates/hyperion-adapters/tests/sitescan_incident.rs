@@ -1210,6 +1210,67 @@ fn empty_index_under_uploads_is_quiet() {
     assert_eq!(f.rule_id.as_deref(), Some("php_in_uploads"));
 }
 
+/// The head of a template WPML's bundled Twig compiles into its cache.
+fn wpml_twig(body: &str) -> String {
+    format!(
+        "<?php\n\nnamespace WPML\\Core;\n\nuse \\WPML\\Core\\Twig\\Environment;\nuse \\WPML\\Core\\Twig\\Template;\n\n/* language-switcher.twig */\nclass __TwigTemplate_9f2c7e1b4a0d8c3e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a extends \\WPML\\Core\\Twig\\Template\n{{\n    protected function doDisplay(array $context, array $blocks = [])\n    {{\n        // line 1\n{body}    }}\n}}\n"
+    )
+}
+
+#[test]
+fn twig_cache_under_uploads_is_quiet_and_recompiles_are_expected() {
+    let s = Site::new();
+    s.wordpress();
+    s.scan();
+    settle();
+    let rel = "wp-content/uploads/cache/wpml/twig/3b/3b64bae642a1aad834561a17143cac388fa0098b3b821c673e2c7cb3f7edd923.php";
+    s.write(rel, wpml_twig("        echo \"<div>\";\n"));
+    for _ in 0..2 {
+        let out = s.scan();
+        assert_eq!(rels(&out.findings), Vec::<&str>::new());
+        assert_eq!(rels(&out.review), Vec::<&str>::new());
+    }
+    // Twig rewrites it in place when the template changes.
+    settle();
+    s.write(
+        rel,
+        wpml_twig("        echo \"<div class=\\\"wpml-ls\\\">\";\n"),
+    );
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    // Code in one is still found.
+    settle();
+    s.write(
+        rel,
+        wpml_twig("        eval(base64_decode($_POST['x']));\n"),
+    );
+    let f = item(&s.scan().findings, rel).clone();
+    assert_eq!(f.severity, "high");
+    assert_ne!(f.rule_id.as_deref(), Some("php_in_uploads"));
+}
+
+#[test]
+fn wp_all_import_functions_file_is_watched_not_flagged() {
+    let s = Site::new();
+    s.wordpress();
+    s.scan();
+    settle();
+    let rel = "wp-content/uploads/wpallimport/functions.php";
+    s.write(rel, "<?php\n");
+    for _ in 0..2 {
+        let out = s.scan();
+        assert_eq!(rels(&out.findings), Vec::<&str>::new());
+        assert_eq!(rels(&out.review), Vec::<&str>::new());
+    }
+    // The admin's later edit is a change to look at, not malware.
+    settle();
+    s.write(rel, "<?php\nfunction my_price($p) { return $p * 2; }\n");
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    assert_eq!(item(&out.review, rel).kind, FindingKind::BaselineChange);
+}
+
 /// All-in-One WP Migration's `storage/.htaccess`, as it writes it.
 const AI1WM_HTACCESS: &str = "<IfModule mod_authz_core.c>\n\t<FilesMatch \".*\">\n\t\tRequire all denied\n\t</FilesMatch>\n\t<FilesMatch \"\\.log$\">\n\t\tRequire all granted\n\t</FilesMatch>\n</IfModule>\n<IfModule !mod_authz_core.c>\n\tOrder allow,deny\n\tDeny from all\n\t<FilesMatch \"\\.log$\">\n\t\tOrder allow,deny\n\t\tAllow from all\n\t</FilesMatch>\n</IfModule>\n<IfModule mod_mime.c>\n\tAddType text/plain .log\n</IfModule>\n<IfModule mod_dir.c>\n\tDirectoryIndex index.php\n</IfModule>\n<IfModule mod_autoindex.c>\n\tOptions -Indexes\n</IfModule>";
 
