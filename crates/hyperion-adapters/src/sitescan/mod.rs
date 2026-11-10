@@ -5,6 +5,7 @@ pub mod accept;
 pub mod baseline;
 pub mod discover;
 pub mod manifest;
+pub mod plugin_files;
 pub mod pressure;
 pub mod quarantine;
 pub mod rules;

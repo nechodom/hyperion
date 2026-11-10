@@ -35,9 +35,11 @@ use super::manifest::{
     cache_path_for, is_soft_file, vendor_disputed_path, ComponentKey, ComponentKind, Digest,
     Manifest, ManifestSource,
 };
+use super::plugin_files::{self, is_wp_rocket_config, PLUGIN_FILE_MAX_BYTES};
 use super::rules::{
-    inspect, inspect_as_php, is_access_guard, is_php_like, is_twig_cache,
-    is_wp_all_import_functions, RuleHit, Severity, INSPECT_MAX_BYTES, RULE_PACK_VERSION,
+    inspect, inspect_as_php, is_access_guard, is_php_like, is_rsssl_code_execution_test,
+    is_twig_cache, is_wp_all_import_functions, runs_nothing, RuleHit, Severity, INSPECT_MAX_BYTES,
+    RULE_PACK_VERSION,
 };
 use super::walk::{FileMeta, SkipReason, TenantRoot, WalkEvent, WalkOpts, WalkStats};
 use crate::wpplugin::{managed_files, status_shape_ok, ManagedContent};
@@ -1775,6 +1777,17 @@ impl<'a> Scan<'a> {
         {
             return self.remember_entry(m, &read);
         }
+        // PHP whose first statement is an exit runs nothing (Wordfence's and W3
+        // Total Cache's data files); WP Rocket's config is literals only; a
+        // cache plugin's drop-in that is exactly what the plugin writes. Their
+        // plugins rewrite them on every settings save and update.
+        if runs_nothing(&m.rel, &read.head)
+            || is_rsssl_code_execution_test(&m.rel, &read.head)
+            || is_wp_rocket_config(&m.rel, &read.head)
+            || self.written_by_plugin(&m.rel, &read)
+        {
+            return self.remember_entry(m, &read);
+        }
         let accept = owner.is_some_and(|i| self.comps[i].accept_update);
         if self.first || accept {
             self.remember_entry(m, &read);
@@ -1810,6 +1823,36 @@ impl<'a> Scan<'a> {
             ..self.base_item(&m.rel, FindingKind::BaselineChange, Some(&read.sha256))
         };
         self.push_review(item);
+    }
+
+    /// A drop-in that is what a plugin in this site writes from its own folder
+    /// (see [`plugin_files`]).
+    fn written_by_plugin(&mut self, rel: &str, read: &FileRead) -> bool {
+        // All of it read, and small enough to compare.
+        if read.bytes > PLUGIN_FILE_MAX_BYTES as u64 || read.head.len() as u64 != read.bytes {
+            return false;
+        }
+        for source in plugin_files::dropin_sources(rel) {
+            let Some(original) = self.read_small(&source) else {
+                continue;
+            };
+            if plugin_files::written_from(rel, &source, &read.head, &original) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// A small file read whole, outside the walk: `None` when it isn't there,
+    /// can't be read, or is bigger than [`PLUGIN_FILE_MAX_BYTES`].
+    fn read_small(&mut self, rel: &str) -> Option<Vec<u8>> {
+        let f = self.root.open_file(rel).ok()?;
+        let mut out = Vec::new();
+        f.take(PLUGIN_FILE_MAX_BYTES as u64 + 1)
+            .read_to_end(&mut out)
+            .ok()?;
+        self.bytes_read += out.len() as u64;
+        (out.len() <= PLUGIN_FILE_MAX_BYTES).then_some(out)
     }
 
     /// The writer whose list holds this path with exactly this content.
@@ -2127,18 +2170,6 @@ impl<'a> Scan<'a> {
         }
         self.flush();
 
-        if self.dropped_findings > 0 {
-            reasons.push(format!(
-                "{} more findings not listed (limit {})",
-                self.dropped_findings, self.limits.max_items
-            ));
-        }
-        if self.dropped_review > 0 {
-            reasons.push(format!(
-                "{} more changes to review not listed (limit {})",
-                self.dropped_review, self.limits.max_items
-            ));
-        }
         if self.save_failed {
             reasons.push("the baseline could not be saved".to_string());
         }
@@ -2180,6 +2211,9 @@ impl<'a> Scan<'a> {
             upstream_ran: ran,
             no_upstream: !d.is_wordpress,
             partial_reasons: reasons,
+            // Every file was looked at; the list just stops.
+            findings_unlisted: i64::try_from(self.dropped_findings).unwrap_or(i64::MAX),
+            review_unlisted: i64::try_from(self.dropped_review).unwrap_or(i64::MAX),
             ..Default::default()
         };
         SiteScanOutcome {
@@ -2366,7 +2400,7 @@ mod tests {
     }
 
     #[test]
-    fn findings_and_review_are_capped_with_a_reason() {
+    fn findings_and_review_past_the_limit_are_counted_not_partial() {
         let (_t, base, root) = tree();
         for i in 0..30 {
             write(
@@ -2388,15 +2422,10 @@ mod tests {
         let out = scan_with_limits(&inp, &|| false, &limits).expect("scan");
         assert_eq!(out.findings.len(), 10);
         assert_eq!(out.review.len(), 10);
-        let reasons = &out.coverage.partial_reasons;
-        assert!(
-            reasons.iter().any(|r| r.contains("20 more findings")),
-            "{reasons:?}"
-        );
-        assert!(
-            reasons.iter().any(|r| r.contains("20 more changes")),
-            "{reasons:?}"
-        );
+        // Every file was read: a list that stops is not a scan that did.
+        assert_eq!(out.coverage.partial_reasons, Vec::<String>::new());
+        assert_eq!(out.coverage.findings_unlisted, 20);
+        assert_eq!(out.coverage.review_unlisted, 20);
     }
 
     #[test]
@@ -2485,11 +2514,7 @@ mod tests {
         };
         let out = scan_with_limits(&input(&base, &root), &|| false, &limits).expect("scan");
         assert_eq!(out.findings.len(), 10);
-        let reasons = &out.coverage.partial_reasons;
-        assert!(
-            reasons.iter().any(|r| r.contains("2 more findings")),
-            "{reasons:?}"
-        );
+        assert_eq!(out.coverage.findings_unlisted, 2);
     }
 
     #[test]
@@ -2503,11 +2528,7 @@ mod tests {
         };
         let out = scan_with_limits(&input(&base, &root), &|| false, &limits).expect("scan");
         assert_eq!(out.findings.len(), 10);
-        let reasons = &out.coverage.partial_reasons;
-        assert!(
-            reasons.iter().any(|r| r.contains("2 more findings")),
-            "{reasons:?}"
-        );
+        assert_eq!(out.coverage.findings_unlisted, 2);
     }
 
     #[test]

@@ -47,6 +47,11 @@ const SCAN_REQUEST_HONOURED_KV_KEY: &str = "scan_request_honoured_at";
 /// can ask, a customer included, and the node has one worker.
 const SCAN_REQUEST_MIN_GAP_SECS: i64 = 10 * 60;
 
+/// `hosting_kv` key: this site's files were put in place after it was created
+/// (an import, a Copy, a restore into a new site, a staging copy), so its next
+/// scan starts the baseline again. Unix seconds it was set.
+const SCAN_START_OVER_KV_KEY: &str = "scan_start_over";
+
 /// `node_kv` key: unix seconds the manifest cache and the quarantine were last swept.
 const EVICT_LAST_RUN_KV: &str = "site_scan_evict_last_run_at";
 
@@ -729,6 +734,57 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }))
     }
 
+    /// A site whose files arrived after `create`: an import, a Copy, a restore
+    /// into a new site, a staging copy. `create` makes it active before any of
+    /// them land, and a site never scanned is due at the next tick, so the first
+    /// scan may have looked at a half-copied tree. It blesses what it saw, and
+    /// everything copied after it then reads as "new since the first scan": an
+    /// imported premium plugin is thousands of changes to review.
+    ///
+    /// Call when the files are all in place. The baseline is dropped by the next
+    /// scan, under the node's lock, so a scan running now can't save its partial
+    /// one after the drop; then that scan is a first scan of the whole site.
+    pub(crate) async fn site_scan_start_over(&self, hosting_id: &HostingId) {
+        let id = hosting_id.as_str();
+        if let Err(e) = hyperion_state::hosting_kv::set(
+            &self.pool,
+            id,
+            SCAN_START_OVER_KV_KEY,
+            &now_secs().to_string(),
+            now_secs(),
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "site scan: start-over not recorded");
+            return;
+        }
+        self.request_rescan(id).await;
+    }
+
+    /// Drop the baseline if [`Self::site_scan_start_over`] asked for it. The
+    /// caller holds the node's lock.
+    pub(super) async fn site_scan_maybe_start_over(&self, hosting_id: &str) {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, SCAN_START_OVER_KV_KEY).await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "site scan: start-over unreadable");
+                return;
+            }
+        }
+        if !remove_site_baseline(&self.paths, hosting_id).await {
+            // Asked again next time: a baseline left in place keeps the
+            // half-copied view.
+            return;
+        }
+        if let Err(e) =
+            hyperion_state::hosting_kv::delete(&self.pool, hosting_id, SCAN_START_OVER_KV_KEY).await
+        {
+            tracing::warn!(error = %e, "site scan: start-over not cleared");
+        }
+    }
+
     /// The value of this hosting's request, if one stands.
     pub(super) async fn scan_request_flag(&self, hosting_id: &str) -> Option<String> {
         hyperion_state::hosting_kv::get(&self.pool, hosting_id, SCAN_REQUESTED_KV_KEY)
@@ -1302,6 +1358,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         prior: Option<&StoredIntegrityScan>,
         now: i64,
     ) -> SiteScanRun {
+        self.site_scan_maybe_start_over(detail.id.as_str()).await;
         // Read before the scan starts: a writer that finishes meanwhile leaves a
         // newer list, which this scan hasn't seen and which stays.
         let accepted = self.scan_accepted(detail.id.as_str(), now).await;
@@ -2497,14 +2554,7 @@ pub(super) async fn remove_site_scan_state(paths: &HostingPaths, hosting_id: &st
         tracing::error!(hosting_id, "purge: not removing scan state for this id");
         return;
     }
-    let baseline = Path::new(&paths.scan_dir)
-        .join("baselines")
-        .join(hosting_id);
-    match tokio::fs::remove_file(&baseline).await {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::error!(error = %e, hosting_id, "purge: baseline not removed"),
-    }
+    remove_site_baseline(paths, hosting_id).await;
     let accepted = Path::new(&paths.scan_dir).join("accepted").join(hosting_id);
     match tokio::fs::remove_file(&accepted).await {
         Ok(()) => {}
@@ -2516,5 +2566,25 @@ pub(super) async fn remove_site_scan_state(paths: &HostingPaths, hosting_id: &st
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => tracing::error!(error = %e, hosting_id, "purge: quarantine not removed"),
+    }
+}
+
+/// Remove one site's baseline, so its next scan is a first scan. False when it
+/// is still there.
+async fn remove_site_baseline(paths: &HostingPaths, hosting_id: &str) -> bool {
+    if hosting_id.is_empty() || hosting_id.starts_with('.') || hosting_id.contains('/') {
+        tracing::error!(hosting_id, "site scan: not removing a baseline for this id");
+        return false;
+    }
+    let baseline = Path::new(&paths.scan_dir)
+        .join("baselines")
+        .join(hosting_id);
+    match tokio::fs::remove_file(&baseline).await {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            tracing::error!(error = %e, hosting_id, "site scan: baseline not removed");
+            false
+        }
     }
 }

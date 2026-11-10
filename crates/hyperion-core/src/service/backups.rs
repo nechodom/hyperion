@@ -2203,6 +2203,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
+        // Its files went in after `create`: the scan's first look may have
+        // been at a half-copied tree.
+        self.site_scan_start_over(&created.id).await;
         self.append_audit(
             "hosting.restore_as_new",
             Some(created.id.as_str()),

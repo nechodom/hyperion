@@ -520,6 +520,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
 
+        // 6b. Its files went in after `create`: the scan's first look may have
+        //     been at a half-copied tree.
+        self.site_scan_start_over(&created.id).await;
+
         // 7. Announce the new site on Slack, same message as a site created
         //    from the panel. Only now: the profile (price, billing clock,
         //    profile webhook) was applied in 5b, and announcing before it
