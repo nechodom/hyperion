@@ -520,6 +520,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
 
+        // 7. Announce the new site on Slack, same message as a site created
+        //    from the panel. Only now: the profile (price, billing clock,
+        //    profile webhook) was applied in 5b, and announcing before it
+        //    would say "no price set" for every imported site. The hosting_kv
+        //    marker inside makes a retry a no-op; best-effort, so a Slack
+        //    outage never fails an import that worked.
+        if let Err(e) = self
+            .notify_hosting_created(hyperion_rpc::wire::HostingSelector::Id(created.id.clone()))
+            .await
+        {
+            tracing::warn!(
+                hosting = %created.id.as_str(), error = %e,
+                "import: new-hosting Slack announcement failed"
+            );
+        }
+
         Ok((created.id.as_str().to_string(), notes, restored_dbs))
     }
 }

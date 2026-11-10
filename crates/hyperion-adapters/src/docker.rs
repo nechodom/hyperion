@@ -209,17 +209,32 @@ pub(crate) async fn run_with(
     max_bytes: usize,
     timeout: Duration,
 ) -> Result<Vec<u8>, DockerError> {
-    let mut child = Command::new(binary)
-        .args(cmd.args())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => DockerError::NotInstalled,
-            _ => DockerError::Failed(format!("cannot start docker: {e}")),
-        })?;
+    // ETXTBSY means some process still holds the binary open for writing:
+    // apt replacing docker, or (in tests) another thread's fork that inherited
+    // the fd of a script just written and has not exec'd yet. It clears in
+    // milliseconds, so a few short retries beat reporting a broken daemon.
+    let mut attempt = 0;
+    let mut child = loop {
+        let spawned = Command::new(binary)
+            .args(cmd.args())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn();
+        match spawned {
+            // 26 = ETXTBSY on Linux (and macOS); the ErrorKind for it is newer than our MSRV.
+            Err(e) if e.raw_os_error() == Some(26) && attempt < 10 => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(DockerError::NotInstalled)
+            }
+            Err(e) => return Err(DockerError::Failed(format!("cannot start docker: {e}"))),
+            Ok(c) => break c,
+        }
+    };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let merge = matches!(cmd, DockerCmd::Logs { .. });
