@@ -2519,6 +2519,12 @@ fn integrity_scan_text(r: &hyperion_types::WpIntegrityScanResult) -> String {
         for why in &c.partial_reasons {
             line(format!("    not covered: {}", plain(why)));
         }
+        if c.findings_unlisted > 0 || c.review_unlisted > 0 {
+            line(format!(
+                "    not listed: {} more finding(s), {} more change(s) to review",
+                c.findings_unlisted, c.review_unlisted
+            ));
+        }
         if let Some(note) = &c.vendor_note {
             line(format!("    vendor note: {}", plain(note)));
         }

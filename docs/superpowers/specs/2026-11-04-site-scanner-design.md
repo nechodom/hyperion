@@ -200,6 +200,16 @@ is the alert fatigue the anti-goals forbid. None of them may bless content blind
   pushed commit can be infected, so Layer C is not skipped.
 - **Panel file manager:** a normal change to review, same as FTP.
 - **Move/Copy:** the destination starts a fresh baseline with Layer C over all of it.
+  The same for every import, a restore into a new site and a staging copy: `create`
+  makes the site active before its files land, so a scheduled scan can see it
+  half-copied. When the files are in place the next scan drops the baseline (under
+  the node's scan lock) and starts again.
+- **Files plugins rewrite outside their own folder** are accepted when their content
+  says who wrote them, and only then: PHP whose first statement is an exit (Wordfence
+  `wflogs`, W3 Total Cache config), WP Rocket's literal-only config and its filled-in
+  `advanced-cache.php` template, an `object-cache.php` byte-identical to Redis Object
+  Cache's or LiteSpeed Cache's own copy, Really Simple Security's upload test file.
+  Data after an exit isn't read by the rules.
   Trust records travel through the `carried_kv_scope` allow-list, so trusted files
   stay trusted when path and hash still match.
 

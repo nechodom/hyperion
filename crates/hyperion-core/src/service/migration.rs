@@ -1248,6 +1248,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Err(e) => carry_report.push(format!("settings NOT carried: {e}")),
         }
 
+        // Its files went in after `create`: the scan's first look may have
+        // been at a half-copied tree.
+        self.site_scan_start_over(&created.id).await;
         self.append_audit(
             "hosting.migration.import",
             Some(created.id.as_str()),

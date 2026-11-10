@@ -2210,14 +2210,9 @@ fn the_item_cap_in_one_component_says_so() {
     }
     let out = s.scan();
     assert_eq!(out.findings.len(), 1000);
-    assert!(
-        out.coverage
-            .partial_reasons
-            .iter()
-            .any(|r| r.contains("100 more findings not listed")),
-        "{:?}",
-        out.coverage.partial_reasons
-    );
+    assert_eq!(out.coverage.findings_unlisted, 100);
+    // Every file was compared: the list stops, the scan didn't.
+    assert_eq!(out.coverage.partial_reasons, Vec::<String>::new());
 }
 
 #[test]
@@ -3788,4 +3783,188 @@ fn a_merge_keeps_the_oldest_age() {
     let rec: accept::AcceptedRecord =
         serde_json::from_slice(&fs::read(&out).expect("read")).expect("json");
     assert!(rec.written_at >= unix_now() - 5 && rec.files.is_empty());
+}
+
+/// Wordfence's `wfWAFStorageFile` config: header, banner, then serialized data
+/// with long base64 strings. It rewrites `config-transient.php` constantly.
+fn wordfence_config(seed: &str) -> Vec<u8> {
+    format!(
+        "<?php exit('Access denied'); __halt_compiler(); ?>\n\
+         ******************************************************************\n\
+         This file is used by the Wordfence Web Application Firewall. Read \n\
+         more at https://docs.wordfence.com/en/Web_Application_Firewall_FAQ\n\
+         ******************************************************************\n\
+         a:1:{{s:4:\"blob\";s:4000:\"{}\";}}",
+        seed.repeat(4000 / seed.len())
+    )
+    .into_bytes()
+}
+
+#[test]
+fn wordfence_data_files_are_quiet_however_often_they_change() {
+    let s = Site::new();
+    s.wordpress();
+    let rel = "wp-content/wflogs/config-transient.php";
+    s.write(rel, wordfence_config("DnZWISJXNR5LYjN"));
+    // The same shape outside wflogs is watched, and runs nothing either.
+    s.write(
+        "wp-content/w3tc-config/master.php",
+        "<?php exit; ?>{\"a\":1}",
+    );
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    for seed in ["Gkh1bW1lPwwfJBA", "pGRMRKzBpKjBXLQ"] {
+        settle();
+        s.write(rel, wordfence_config(seed));
+        s.write(
+            "wp-content/w3tc-config/master.php",
+            format!("<?php exit; ?>{{\"a\":\"{seed}\"}}"),
+        );
+        let out = s.scan();
+        assert_eq!(rels(&out.findings), Vec::<&str>::new());
+        assert_eq!(rels(&out.review), Vec::<&str>::new());
+    }
+    // Code in front of the exit is code.
+    settle();
+    let mut planted = b"<?php eval(base64_decode($_POST['x'])); ?>".to_vec();
+    planted.extend(wordfence_config("x"));
+    s.write(rel, &planted);
+    assert_eq!(item(&s.scan().findings, rel).severity, "high");
+}
+
+/// WP Rocket's `views/cache/advanced-cache.php`, abridged in the middle but with
+/// every placeholder and the mobile block as the plugin ships them.
+const ROCKET_TEMPLATE: &str = "<?php\n\ndefined( 'ABSPATH' ) || exit;\n\ndefine( 'WP_ROCKET_ADVANCED_CACHE', true );\n\n$rocket_path        = '{{WP_ROCKET_PATH}}';\n$rocket_config_path = '{{WP_ROCKET_CONFIG_PATH}}';\n$rocket_cache_path  = '{{WP_ROCKET_CACHE_PATH}}';\n\nif ( version_compare( phpversion(), '{{WP_ROCKET_PHP_VERSION}}', '<' ) ) {\n\treturn;\n}\n\n'{{MOBILE_CACHE}}';\nif ( file_exists( '{{WP_ROCKET_PATH}}inc/Dependencies/Detection/MobileDetect.php' ) ) {\n\tinclude_once '{{WP_ROCKET_PATH}}inc/Dependencies/Detection/MobileDetect.php';\n}\n'{{/MOBILE_CACHE}}';\n\nrequire $rocket_path . 'inc/classes/Buffer/class-cache.php';\n";
+
+fn rocket_advanced_cache(mobile: bool, root: &str) -> String {
+    let (o, c) = ("'{{MOBILE_CACHE}}';", "'{{/MOBILE_CACHE}}';");
+    let (oi, ci) = (
+        ROCKET_TEMPLATE.find(o).unwrap(),
+        ROCKET_TEMPLATE.find(c).unwrap(),
+    );
+    let mid = if mobile {
+        &ROCKET_TEMPLATE[oi + o.len()..ci]
+    } else {
+        ""
+    };
+    format!(
+        "{}{mid}{}",
+        &ROCKET_TEMPLATE[..oi],
+        &ROCKET_TEMPLATE[ci + c.len()..]
+    )
+    .replace("{{WP_ROCKET_PHP_VERSION}}", "7.3")
+    .replace(
+        "{{WP_ROCKET_PATH}}",
+        &format!("{root}/wp-content/plugins/wp-rocket/"),
+    )
+    .replace(
+        "{{WP_ROCKET_CONFIG_PATH}}",
+        &format!("{root}/wp-content/wp-rocket-config/"),
+    )
+    .replace(
+        "{{WP_ROCKET_CACHE_PATH}}",
+        &format!("{root}/wp-content/cache/wp-rocket/"),
+    )
+}
+
+fn rocket_config(cache_ssl: u8) -> String {
+    format!(
+        "<?php\ndefined( 'ABSPATH' ) || exit;\n\n$rocket_cookie_hash = '0123456789abcdef';\n$rocket_cache_ssl = {cache_ssl};\n$rocket_cache_reject_uri = '/(?:.+/)?feed(?:/(?:.+/?)?)?$';\n$rocket_cache_query_strings = array();\n$rocket_cache_dynamic_cookies = array(\n  0 => '_icl_current_language',\n);\n$rocket_permalink_structure = '/%postname%/';\n"
+    )
+}
+
+#[test]
+fn files_wp_rocket_rewrites_are_quiet_while_they_are_its_own() {
+    let s = Site::new();
+    s.wordpress();
+    s.plugin(
+        "wp-rocket",
+        "3.17",
+        &[("views/cache/advanced-cache.php", ROCKET_TEMPLATE.as_bytes())],
+    );
+    let (cache, config) = (
+        "wp-content/advanced-cache.php",
+        "wp-content/wp-rocket-config/example.org.php",
+    );
+    s.write(cache, rocket_advanced_cache(true, "/old/host/htdocs"));
+    s.write(config, rocket_config(0));
+    s.scan();
+    // Settings saved: mobile cache off, another path after a move, SSL on.
+    settle();
+    s.write(cache, rocket_advanced_cache(false, "/home/site/htdocs"));
+    s.write(config, rocket_config(1));
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    // Anything else in either is a change.
+    settle();
+    s.write(
+        cache,
+        rocket_advanced_cache(false, "/home/site/htdocs") + "@include '/tmp/x';\n",
+    );
+    s.write(
+        config,
+        rocket_config(1) + "$rocket_x = file_get_contents('/etc/passwd');\n",
+    );
+    let out = s.scan();
+    assert_eq!(item(&out.review, cache).kind, FindingKind::BaselineChange);
+    assert_eq!(item(&out.review, config).kind, FindingKind::BaselineChange);
+}
+
+#[test]
+fn a_dropin_copied_from_its_plugin_is_quiet_and_any_other_is_not() {
+    let s = Site::new();
+    s.wordpress();
+    let dropin = b"<?php\n/* Plugin Name: Redis Object Cache Drop-In\nVersion: 2.5.0 */\n";
+    s.plugin(
+        "redis-cache",
+        "2.5.0",
+        &[("includes/object-cache.php", dropin)],
+    );
+    let rel = "wp-content/object-cache.php";
+    s.write(rel, dropin);
+    s.scan();
+    // The plugin updates and copies its new drop-in over the old.
+    settle();
+    let newer = b"<?php\n/* Plugin Name: Redis Object Cache Drop-In\nVersion: 2.6.0 */\n";
+    s.write(
+        "wp-content/plugins/redis-cache/includes/object-cache.php",
+        newer,
+    );
+    s.write(rel, newer);
+    let out = s.scan();
+    assert!(!rels(&out.review).contains(&rel), "{:?}", rels(&out.review));
+    // A drop-in that differs from the plugin's is a change.
+    settle();
+    s.write(
+        rel,
+        b"<?php\n/* Plugin Name: Redis Object Cache Drop-In */\n$x = 1;\n",
+    );
+    assert_eq!(
+        item(&s.scan().review, rel).kind,
+        FindingKind::BaselineChange
+    );
+}
+
+#[test]
+fn really_simple_securitys_leftover_test_file_is_quiet() {
+    let s = Site::new();
+    s.wordpress();
+    s.scan();
+    settle();
+    let rel = "wp-content/uploads/code-execution.php";
+    s.write(
+        rel,
+        "<?php\n/**\n * Test file for Really Simple Security to check if uploads directory has code execution permissions\n *\n */\n\necho \"RSSSL CODE EXECUTION MARKER\";\n",
+    );
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    // Anything else under that name is PHP in uploads.
+    settle();
+    s.write(rel, "<?php echo 'hi';\n");
+    assert_eq!(
+        item(&s.scan().findings, rel).rule_id.as_deref(),
+        Some("php_in_uploads")
+    );
 }

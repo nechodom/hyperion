@@ -80,7 +80,7 @@
          "part of the site wasn't looked at" are answers of their own and must
          not borrow the green one. #}
       {% if v == "findings" %}<strong class="tone-err">{{ scan.headline_count() }} file(s) need attention</strong>
-      {% else if v == "review" %}<strong class="tone-warn">{{ scan.review.len() }} change(s) to review</strong> — not confirmed as a problem
+      {% else if v == "review" %}<strong class="tone-warn">{{ scan.review_total() }} change(s) to review</strong> — not confirmed as a problem
       {% else if v == "running" %}No verdict until the scan finishes
       {% else if v == "never" && scan.error.is_none() %}Not scanned yet — nothing was verified, so this is not a clean result
       {% else if v == "never" %}Couldn't check — nothing was verified, so this is not a clean result
@@ -359,19 +359,25 @@
     {% if scan.listed_findings().count() > 50 %}
     <p class="chk-note">Showing 50 of {{ scan.listed_findings().count() }} files.</p>
     {% endif %}
+    {% if scan.coverage.findings_unlisted > 0 %}
+    <p class="chk-note">{{ scan.coverage.findings_unlisted }} more file(s) were found but aren't kept on this card; they show up once the listed ones are dealt with.</p>
+    {% endif %}
     {% endif %}
 
     {# Changes to review: the lower bucket. New or changed files nothing vouches
        for, and medium rule hits. Not a verdict of bad. #}
     {% if !scan.review.is_empty() %}
-    <h4 class="chk-sub">Changes to review — {{ scan.review.len() }}</h4>
+    <h4 class="chk-sub">Changes to review — {{ scan.review_total() }}</h4>
     <ul class="chk-list chk-files file-acts">
       {% for f in scan.review %}{% if loop.index0 < 50 %}
       {% call finding_row(f) %}
       {% endif %}{% endfor %}
     </ul>
     {% if scan.review.len() > 50 %}
-    <p class="chk-note">Showing 50 of {{ scan.review.len() }} changes.</p>
+    <p class="chk-note">Showing 50 of {{ scan.review_total() }} changes.</p>
+    {% endif %}
+    {% if scan.coverage.review_unlisted > 0 %}
+    <p class="chk-note">{{ scan.coverage.review_unlisted }} more change(s) were found but aren't kept on this card; they show up once the listed ones are dealt with.</p>
     {% endif %}
     {% if !can_trust %}
     <p class="chk-note">These are waiting for your provider to check.</p>

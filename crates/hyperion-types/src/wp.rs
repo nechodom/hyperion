@@ -676,6 +676,13 @@ pub struct ScanCoverage {
     /// What couldn't be looked at. Non-empty means the scan is partial.
     #[serde(default)]
     pub partial_reasons: Vec<String>,
+    /// Findings past the listing limit: found and counted, not listed. Not a
+    /// gap in the scan, so not a partial reason.
+    #[serde(default)]
+    pub findings_unlisted: i64,
+    /// Changes to review past the listing limit, the same way.
+    #[serde(default)]
+    pub review_unlisted: i64,
     /// Hosts this site's package URLs name that aren't on the vendor list, so the
     /// list can grow from real data. Validated hostnames, at most 20, for the
     /// operator: no card shows them to a customer.
@@ -953,6 +960,11 @@ impl WpIntegrityScanResult {
 
     /// The number in the headline: `shown_finding_count`, but never below what
     /// the findings list shows, so a lone rule-carrying comparison reads 1, not 0.
+    /// Changes to review, the listed ones and those past the listing limit.
+    pub fn review_total(&self) -> usize {
+        self.review.len() + usize::try_from(self.coverage.review_unlisted).unwrap_or(0)
+    }
+
     pub fn headline_count(&self) -> usize {
         self.shown_finding_count()
             .max(self.listed_findings().count())

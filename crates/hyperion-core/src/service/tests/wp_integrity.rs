@@ -2395,6 +2395,65 @@ mod site_scan {
         assert!(read_new_layers_live(Some(&cfg)));
     }
 
+    /// An import fills the site after `create` made it active, and the tick may
+    /// have scanned it half-copied. When the import is done the next scan starts
+    /// the baseline over, so what arrived later isn't "new since the first scan".
+    #[tokio::test]
+    async fn a_finished_import_starts_the_baseline_over() {
+        let pool = open_memory().await.expect("open");
+        let dir = tempfile::tempdir().expect("tmp");
+        let scan_dir = dir.path().join("scan");
+        let baselines = scan_dir.join("baselines");
+        let seen: Arc<StdMutex<Vec<bool>>> = Arc::default();
+        let mut a = happy_mocks_many();
+        let saw = seen.clone();
+        a.expect_site_scan_worker().returning(move |job| match job {
+            WorkerJob::WriterHash { .. } => WorkerReply::Hashed {
+                listed: 0,
+                partial: false,
+            },
+            WorkerJob::Discover { .. } => WorkerReply::Discovery(Discovery::default()),
+            WorkerJob::Scan(input) => {
+                saw.lock().expect("lock").push(input.baseline_path.exists());
+                WorkerReply::Scan(upstream_verified(0))
+            }
+        });
+        a.expect_site_scan_evict_manifests().returning(|_| ());
+        let s = svc(pool.clone(), a).with_paths(HostingPaths {
+            scan_dir: scan_dir.display().to_string(),
+            ..Default::default()
+        });
+        let now = monday_at(0, 12, 0);
+        let site = site_named(&s, "imported.cz").await;
+        let other = site_named(&s, "other.cz").await;
+        for h in [&site, &other] {
+            s.set_stored_integrity_scan(h.id.as_str(), &scanned(now - HOUR, now))
+                .await;
+        }
+        std::fs::create_dir_all(&baselines).expect("mkdir");
+        let baseline = baselines.join(site.id.as_str());
+        std::fs::write(&baseline, "half-copied").expect("baseline");
+        std::fs::write(baselines.join(other.id.as_str()), "x").expect("baseline");
+
+        s.site_scan_start_over(&site.id).await;
+        // Nothing is removed outside a scan: one may be saving right now.
+        assert!(baseline.exists());
+        assert!(s.scan_request_flag(site.id.as_str()).await.is_some());
+
+        s.site_scan_tick_at(&chrono::Utc, now).await.expect("tick");
+
+        assert_eq!(
+            *seen.lock().expect("lock"),
+            [false],
+            "scanned with no baseline"
+        );
+        assert!(baselines.join(other.id.as_str()).exists());
+        // Once only: the scan after it keeps what it saved.
+        std::fs::write(&baseline, "whole site").expect("baseline");
+        s.site_scan_maybe_start_over(site.id.as_str()).await;
+        assert!(baseline.exists());
+    }
+
     #[tokio::test]
     async fn purge_removes_baseline_and_quarantine_dir() {
         let pool = open_memory().await.expect("open");
