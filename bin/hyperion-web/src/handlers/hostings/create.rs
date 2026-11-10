@@ -1989,7 +1989,7 @@ pub(super) async fn resolve_library_picks(
 /// Post the one-time "new hosting" Slack message. Idempotent on the node
 /// side (hosting_kv marker), so a retried create cannot announce twice.
 /// Best-effort: a Slack outage must not fail a provision that succeeded.
-pub(super) async fn announce_hosting_created(
+pub(crate) async fn announce_hosting_created(
     state: &SharedState,
     target: Option<&str>,
     id: &hyperion_types::HostingId,

@@ -267,6 +267,15 @@ pub async fn post_import_from_url(
                             ),
                         )
                         .await;
+                    // A site pulled in from another Hyperion is a new site here:
+                    // same one-time Slack message as one created in the panel.
+                    // Carries no profile, so it goes out after the import.
+                    crate::handlers::hostings::announce_hosting_created(
+                        &job_state,
+                        None,
+                        &r.new_hosting_id,
+                    )
+                    .await;
                     reporter.finish(true, None).await;
                 }
                 Ok(RpcResponse::Error(e)) => {
