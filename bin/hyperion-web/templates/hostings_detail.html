@@ -4302,7 +4302,7 @@
   </p>
 
   {% if let Some(pw) = ftp_new_password %}
-    <div class="flash success">
+    <div class="flash success" data-reveal>
       <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
       <div class="flash-body">
         <strong>New FTP password (shown once)</strong>
@@ -4357,7 +4357,7 @@
      because a random 20-char password is the right default and costs the
      operator nothing to accept; typing your own is for when the credential
      has to match something that already exists elsewhere. #}
-  <form method="post" action="/hostings/ftp/set">
+  <form method="post" action="/hostings/ftp/set" data-swap="panel">
     <input type="hidden" name="_csrf" value="{{ csrf_ftp_set }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div class="field" style="max-width:32rem">
@@ -4426,7 +4426,7 @@
           </td>
           <td class="right">
             <div class="row-actions">
-              <form method="post" action="/hostings/ftp/account/reset" style="display:inline"
+              <form method="post" action="/hostings/ftp/account/reset" style="display:inline" data-swap="panel"
                     data-confirm-title="New password for {{ a.login }}"
                     data-confirm-body="A new password is generated and shown once. The old one stops working immediately — anything using it (a deploy script, a colleague's client) will start failing."
                     data-confirm-confirm-label="Generate">
@@ -4454,7 +4454,7 @@
   </div>
   {% endif %}
 
-  <form method="post" action="/hostings/ftp/account" class="cluster" style="align-items:flex-end;gap:0.6rem">
+  <form method="post" action="/hostings/ftp/account" class="cluster" style="align-items:flex-end;gap:0.6rem" data-swap="panel">
     <input type="hidden" name="_csrf" value="{{ csrf_ftp_account }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div class="field" style="margin:0;flex:1 1 12rem">
@@ -4593,7 +4593,7 @@
               <span class="text-soft small" title="This system user has no hosting in Hyperion, so there is nothing here to act on">—</span>
             {% else %}
             <div class="row-actions">
-              <form method="post" action="/hostings/ftp/set" style="display:inline"
+              <form method="post" action="/hostings/ftp/set" style="display:inline" data-swap="panel"
                     data-confirm-title="Generate a new FTP password"
                     data-confirm-body="A new password is generated for {{ a.user }} ({{ a.domain }}) and shown once. The old one stops working immediately."
                     data-confirm-confirm-label="Generate"
@@ -5398,6 +5398,11 @@
      · the identity bar, the facts row and the section-nav badges;
      · the flash banners, as toasts — and an error one also inline above the
        card, where the operator is looking.
+   A form marked `data-swap="panel"` refreshes its whole tab instead: its
+   answer shows in a DIFFERENT card (a generated FTP password is printed in
+   "FTP access", whichever card's button minted it), so swapping only the
+   form's own card threw the once-shown password away unseen. The fresh
+   `[data-reveal]` element is then scrolled into view.
    Anything that does not land back on THIS hosting (a job page, the list
    after a delete) is navigated to exactly as a native submit would. No-JS,
    multipart, `target=`, htmx-driven and `data-no-ajax` forms are left
@@ -5520,7 +5525,7 @@
   }
 
   function swapRegion(form, doc) {
-    const pair = counterpart(form, doc);
+    const pair = form.getAttribute('data-swap') === 'panel' ? null : counterpart(form, doc);
     let target = null;
     if (pair) {
       const [region, fresh] = pair;
@@ -5662,6 +5667,8 @@
     swapChrome(doc);
     const near = swapRegion(form, doc);
     showFlashes(doc, near);
+    const reveal = near && near.querySelector('[data-reveal]');
+    if (reveal) reveal.scrollIntoView({ block: 'center', behavior: 'smooth' });
     // Flash parameters from the redirect must not come back on a reload.
     if (history.replaceState) history.replaceState(null, '', location.pathname + location.hash);
     document.dispatchEvent(new CustomEvent('live-refresh-swapped'));
