@@ -463,9 +463,10 @@ pub async fn post_suspend(
         Ok(v) => v,
         Err(r) => return r,
     };
-    let reason = hyperion_types::SuspendReason::Manual {
-        message: Some(format!("suspended via API key '{}'", ctx.username)),
-    };
+    // No message: the Manual text is shown to the site's VISITORS, and this
+    // one put the API key's username on the public 503 page. The audit log
+    // already records who suspended it.
+    let reason = hyperion_types::SuspendReason::Manual { message: None };
     let sel = HostingSelector::Id(detail.id.clone());
     match crate::dispatcher::dispatch_to_node(
         &state,

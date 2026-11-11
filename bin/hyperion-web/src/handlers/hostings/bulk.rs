@@ -201,9 +201,10 @@ pub(super) async fn run_bulk_job(
         let req = match action.as_str() {
             "suspend" => Request::HostingSuspend {
                 sel,
-                reason: hyperion_types::SuspendReason::Manual {
-                    message: Some("bulk suspend".into()),
-                },
+                // No message: the Manual text is what VISITORS read on the
+                // 503 page, so an internal label here ("bulk suspend") was
+                // published on every selected site. None = the generic page.
+                reason: hyperion_types::SuspendReason::Manual { message: None },
             },
             "resume" => Request::HostingResume(sel),
             "backup" => Request::BackupNow {

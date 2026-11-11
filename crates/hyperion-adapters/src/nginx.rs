@@ -2896,6 +2896,24 @@ mod tests {
     }
 
     #[test]
+    fn render_suspended_reason_paragraph_only_when_set() {
+        let input = |reason| SuspendedInput {
+            domain: "example.cz",
+            aliases: &[],
+            cert_path: "/c/fullchain.pem",
+            key_path: "/c/privkey.pem",
+            acme_challenge_root: "/var/lib/hyperion/acme-challenges",
+            reason_message: reason,
+        };
+        // No reason: no empty or repeated paragraph under the heading.
+        let out = render_suspended(&input("")).expect("render");
+        assert!(out.contains("<h1>This site is temporarily unavailable.</h1><p class=\"muted\">"));
+        // A reason the operator typed is shown.
+        let out = render_suspended(&input("Unpaid invoice")).expect("render");
+        assert!(out.contains("<p>Unpaid invoice</p>"));
+    }
+
+    #[test]
     fn admin_allowlist_parser_rejects_injection() {
         // Valid entries kept and canonicalised.
         let v = parse_admin_allowlist("1.2.3.4, 10.0.0.0/8\n2001:db8::1");
