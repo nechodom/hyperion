@@ -1250,8 +1250,9 @@ impl AdapterPort for RealAdapter {
         let cert_path = format!("{}/{}/fullchain.pem", self.certs_root.display(), domain);
         let key_path = format!("{}/{}/privkey.pem", self.certs_root.display(), domain);
         let acme_root = self.acme_challenge_root.display().to_string();
-        let msg =
-            reason_message.unwrap_or_else(|| "This site is temporarily unavailable.".to_string());
+        // No reason = no paragraph; the page heading already says the site is
+        // unavailable (the old fallback repeated it word for word).
+        let msg = reason_message.unwrap_or_default();
         let input = hyperion_adapters::nginx::SuspendedInput {
             domain,
             aliases: &aliases,
