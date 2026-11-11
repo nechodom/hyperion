@@ -163,8 +163,9 @@ keep using HTTP-01.
 ### One-time setup (per cluster)
 
 1. Settings → HTTPS → **Automatic wildcard renewal** (admin only, since it
-   affects all hostings): enter the zone (default suggestion
-   `acme.<panel host>`) and enable it.
+   affects all hostings): the form comes filled in with a zone
+   (`acme.<panel host>`), a name server host and this server's address.
+   Press **Turn on**.
 2. Add the records the card shows. Each record goes in the DNS zone its own
    name belongs to, so for a panel at `panel.example.com`:
    ```
@@ -176,13 +177,30 @@ keep using HTTP-01.
    delegated zone, so its A/AAAA are ordinary address records (not glue):
    the NS record and the address records can live in different zones,
    possibly at different DNS providers.
-3. Press **Check delegation**. States: *not set up*, *delegation missing*
-   (the zone is not delegated to this panel yet), *points elsewhere* (it is
-   delegated to another panel or server), *could not be checked* (the lookup
-   itself failed; retry), *working*.
+3. The card looks the delegation up by itself each time the page is opened
+   (**Check again** repeats it) and shows every link on its own row: the NS
+   record, the address record(s), the responder, and what public resolvers
+   see. A record still to add is listed with a copy button; one that is in
+   place says where it points. The NS and address records are read from the
+   parent zone's own name servers, so a record shows as found the moment the
+   provider serves it, not when resolver caches expire.
 
-Enabling starts the responder on the master only and opens port 53 udp+tcp in
-the firewall; disabling closes both. Worker nodes never serve DNS. The
+   The pill beside the title sums it up: *not set up*, *off*, *responder
+   down* (switched on but holding no port 53), *waiting for DNS* (a record is
+   missing, or everything is in place and public resolvers still cache the
+   old answer), *points elsewhere* (a record or the whole zone leads to
+   another server), *not reachable* (public resolvers follow the delegation
+   and get no answer: port 53 is blocked on the way in), *could not be
+   checked*, *working*.
+
+Changing the zone later is refused while wildcards point their CNAME into it,
+until the confirmation under the zone field is ticked: every such CNAME then
+has to be updated at its DNS provider, and each wildcard reads *CNAME not
+verified* until it is checked again.
+
+**Turn on** starts the responder on the master only and opens port 53 udp+tcp
+in the firewall; **Turn off** closes both and leaves the zone and the DNS
+records as they are. Worker nodes never serve DNS. The
 responder answers only names inside the zone, never recurses, refuses
 everything else, and rate-limits per source address.
 
@@ -203,13 +221,21 @@ standing permission for the panel to obtain certificates for that name.
 
 - **Port 53 is held.** The zone is saved but the responder stays off, and the
   message names the process holding the port (`named` for BIND, dnsmasq,
-  unbound, ...). Stop it, or bind it to loopback only, then enable again. The
-  responder binds each non-loopback address, not `0.0.0.0`, so
-  systemd-resolved's stub on 127.0.0.53 does not conflict.
-- **"delegation missing" / "points elsewhere".** The NS record at the
-  parent zone, or the NS host's address records, are absent, wrong, or not
-  propagated yet. Re-check with `dig NS <zone>` and the steps under "Verify
-  DNS before relying on it" below.
+  unbound, ...). Stop it, or bind it to loopback only, then turn it on again.
+  The responder binds the public address set on the card (never `0.0.0.0`),
+  so systemd-resolved's stub on 127.0.0.53 does not conflict and Docker's
+  bridge addresses are left alone. Behind NAT, where that address is not on
+  the machine, it binds every non-loopback address of the family instead.
+  An address that cannot be bound is retried every 10 s and named on the
+  Responder row; the addresses that did bind keep answering meanwhile.
+- **"waiting for DNS" / "points elsewhere".** The row that is not green
+  says which record is absent or where it leads instead. With every record
+  green and only *Public DNS* waiting, resolvers still cache the earlier "no
+  such record"; that clears within the parent zone's negative TTL. To look
+  by hand, see "Verify DNS before relying on it" below.
+- **"not reachable".** The records are right and the responder answers on
+  the server itself, but nothing gets in from outside: open UDP and TCP 53
+  in the hosting provider's firewall (the panel only manages its own).
 - **CNAME problems.** The Wildcard renewal block states what it saw: CNAME missing, CNAME
   points elsewhere (wrong label), or a plain TXT left over from manual
   issuance at the name (replace it with the CNAME). Before every order the

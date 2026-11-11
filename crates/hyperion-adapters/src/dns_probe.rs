@@ -17,11 +17,11 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
-const T_A: u16 = 1;
+pub(crate) const T_A: u16 = 1;
 pub(crate) const T_NS: u16 = 2;
-const T_CNAME: u16 = 5;
+pub(crate) const T_CNAME: u16 = 5;
 pub(crate) const T_TXT: u16 = 16;
-const T_AAAA: u16 = 28;
+pub(crate) const T_AAAA: u16 = 28;
 pub(crate) const T_OPT: u16 = 41;
 
 pub(crate) const RCODE_NOERROR: u8 = 0;
@@ -32,7 +32,7 @@ const ATTEMPTS: u32 = 2;
 /// Public recursors tried after the host's own (`/etc/resolv.conf`). They
 /// are only used to FIND the zone's nameservers; the verdict itself always
 /// comes from those nameservers.
-const PUBLIC_RESOLVERS: [IpAddr; 2] = [
+pub(crate) const PUBLIC_RESOLVERS: [IpAddr; 2] = [
     IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
     IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
 ];
@@ -65,9 +65,11 @@ pub(crate) struct Reply {
     pub(crate) aa: bool,
     pub(crate) tc: bool,
     pub(crate) answers: Vec<Rr>,
+    /// The authority section: a referral's NS set, a negative answer's SOA.
+    pub(crate) authority: Vec<Rr>,
 }
 
-fn norm(name: &str) -> String {
+pub(crate) fn norm(name: &str) -> String {
     name.trim_end_matches('.').to_ascii_lowercase()
 }
 
@@ -163,34 +165,20 @@ pub(crate) fn parse_reply(buf: &[u8]) -> Result<Reply, String> {
     }
     let mut answers = Vec::with_capacity(an as usize);
     for _ in 0..an {
-        let (name, p) = read_name(buf, pos)?;
-        let rtype = read_u16(buf, p)?;
-        let rdlen = read_u16(buf, p + 8)? as usize;
-        let start = p + 10;
-        let rdata = buf.get(start..start + rdlen).ok_or("truncated rdata")?;
-        let data = match rtype {
-            T_NS | T_CNAME => RData::Name(read_name(buf, start)?.0),
-            T_TXT => {
-                let mut s = String::new();
-                let mut i = 0;
-                while i < rdata.len() {
-                    let l = rdata[i] as usize;
-                    let chunk = rdata.get(i + 1..i + 1 + l).ok_or("truncated TXT")?;
-                    s.push_str(&String::from_utf8_lossy(chunk));
-                    i += 1 + l;
-                }
-                RData::Txt(s)
-            }
-            T_A if rdlen == 4 => RData::A(Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3])),
-            T_AAAA if rdlen == 16 => {
-                let mut o = [0u8; 16];
-                o.copy_from_slice(rdata);
-                RData::Aaaa(Ipv6Addr::from(o))
-            }
-            _ => RData::Other,
+        let (rr, next) = read_rr(buf, pos)?;
+        answers.push(rr);
+        pos = next;
+    }
+    // A referral carries its NS set here. Read leniently: a reply whose
+    // answers parsed is still an answer when its tail is cut short.
+    let ns = read_u16(buf, 8)?;
+    let mut authority = Vec::new();
+    for _ in 0..ns {
+        let Ok((rr, next)) = read_rr(buf, pos) else {
+            break;
         };
-        answers.push(Rr { name, rtype, data });
-        pos = start + rdlen;
+        authority.push(rr);
+        pos = next;
     }
     Ok(Reply {
         id,
@@ -198,7 +186,39 @@ pub(crate) fn parse_reply(buf: &[u8]) -> Result<Reply, String> {
         aa: flags & 0x0400 != 0,
         tc: flags & 0x0200 != 0,
         answers,
+        authority,
     })
+}
+
+/// One resource record at `pos`, and the offset just past it.
+fn read_rr(buf: &[u8], pos: usize) -> Result<(Rr, usize), String> {
+    let (name, p) = read_name(buf, pos)?;
+    let rtype = read_u16(buf, p)?;
+    let rdlen = read_u16(buf, p + 8)? as usize;
+    let start = p + 10;
+    let rdata = buf.get(start..start + rdlen).ok_or("truncated rdata")?;
+    let data = match rtype {
+        T_NS | T_CNAME => RData::Name(read_name(buf, start)?.0),
+        T_TXT => {
+            let mut s = String::new();
+            let mut i = 0;
+            while i < rdata.len() {
+                let l = rdata[i] as usize;
+                let chunk = rdata.get(i + 1..i + 1 + l).ok_or("truncated TXT")?;
+                s.push_str(&String::from_utf8_lossy(chunk));
+                i += 1 + l;
+            }
+            RData::Txt(s)
+        }
+        T_A if rdlen == 4 => RData::A(Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3])),
+        T_AAAA if rdlen == 16 => {
+            let mut o = [0u8; 16];
+            o.copy_from_slice(rdata);
+            RData::Aaaa(Ipv6Addr::from(o))
+        }
+        _ => RData::Other,
+    };
+    Ok((Rr { name, rtype, data }, start + rdlen))
 }
 
 async fn query_udp(server: SocketAddr, packet: &[u8], id: u16) -> Result<Reply, String> {
@@ -254,7 +274,12 @@ async fn query_tcp(server: SocketAddr, packet: &[u8], id: u16) -> Result<Reply, 
     Ok(r)
 }
 
-async fn query(server: IpAddr, name: &str, qtype: u16, recursion: bool) -> Result<Reply, String> {
+pub(crate) async fn query(
+    server: IpAddr,
+    name: &str,
+    qtype: u16,
+    recursion: bool,
+) -> Result<Reply, String> {
     let addr = SocketAddr::new(server, 53);
     let mut last = String::from("no attempt");
     for _ in 0..ATTEMPTS {
@@ -298,7 +323,11 @@ fn recursors() -> Vec<IpAddr> {
 }
 
 /// Ask the recursors in turn; the first that answers at all wins.
-async fn recursive(resolvers: &[IpAddr], name: &str, qtype: u16) -> Result<Reply, String> {
+pub(crate) async fn recursive(
+    resolvers: &[IpAddr],
+    name: &str,
+    qtype: u16,
+) -> Result<Reply, String> {
     let mut errs = Vec::new();
     for r in resolvers {
         match query(*r, name, qtype, true).await {
@@ -311,7 +340,10 @@ async fn recursive(resolvers: &[IpAddr], name: &str, qtype: u16) -> Result<Reply
 
 /// The zone `name` lives in and that zone's NS host names: the closest
 /// enclosing name that has its own NS set.
-async fn find_zone(resolvers: &[IpAddr], name: &str) -> Result<(String, Vec<String>), String> {
+pub(crate) async fn find_zone(
+    resolvers: &[IpAddr],
+    name: &str,
+) -> Result<(String, Vec<String>), String> {
     let name = norm(name);
     let labels: Vec<&str> = name.split('.').collect();
     for i in 0..labels.len().saturating_sub(1) {
@@ -336,7 +368,7 @@ async fn find_zone(resolvers: &[IpAddr], name: &str) -> Result<(String, Vec<Stri
 }
 
 /// IPv4 addresses of a nameserver, or IPv6 when it has no IPv4 at all.
-async fn ns_addresses(resolvers: &[IpAddr], host: &str) -> Vec<IpAddr> {
+pub(crate) async fn ns_addresses(resolvers: &[IpAddr], host: &str) -> Vec<IpAddr> {
     for qtype in [T_A, T_AAAA] {
         if let Ok(r) = recursive(resolvers, host, qtype).await {
             let ips: Vec<IpAddr> = r
@@ -378,7 +410,7 @@ pub(crate) fn interpret(name: &str, reply: &Reply) -> Seen {
 
 /// [`interpret`], optionally accepting a recursor's (never authoritative)
 /// answer.
-fn interpret_as(name: &str, reply: &Reply, require_aa: bool) -> Seen {
+pub(crate) fn interpret_as(name: &str, reply: &Reply, require_aa: bool) -> Seen {
     let name = norm(name);
     if reply.rcode == RCODE_NXDOMAIN {
         return Seen::NxDomain;
@@ -793,6 +825,35 @@ mod tests {
             r.extend_from_slice(p.as_bytes());
         }
         r
+    }
+
+    #[test]
+    fn a_referral_keeps_its_authority_section() {
+        // Header: no answers, one authority record (an NS for the question
+        // name), as a parent zone answers for a delegated child.
+        let mut b = reply_with(0x8000, &[]);
+        b[8..10].copy_from_slice(&1u16.to_be_bytes());
+        let mut target = Vec::new();
+        for l in ["ns", "example", "net"] {
+            target.push(l.len() as u8);
+            target.extend_from_slice(l.as_bytes());
+        }
+        target.push(0);
+        b.extend_from_slice(&[0xC0, 12]);
+        b.extend_from_slice(&T_NS.to_be_bytes());
+        b.extend_from_slice(&1u16.to_be_bytes());
+        b.extend_from_slice(&60u32.to_be_bytes());
+        b.extend_from_slice(&(target.len() as u16).to_be_bytes());
+        b.extend_from_slice(&target);
+        let r = parse_reply(&b).expect("parse");
+        assert!(r.answers.is_empty());
+        assert_eq!(r.authority.len(), 1);
+        assert_eq!(r.authority[0].name, "_acme-challenge.example.com");
+        assert_eq!(r.authority[0].data, RData::Name("ns.example.net".into()));
+        // A cut-off authority record costs the tail, never the reply.
+        let cut = &b[..b.len() - 3];
+        let r = parse_reply(cut).expect("still an answer");
+        assert!(r.authority.is_empty());
     }
 
     #[test]

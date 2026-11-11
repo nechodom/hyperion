@@ -45,6 +45,20 @@ impl hyperion_web::acme_dns_renew::DnsProbe for OfflineDns {
     async fn txt_visible(&self, _name: &str, _values: &[String]) -> Result<(), String> {
         Err(OFFLINE_DNS.into())
     }
+    async fn delegation(
+        &self,
+        setup: &hyperion_adapters::dns_delegation::DelegationSetup,
+    ) -> hyperion_adapters::dns_delegation::DelegationReport {
+        use hyperion_adapters::dns_delegation::{DelegationReport, Link};
+        let unknown = || Link::Unknown(OFFLINE_DNS.into());
+        DelegationReport {
+            responder: unknown(),
+            ns: Link::Missing(format!("no NS record for {} ({OFFLINE_DNS})", setup.zone)),
+            a: setup.ipv4.map(|_| unknown()),
+            aaaa: setup.ipv6.map(|_| unknown()),
+            public: unknown(),
+        }
+    }
 }
 
 struct StubAdapters {
@@ -5066,7 +5080,11 @@ async fn acme_dns_card_renders_records_for_admin() {
     assert_eq!(status, StatusCode::OK);
     assert!(page.contains("id=\"acme-dns\""), "card missing");
     assert!(page.contains("Delegated acme zone"));
-    assert!(page.contains("/settings/https/acme-dns/check"));
+    // Nothing saved: a first setup, one button that also switches it on,
+    // and no status list to look anything up for.
+    assert!(page.contains(">not set up</span>"), "pill");
+    assert!(page.contains("name=\"enabled\" value=\"on\""), "Turn on");
+    assert!(!page.contains("/settings/https/acme-dns/check"));
     // The deep link resolves through CARDS.
     assert_eq!(
         hyperion_web::handlers::settings::chrome::card_url("acme-dns", ""),
@@ -5103,20 +5121,169 @@ async fn acme_dns_card_renders_records_for_admin() {
     ] {
         assert!(page.contains(line), "missing record {line}");
     }
-    // Saved but not delegated anywhere: the check never claims it works.
+    // Saved with the responder off: the pill says so, the switch offers to
+    // turn it on, and the status list fetches its lookups by itself.
+    assert!(page.contains(">off</span>"), "pill");
+    assert!(page.contains("name=\"power\" value=\"on\""), "switch");
+    assert!(
+        page.contains("hx-get=\"/settings/https/acme-dns/check\" hx-trigger=\"intersect once\""),
+        "the status list does not load itself"
+    );
+    // Saved but not delegated anywhere: the check never claims it works,
+    // and it says which record is missing rather than "broken".
+    let (status, list) = acme_dns_get(&app, &cookie, "/settings/https/acme-dns/check").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(list.contains("id=\"acme-dns-status\""), "{list}");
+    assert!(!list.contains("working"), "{list}");
+    assert!(
+        list.contains("no NS record for acme.panel.example.com"),
+        "{list}"
+    );
+    assert!(list.contains(OFFLINE_DNS), "public DNS was asked: {list}");
+    // The answer replaces the card's pill too, and does not fetch again.
+    assert!(
+        list.contains("id=\"acme-dns-verdict\"") && list.contains("hx-swap-oob=\"true\""),
+        "{list}"
+    );
+    assert!(!list.contains("intersect once"), "{list}");
+    assert!(list.contains("Check again"), "{list}");
+}
+
+/// A zone that delegated wildcards point their CNAME into is not moved by
+/// an ordinary save: that strands every one of them without a word.
+#[tokio::test]
+async fn acme_dns_zone_in_use_needs_a_second_yes_to_change() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (_, page) = acme_dns_get(&app, &cookie, "/settings/https").await;
+    let csrf = extract_csrf(&page);
+    let save = |zone: &'static str, extra: &'static str| {
+        let (app, cookie, csrf) = (app.clone(), cookie.clone(), csrf.clone());
+        async move {
+            acme_dns_post(
+                &app,
+                &cookie,
+                "/settings/https/acme-dns",
+                format!(
+                    "_csrf={csrf}&zone={zone}&ns_host=ns-acme.example.com\
+                     &public_ipv4=203.0.113.9{extra}"
+                ),
+            )
+            .await
+        }
+    };
+    let resp = save("acme.panel.example.com", "").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let base = hyperion_validate::Domain::parse("shop.example.org").expect("domain");
+    let ensure = RpcReq::AcmeDnsLabelEnsure {
+        base: base.clone(),
+        hosting_id: None,
+    };
+    match hyperion_rpc_client::call(&sock, ensure).await.expect("rpc") {
+        RpcResp::AcmeDnsLabel(_) => {}
+        other => panic!("unexpected: {other:?}"),
+    }
+    let mark = RpcReq::AcmeDnsLabelMark {
+        base,
+        ok: true,
+        error: None,
+    };
+    hyperion_rpc_client::call(&sock, mark).await.expect("mark");
+
+    // The same zone again is an ordinary save.
+    let resp = save("acme.panel.example.com", "&public_ipv6=2001%3Adb8%3A%3A9").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // Another zone: refused in place, with what was typed and the way out.
+    let resp = save("other.example.com", "").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let page = body_string(resp).await;
+    assert!(page.contains("Not saved."), "no refusal shown");
+    assert!(page.contains("1 wildcard points its"), "who is affected");
+    assert!(
+        page.contains("value=\"other.example.com\""),
+        "input not kept"
+    );
+    assert!(page.contains("name=\"confirm_zone\""), "no way to confirm");
+    assert!(
+        page.contains("<details style=\"margin:0.9rem 0 0\" open>"),
+        "form folded"
+    );
+    let zone = |resp: RpcResp| match resp {
+        RpcResp::AcmeDnsConfig(c) => c.zone.unwrap_or_default(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    let saved = hyperion_rpc_client::call(&sock, RpcReq::AcmeDnsConfigGet)
+        .await
+        .expect("get");
+    assert_eq!(zone(saved), "acme.panel.example.com", "the zone moved");
+
+    // Confirmed: the zone moves and no label keeps reading "verified".
+    let resp = save("other.example.com", "&confirm_zone=on").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let saved = hyperion_rpc_client::call(&sock, RpcReq::AcmeDnsConfigGet)
+        .await
+        .expect("get");
+    assert_eq!(zone(saved), "other.example.com");
+    match hyperion_rpc_client::call(&sock, RpcReq::AcmeDnsLabels)
+        .await
+        .expect("labels")
+    {
+        RpcResp::AcmeDnsLabels(l) => {
+            assert_eq!(l.len(), 1);
+            assert_eq!(l[0].verified_at, None, "still reads verified");
+            let why = l[0].last_check_error.clone().unwrap_or_default();
+            assert!(why.contains("update the CNAME"), "{why}");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// The switch beside the title turns the responder off and leaves the
+/// zone, the name server and the addresses exactly as saved.
+#[tokio::test]
+async fn acme_dns_power_switch_keeps_the_saved_zone() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (_, page) = acme_dns_get(&app, &cookie, "/settings/https").await;
     let csrf = extract_csrf(&page);
     let resp = acme_dns_post(
         &app,
         &cookie,
-        "/settings/https/acme-dns/check",
-        format!("_csrf={csrf}"),
+        "/settings/https/acme-dns",
+        format!(
+            "_csrf={csrf}&zone=acme.panel.example.com&ns_host=ns-acme.example.com\
+             &public_ipv4=203.0.113.9"
+        ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let cell = body_string(resp).await;
-    assert!(cell.contains("pill") && !cell.contains("working"), "{cell}");
-    assert!(cell.contains("delegation missing"), "{cell}");
-    assert!(cell.contains(OFFLINE_DNS), "public DNS was asked: {cell}");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/settings/https/acme-dns",
+        format!("_csrf={csrf}&power=off"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    match hyperion_rpc_client::call(&sock, RpcReq::AcmeDnsConfigGet)
+        .await
+        .expect("get")
+    {
+        RpcResp::AcmeDnsConfig(c) => {
+            assert_eq!(c.zone.as_deref(), Some("acme.panel.example.com"));
+            assert_eq!(c.ns_host, "ns-acme.example.com");
+            assert_eq!(c.public_ipv4.as_deref(), Some("203.0.113.9"));
+            assert!(!c.enabled);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -5161,16 +5328,16 @@ async fn acme_dns_settings_forbidden_for_customer() {
     let cookie = acme_dns_login(&app, "acme-cust", "customer-pw-1").await;
     let (_, profile) = acme_dns_get(&app, &cookie, "/profile").await;
     let csrf = extract_csrf(&profile);
-    for uri in ["/settings/https/acme-dns", "/settings/https/acme-dns/check"] {
-        let resp = acme_dns_post(
-            &app,
-            &cookie,
-            uri,
-            format!("_csrf={csrf}&zone=acme.example.com&ns_host=ns.example.com"),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri}");
-    }
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/settings/https/acme-dns",
+        format!("_csrf={csrf}&zone=acme.example.com&ns_host=ns.example.com"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let (status, _) = acme_dns_get(&app, &cookie, "/settings/https/acme-dns/check").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "the check");
 }
 
 /// A custom role with every hosting's certificates but no global
@@ -5228,25 +5395,22 @@ async fn acme_dns_settings_need_settings_manage() {
     let cookie = acme_dns_login(&app, "certs", "certs-pw-12345").await;
     let (_, profile) = acme_dns_get(&app, &cookie, "/profile").await;
     let csrf = extract_csrf(&profile);
-    for uri in ["/settings/https/acme-dns", "/settings/https/acme-dns/check"] {
-        let resp = acme_dns_post(
-            &app,
-            &cookie,
-            uri,
-            format!(
-                "_csrf={}&zone=acme.example.com&ns_host=ns.example.com",
-                enc(&csrf)
-            ),
-        )
-        .await;
-        let status = resp.status();
-        let body = body_string(resp).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {body}");
-        assert!(
-            !body.contains("CSRF check failed"),
-            "{uri}: refused by CSRF"
-        );
-    }
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/settings/https/acme-dns",
+        format!(
+            "_csrf={}&zone=acme.example.com&ns_host=ns.example.com",
+            enc(&csrf)
+        ),
+    )
+    .await;
+    let status = resp.status();
+    let body = body_string(resp).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(!body.contains("CSRF check failed"), "refused by CSRF");
+    let (status, _) = acme_dns_get(&app, &cookie, "/settings/https/acme-dns/check").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "the check");
     match hyperion_rpc_client::call(&sock, RpcReq::AcmeDnsConfigGet)
         .await
         .expect("config")
