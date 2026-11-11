@@ -8324,6 +8324,115 @@ async fn hosting_chip_names_the_stack_and_nothing_else() {
 }
 
 #[tokio::test]
+async fn hosting_docker_tab_shows_the_stack_behind_a_proxy() {
+    use hyperion_state::capabilities::Capability;
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(proxy_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let proxy_id = docker_proxy_hosting(&sock, "app.example.cz", "http://127.0.0.1:18080").await;
+    let lonely_id = docker_proxy_hosting(&sock, "lonely.example.cz", "http://127.0.0.1:9").await;
+    let php_id = acme_ssl_hosting(&sock, "plain.example.cz").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    // The tab and its lazy slot are on a proxy's page and only there.
+    let tab = "data-tab=\"docker\"";
+    let slot = "hx-get=\"/docker/hosting-panel?selector=";
+    let (_, detail) = acme_dns_get(&app, &cookie, &format!("/hostings/{proxy_id}")).await;
+    assert!(detail.contains(tab), "{detail}");
+    assert!(detail.contains(slot), "{detail}");
+    assert!(detail.contains("id=\"tab-docker\""), "{detail}");
+    let (_, detail) = acme_dns_get(&app, &cookie, &format!("/hostings/{php_id}")).await;
+    assert!(!detail.contains(tab));
+    assert!(!detail.contains(slot));
+
+    // The panel names the stack, lists its containers and offers its logs.
+    let (st, panel) = acme_dns_get(
+        &app,
+        &cookie,
+        &format!("/docker/hosting-panel?selector={proxy_id}"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{panel}");
+    assert!(panel.contains("href=\"/docker/local/loop\""), "{panel}");
+    assert!(panel.contains("Containers"), "{panel}");
+    assert!(panel.contains("id=\"docker-logs\""), "{panel}");
+    for other in ["wide", "nginx-clash", "closed"] {
+        assert!(
+            !panel.contains(&format!("<strong>{other}</strong>")),
+            "{panel}"
+        );
+    }
+
+    // A proxy with no stack behind it says so instead.
+    let (st, panel) = acme_dns_get(
+        &app,
+        &cookie,
+        &format!("/docker/hosting-panel?selector={lonely_id}"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(panel.contains("No Docker stack"), "{panel}");
+    assert!(!panel.contains("Containers"), "{panel}");
+
+    // Without DockerLogs: the stack and containers, no log viewer.
+    let viewer = docker_caps_user(
+        &app,
+        &sock,
+        "dk-tab-viewer",
+        &[Capability::HostingView, Capability::DockerView],
+    )
+    .await;
+    let (_, panel) = acme_dns_get(
+        &app,
+        &viewer,
+        &format!("/docker/hosting-panel?selector={proxy_id}"),
+    )
+    .await;
+    assert!(panel.contains("href=\"/docker/local/loop\""), "{panel}");
+    assert!(!panel.contains("id=\"docker-logs\""), "{panel}");
+
+    // Without DockerView, or without every hosting in scope: no tab, nothing.
+    let blind = docker_caps_user(&app, &sock, "dk-tab-blind", &[Capability::HostingView]).await;
+    let (_, detail) = acme_dns_get(&app, &blind, &format!("/hostings/{proxy_id}")).await;
+    assert!(!detail.contains(tab));
+    let (st, body) = acme_dns_get(
+        &app,
+        &blind,
+        &format!("/docker/hosting-panel?selector={proxy_id}"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(body.trim().is_empty(), "{body}");
+    let narrow = docker_custom_user(&app, &sock, "dk-tab-narrow", false).await;
+    let (_, body) = acme_dns_get(
+        &app,
+        &narrow,
+        "/docker/hosting-panel?selector=app.example.cz",
+    )
+    .await;
+    assert!(body.trim().is_empty(), "{body}");
+}
+
+#[tokio::test]
+async fn hosting_docker_tab_says_when_the_module_is_off() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _pool) = start_agent_full(None, Some(proxy_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_proxy_hosting(&sock, "app.example.cz", "http://127.0.0.1:18080").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (st, body) = acme_dns_get(
+        &app,
+        &cookie,
+        "/docker/hosting-panel?selector=app.example.cz",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(body.contains("not turned on"), "{body}");
+    assert!(body.contains("docker-module"), "{body}");
+}
+
+#[tokio::test]
 async fn hosting_chip_is_empty_while_the_module_is_off() {
     let admin = admin_user::create("kevin", "good-pw").expect("create");
     let (sock, _d, _pool) = start_agent_full(None, Some(proxy_snapshot())).await;

@@ -1,0 +1,42 @@
+{# The hosting page's Docker tab, loaded when the tab is opened: the stack
+   this reverse proxy forwards to, its containers and its logs. When there is
+   no stack to show, one line says why. #}
+{% if let Some(n) = note %}
+<div class="card compact">
+  <p class="small{% if n.tone != "warn" %} text-soft{% endif %}" style="margin:0{% if n.tone == "warn" %};color:var(--warn){% endif %}">{{ n.text }}</p>
+  {% if !n.link_href.is_empty() %}<p class="small" style="margin:0.4rem 0 0"><a href="{{ n.link_href }}">{{ n.link_label }}</a></p>{% endif %}
+</div>
+{% endif %}
+
+{% if let Some(s) = stack %}
+{% if let Some(err) = s.daemon_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">Docker is not answering on {{ s.node_label }}: {{ err }} What follows is what it said last.</div>
+  </div>
+{% endif %}
+
+<div class="group">
+  <div class="item svc-row">
+    <div class="svc-main">
+      <div class="svc-title">
+        <a class="svc-link" href="{{ s.href }}"><strong>{{ s.name }}</strong></a>
+        <span class="text-soft small">on {{ s.node_label }}</span>
+        <span class="pill {{ s.tone }}">{{ s.state_label }}</span>
+      </div>
+      {% if !s.summary.is_empty() %}<div class="text-soft small">{{ s.summary }}</div>{% endif %}
+      {% if !s.gone.is_empty() %}<div class="small" style="color:var(--warn)">{{ s.gone }}</div>{% endif %}
+      <div class="text-soft small">As of the node's last look, {{ s.read }}.</div>
+    </div>
+    <div class="svc-actions">
+      <a class="btn small" href="{{ s.href }}">Open stack</a>
+    </div>
+  </div>
+</div>
+
+{% include "_docker_containers.html" %}
+
+{% if let Some(logs) = logs %}
+{% include "_docker_logs.html" %}
+{% endif %}
+{% endif %}

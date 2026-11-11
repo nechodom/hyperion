@@ -1,0 +1,41 @@
+{# The containers table, shared by the stack page and the hosting's Docker
+   tab. Needs `containers`, `stats_note`, `update_note`, `log_warning`. #}
+{% if !containers.is_empty() %}
+<div class="group">
+  <div class="ghead">Containers{% if !stats_note.is_empty() %}<span class="ghead-note">{{ stats_note }}</span>{% endif %}</div>
+  <div class="table-wrap">
+    <table class="stats-table">
+      <thead><tr><th>Container</th><th>State</th><th>Image</th><th class="right">Restarts</th><th class="hide-on-phone">Started</th><th class="hide-on-phone">Ports</th><th class="right hide-on-phone">CPU</th><th class="right hide-on-phone">Memory</th><th class="right">Log</th></tr></thead>
+      <tbody>
+      {% for c in containers %}
+        <tr>
+          <td>{{ c.name }}{% if !c.service.is_empty() %} <span class="text-soft small">{{ c.service }}</span>{% endif %}</td>
+          <td><span class="pill {{ c.tone }}">{{ c.state }}</span>{% if !c.exit.is_empty() %} <span class="text-soft small">{{ c.exit }}</span>{% endif %}</td>
+          <td><span class="mono small">{{ c.image }}</span>{% if let Some(u) = c.update %}
+            <div class="small"><span class="pill {{ u.tone }}">{{ u.label }}</span>{% if !c.update_checked.is_empty() %} <span class="text-soft">checked {{ c.update_checked }}</span>{% endif %}</div>
+            {% if !c.update_error.is_empty() %}<div class="small" style="color:var(--warn)">The latest check failed: {{ c.update_error }}</div>{% endif %}
+            {% if !c.update_reason.is_empty() %}<div class="text-soft small">{{ c.update_reason }}</div>{% endif %}
+          {% endif %}</td>
+          <td class="right numeric">{{ c.restarts }}</td>
+          <td class="hide-on-phone">{{ c.started }}</td>
+          <td class="hide-on-phone mono small">{{ c.ports }}</td>
+          <td class="right numeric hide-on-phone">{{ c.cpu }}</td>
+          <td class="right numeric hide-on-phone">{{ c.memory }}</td>
+          <td class="right numeric">{{ c.log }}{% if c.log_warn %}<div class="small" style="color:var(--warn)">no max-size</div>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if update_note %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">Image updates are checked once a day, for the same tag the container runs; a newer version number is not looked for. Hyperion does not pull images or restart containers. Pull and recreate them yourself when you want the update.</p>
+  </div>
+  {% endif %}
+  {% if log_warning %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">A log over 1 GiB with no <code>max-size</code> keeps growing until the disk is full. Set <code>max-size</code> and <code>max-file</code> under <code>logging.options</code> for the service in the compose file.</p>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
