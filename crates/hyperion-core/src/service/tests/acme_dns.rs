@@ -127,6 +127,80 @@ async fn enable_fails_closed_when_the_firewall_preset_fails() {
     assert!(!s.acme_dns_config_get().await.expect("get").enabled);
 }
 
+/// The responder loop reads the stored row every few seconds. Saving a
+/// zone that is already on must never show it a disabled row in between.
+#[tokio::test]
+async fn resaving_an_enabled_zone_never_stores_it_disabled() {
+    let s = bare().await;
+    save(&s, true, true).await.expect("enable");
+    let pool = s.pool.clone();
+    let seen_mid_save = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen = seen_mid_save.clone();
+    let cfg = s
+        .acme_dns_config_save(
+            Some("acme.panel.example".into()),
+            "ns-acme.panel.example".into(),
+            Some("203.0.113.5".into()),
+            None,
+            true,
+            "",
+            move |_| async move {
+                let row = hyperion_state::acme_dns::config_get(&pool)
+                    .await
+                    .expect("read")
+                    .expect("row");
+                *seen.lock().expect("lock") = Some(row.enabled);
+                Ok((true, String::new(), String::new()))
+            },
+        )
+        .await
+        .expect("re-save");
+    assert!(cfg.enabled);
+    assert_eq!(
+        *seen_mid_save.lock().expect("lock"),
+        Some(true),
+        "the row read disabled while the firewall step ran"
+    );
+}
+
+/// A first enable still waits for the port: nothing listens before it is open.
+#[tokio::test]
+async fn a_first_enable_stays_off_until_the_firewall_is_open() {
+    let s = bare().await;
+    let pool = s.pool.clone();
+    let seen_mid_save = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen = seen_mid_save.clone();
+    s.acme_dns_config_save(
+        Some("acme.panel.example".into()),
+        "ns-acme.panel.example".into(),
+        None,
+        None,
+        true,
+        "",
+        move |_| async move {
+            let row = hyperion_state::acme_dns::config_get(&pool)
+                .await
+                .expect("read")
+                .expect("row");
+            *seen.lock().expect("lock") = Some(row.enabled);
+            Ok((true, String::new(), String::new()))
+        },
+    )
+    .await
+    .expect("enable");
+    assert_eq!(*seen_mid_save.lock().expect("lock"), Some(false));
+    assert!(s.acme_dns_config_get().await.expect("get").enabled);
+}
+
+/// A responder that was on and loses the firewall on a re-save ends off.
+#[tokio::test]
+async fn a_resave_whose_firewall_step_fails_ends_off() {
+    let s = bare().await;
+    save(&s, true, true).await.expect("enable");
+    save(&s, true, false).await.expect_err("nft failed");
+    assert!(!s.acme_dns_config_get().await.expect("get").enabled);
+}
+
 #[tokio::test]
 async fn disable_reports_a_failed_firewall_removal() {
     let s = bare().await;

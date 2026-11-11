@@ -333,7 +333,8 @@ fn every_page_is_reachable_from_the_nav() {
         "/install/node-php-masters",
         // Per-row DNS cell the HTTPS settings page lazy-loads for each node.
         "/settings/https/preview-dns",
-        // htmx partial behind the HTTPS page's Check delegation button (POST).
+        // The delegated zone's status list on the HTTPS page: fetched when it
+        // scrolls into view and by its Check again button.
         "/settings/https/acme-dns/check",
         // Per-card fragment the test-site form lazy-loads into each server.
         "/hostings/new/server-facts",

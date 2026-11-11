@@ -1,0 +1,40 @@
+{#- The delegated zone's status list (handlers/settings/page_acme_dns.rs): the
+    DNS records to add, each with its own state, the responder, and what
+    public resolvers see. Drawn with the HTTPS settings page while the lookups
+    are still to run, where it fetches itself once it scrolls into view; and
+    drawn again as the answer of that fetch and of "Check again", which swap
+    it whole and send the card's pill along. -#}
+<div id="acme-dns-status" style="margin:0.9rem 0 0" aria-live="polite"
+     {%- if acme_status.pending %} hx-get="/settings/https/acme-dns/check" hx-trigger="intersect once" hx-swap="outerHTML"{% endif %}>
+  {% if !acme_status.headline.is_empty() %}
+  <p class="chk-note{% if !acme_status.headline_tone.is_empty() %} tone-{{ acme_status.headline_tone }}{% endif %}" style="margin:0 0 0.5rem">{{ acme_status.headline }}</p>
+  {% endif %}
+  {% if !acme_status.rows.is_empty() %}
+  <ul class="chk-list" style="--chk-name-w:7rem">
+    {% for r in acme_status.rows %}
+    <li>
+      <span class="chk-dot{% if !r.tone.is_empty() %} {{ r.tone }}{% endif %}"></span>
+      <strong>{{ r.name }}</strong>
+      <div class="chk-detail">
+        {% if r.checking %}<span class="spinner-inline" aria-hidden="true"></span> {% endif %}{{ r.detail }}
+        {% if let Some(line) = r.record %}
+        <div class="copy-field" data-copy="{{ line }}" title="Copy the record" style="margin:0.35rem 0 0.2rem">
+          <span class="copy-value">{{ line }}</span>
+          <span class="copy-hint">click to copy</span>
+        </div>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% if !acme_status.pending %}
+  <div style="margin:0.6rem 0 0">
+    <button class="btn small" type="button" hx-get="/settings/https/acme-dns/check"
+            hx-target="#acme-dns-status" hx-swap="outerHTML" hx-disabled-elt="this">Check again</button>
+  </div>
+  {% endif %}
+  {% endif %}
+</div>
+{% if acme_status.oob %}{% if let Some(v) = acme_status.verdict %}
+<span id="acme-dns-verdict" class="pill {{ v.tone }}" hx-swap-oob="true">{{ v.word }}</span>
+{% endif %}{% endif %}

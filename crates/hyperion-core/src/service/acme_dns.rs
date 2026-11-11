@@ -294,14 +294,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         } else {
             Vec::new()
         };
+        let was_on = prev.is_some_and(|p| p.enabled);
         let mut cfg = hyperion_types::AcmeDnsConfig {
             zone,
             ns_host,
             public_ipv4,
             public_ipv6,
-            // Stored enabled only once the firewall is open: the responder
-            // loop starts from this row.
-            enabled: false,
+            // The responder loop starts from this row, so it reads enabled
+            // only while the firewall is open: a responder that is already
+            // on (port open) stays on through the save instead of dropping
+            // out until the loop's next pass; a new one waits for the port.
+            enabled: enabled && was_on && holders.is_empty(),
             check_token,
             listening: Vec::new(),
             last_error: None,
@@ -321,7 +324,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Err(e) => Some(e.to_string()),
         };
         if !holders.is_empty() {
-            if prev.is_some_and(|p| p.enabled) {
+            if was_on {
                 if let Some(e) = firewall_error(firewall(false).await) {
                     tracing::warn!(error = %e, "acme-dns: closing port 53 failed");
                 }
@@ -334,13 +337,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
         if enabled {
             if let Some(e) = firewall_error(firewall(true).await) {
+                if cfg.enabled {
+                    cfg.enabled = false;
+                    save(&cfg).await?;
+                }
                 return Err(RpcError::Internal_with(format!(
                     "could not open port 53 in the firewall ({e}); saved the zone with the \
                      responder off"
                 )));
             }
-            cfg.enabled = true;
-            save(&cfg).await?;
+            if !cfg.enabled {
+                cfg.enabled = true;
+                save(&cfg).await?;
+            }
         } else if let Some(e) = firewall_error(firewall(false).await) {
             return Err(RpcError::Internal_with(format!(
                 "the responder is off, but closing port 53 in the firewall failed, so it \

@@ -15,6 +15,7 @@
 use crate::dispatcher::{DispatchError, LOCAL_NODE_SENTINEL};
 use crate::state::SharedState;
 use async_trait::async_trait;
+use hyperion_adapters::dns_delegation::{self, DelegationReport, DelegationSetup};
 use hyperion_adapters::dns_probe::{self, CnameProblem};
 use hyperion_rpc::codec::{Request, Response};
 use hyperion_rpc::wire::HostingSelector;
@@ -182,6 +183,9 @@ pub trait DnsProbe: Send + Sync {
     async fn zone_delegated(&self, zone: &str, check_token: &str) -> Result<(), String>;
     async fn cname(&self, name: &str, target: &str) -> Result<(), CnameProblem>;
     async fn txt_visible(&self, name: &str, values: &[String]) -> Result<(), String>;
+    /// Every link of the zone's delegation on its own, for the settings
+    /// card: which record is missing, not just that the chain is broken.
+    async fn delegation(&self, setup: &DelegationSetup) -> DelegationReport;
 }
 
 /// The real lookups, over the public resolvers and the zones'
@@ -198,6 +202,9 @@ impl DnsProbe for PublicDns {
     }
     async fn txt_visible(&self, name: &str, values: &[String]) -> Result<(), String> {
         dns_probe::txt_visible_via_public(name, values).await
+    }
+    async fn delegation(&self, setup: &DelegationSetup) -> DelegationReport {
+        dns_delegation::check_delegation(setup).await
     }
 }
 

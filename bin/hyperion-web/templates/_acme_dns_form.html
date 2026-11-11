@@ -1,0 +1,43 @@
+{#- The delegated zone's form (settings_https.html): shown outright for a
+    first setup, where its button also switches the responder on, and folded
+    under "Change" once a zone is saved, where it keeps the responder as it is. -#}
+<form method="post" action="/settings/https/acme-dns" autocomplete="off">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  {% if acme.configured && acme.enabled %}<input type="hidden" name="enabled" value="on">{% endif %}
+  <div class="field">
+    <label for="acme_dns_zone">Zone <span class="hint">a name nothing else uses; this server answers for everything under it</span></label>
+    <input id="acme_dns_zone" name="zone" type="text" autocomplete="off" autocapitalize="none" spellcheck="false"
+           value="{{ acme.zone }}" placeholder="acme.panel.example.com">
+  </div>
+  {% if acme.configured && acme.zone_in_use() %}
+  <label class="field-checkbox">
+    <input type="checkbox" name="confirm_zone" value="on">
+    <span><strong>Change the zone anyway</strong> ({{ acme.zone_users() }}; each CNAME then has to be updated at its DNS provider)</span>
+  </label>
+  {% endif %}
+  <div class="field">
+    <label for="acme_dns_ns">Name server host <span class="hint">a name outside the zone that points at this server</span></label>
+    <input id="acme_dns_ns" name="ns_host" type="text" autocomplete="off" autocapitalize="none" spellcheck="false"
+           value="{{ acme.ns_host }}" placeholder="ns-acme.example.com">
+  </div>
+  <div class="field-row">
+    <div class="field">
+      <label for="acme_dns_v4">Public IPv4 <span class="hint">the responder listens here</span></label>
+      <input id="acme_dns_v4" name="public_ipv4" type="text" autocomplete="off" spellcheck="false"
+             value="{{ acme.public_ipv4 }}" placeholder="203.0.113.10">
+    </div>
+    <div class="field">
+      <label for="acme_dns_v6">Public IPv6 <span class="hint">optional</span></label>
+      <input id="acme_dns_v6" name="public_ipv6" type="text" autocomplete="off" spellcheck="false"
+             value="{{ acme.public_ipv6 }}" placeholder="2001:db8::10">
+    </div>
+  </div>
+  <div class="item-actions">
+    {% if acme.configured %}
+    <button type="submit" class="btn primary">Save</button>
+    {% else %}
+    <button type="submit" class="btn primary" name="enabled" value="on"
+            title="Saves the zone, opens port 53 in the firewall and starts answering">Turn on</button>
+    {% endif %}
+  </div>
+</form>
