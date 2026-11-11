@@ -1374,6 +1374,244 @@ async fn hosting_chip(state: &SharedState, selector: &str) -> Option<ChipTpl> {
 }
 
 // ---------------------------------------------------------------------------
+// GET /docker/hosting-panel?selector=
+// ---------------------------------------------------------------------------
+
+/// Said on the hosting's Docker tab in place of a stack.
+struct PanelNote {
+    /// `warn` for something to act on, `muted` for "nothing here".
+    tone: &'static str,
+    text: String,
+    link_href: String,
+    link_label: String,
+}
+
+impl PanelNote {
+    fn new(tone: &'static str, text: impl Into<String>, href: &str, label: &str) -> Self {
+        Self {
+            tone,
+            text: text.into(),
+            link_href: href.to_string(),
+            link_label: label.to_string(),
+        }
+    }
+}
+
+/// The stack line at the top of the tab.
+struct PanelStack {
+    name: String,
+    href: String,
+    tone: &'static str,
+    state_label: &'static str,
+    summary: String,
+    gone: String,
+    node_label: String,
+    read: String,
+    daemon_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "_docker_hosting_panel.html")]
+struct HostingPanelTpl {
+    note: Option<PanelNote>,
+    stack: Option<PanelStack>,
+    containers: Vec<ContainerView>,
+    stats_note: String,
+    update_note: bool,
+    log_warning: bool,
+    logs: Option<LogsPanel>,
+}
+
+impl HostingPanelTpl {
+    fn note(n: PanelNote) -> Self {
+        Self {
+            note: Some(n),
+            stack: None,
+            containers: Vec::new(),
+            stats_note: String::new(),
+            update_note: false,
+            log_warning: false,
+            logs: None,
+        }
+    }
+}
+
+/// The hosting page's Docker tab: the stack a reverse-proxy hosting forwards
+/// to, with its containers and, for readers who hold `DockerLogs`, its logs.
+/// The same reads as the stack page, so the same gate. Lazy: loaded when the
+/// tab is opened. Anything that stops it from naming a stack is said in the
+/// tab, never as an error page in the middle of the hosting's page.
+pub async fn get_hosting_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Query(q): Query<ChipQuery>,
+) -> Response {
+    if !allowed(&ctx) || q.selector.is_empty() || q.selector.chars().count() > NAME_MAX_CHARS {
+        return Html(String::new()).into_response();
+    }
+    let tpl = hosting_panel(&state, &ctx, &q.selector).await;
+    tpl.render()
+        .map(|h| Html(h).into_response())
+        .unwrap_or_else(|_| Html(String::new()).into_response())
+}
+
+async fn hosting_panel(state: &SharedState, ctx: &AuthCtx, selector: &str) -> HostingPanelTpl {
+    let not_found = || {
+        HostingPanelTpl::note(PanelNote::new(
+            "muted",
+            "This hosting could not be read.",
+            "",
+            "",
+        ))
+    };
+    let Ok(sel) = crate::handlers::hostings::parse_selector_public(selector) else {
+        return not_found();
+    };
+    let list = match registry(state).await {
+        Ok(l) => l,
+        Err(e) => {
+            return HostingPanelTpl::note(PanelNote::new(
+                "warn",
+                format!("The panel could not read the Docker module's state: {e}"),
+                "",
+                "",
+            ))
+        }
+    };
+    if !list.cluster_installed {
+        let (href, label) = if ctx.is_admin_or_higher() {
+            (settings_card(""), "Turn the Docker module on →")
+        } else {
+            (String::new(), "")
+        };
+        return HostingPanelTpl::note(PanelNote::new(
+            "muted",
+            "The Docker module is not turned on, so Hyperion does not look at containers.",
+            &href,
+            label,
+        ));
+    }
+    let Ok((detail, node)) = crate::handlers::hostings::find_hosting_anywhere(state, sel).await
+    else {
+        return not_found();
+    };
+    if detail.kind != "reverse_proxy" {
+        return HostingPanelTpl::note(PanelNote::new(
+            "muted",
+            "Only a reverse-proxy hosting forwards to a Docker stack.",
+            "",
+            "",
+        ));
+    }
+    let raw_node = node.as_deref().unwrap_or(LOCAL_NODE_SENTINEL);
+    let Some(canonical) = registered_target(state, &list, raw_node).await else {
+        return HostingPanelTpl::note(PanelNote::new(
+            "muted",
+            "Docker monitoring is not installed on the node this hosting runs on.",
+            "/docker",
+            "Docker on every node →",
+        ));
+    };
+    let label = if canonical == LOCAL_NODE_SENTINEL {
+        "master".to_string()
+    } else {
+        crate::handlers::hostings::fetch_remote_nodes(state)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .find(|n| n.node_id == canonical)
+            .map(node_label)
+            .unwrap_or_else(|| canonical.clone())
+    };
+    let st = match crate::dispatcher::dispatch_to_node(
+        state,
+        dispatch_target(&canonical),
+        Request::DockerOverview,
+    )
+    .await
+    {
+        Ok(RpcResponse::DockerOverview(st)) => st,
+        Ok(RpcResponse::Error(e)) => {
+            return HostingPanelTpl::note(PanelNote::new(
+                "warn",
+                format!("{label} did not give its Docker reading: {e}"),
+                "/docker",
+                "Docker on every node →",
+            ))
+        }
+        _ => {
+            return HostingPanelTpl::note(PanelNote::new(
+                "warn",
+                format!("{label} did not answer when asked for its Docker reading."),
+                "/docker",
+                "Docker on every node →",
+            ))
+        }
+    };
+    let Some(p) = st.projects.iter().find(|p| {
+        p.hostings
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(&detail.domain))
+    }) else {
+        let upstream = detail.proxy_upstream_url.clone().unwrap_or_default();
+        let text = if upstream.is_empty() {
+            format!("No Docker stack on {label} is behind this hosting.")
+        } else {
+            format!(
+                "No Docker stack on {label} publishes the port this hosting forwards to ({upstream}). \
+                 A stack is linked when a container publishes that port on the loopback address."
+            )
+        };
+        return HostingPanelTpl::note(PanelNote::new(
+            "muted",
+            text,
+            "/docker",
+            "Stacks on every node →",
+        ));
+    };
+    let sv = stack_view(&canonical, p);
+    let mut containers: Vec<ContainerView> = p.containers.iter().map(container_view).collect();
+    containers.sort_by(|a, b| (a.tone == "ok", &a.name).cmp(&(b.tone == "ok", &b.name)));
+    let name = p.name.clone();
+    HostingPanelTpl {
+        note: None,
+        stack: Some(PanelStack {
+            name: sv.name,
+            href: sv.href,
+            tone: sv.tone,
+            state_label: sv.state_label,
+            summary: sv.summary,
+            gone: sv.gone,
+            node_label: label,
+            read: crate::handlers::stats::fmt_ago(&st.read_at),
+            daemon_error: (!st.daemon_ok).then(|| {
+                st.daemon_error
+                    .clone()
+                    .unwrap_or_else(|| "the Docker daemon did not answer".to_string())
+            }),
+        }),
+        stats_note: if st.stats_at > 0 {
+            format!(
+                "CPU and memory read {}",
+                crate::handlers::stats::fmt_ago(&st.stats_at)
+            )
+        } else {
+            String::new()
+        },
+        log_warning: containers.iter().any(|c| c.log_warn),
+        update_note: containers.iter().any(|c| c.update.is_some()),
+        containers,
+        logs: (logs_allowed(ctx) && !p.containers.is_empty()).then(|| {
+            LogsPanel::closed(
+                &canonical,
+                &name,
+                p.containers.iter().map(|c| c.name.clone()).collect(),
+            )
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GET /docker/:node/:project/logs
 // ---------------------------------------------------------------------------
 

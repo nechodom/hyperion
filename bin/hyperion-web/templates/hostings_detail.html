@@ -583,6 +583,12 @@
       {% endif %}
     {% endif %}
   </a>
+  {% if docker_chip && detail.kind == "reverse_proxy" %}
+  <a class="tab" data-tab="docker" href="#docker" role="tab" title="The Docker stack this reverse proxy forwards to">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+    Docker
+  </a>
+  {% endif %}
   <a class="tab" data-tab="traffic" href="#traffic" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
     Traffic
@@ -4942,6 +4948,29 @@
 
 {% if is_super_admin %}
 <!-- ============== ACCESS ============== -->
+{% if docker_chip && detail.kind == "reverse_proxy" %}
+<div class="tab-panel" id="tab-docker">
+
+<div class="panel-head">
+  <h2>Docker</h2>
+  <div class="panel-links"><a href="/docker">All Docker stacks →</a></div>
+  <p>The Docker stack this reverse proxy forwards to: whether it runs, its containers and their logs. Hyperion only reads; it never starts, stops or changes a container.</p>
+</div>
+
+{#- `intersect once`: read from the node only when the tab is opened. #}
+<div id="docker-panel"
+     hx-get="/docker/hosting-panel?selector={{ detail.id.as_str() }}"
+     hx-trigger="intersect once"
+     hx-swap="innerHTML">
+  <div class="card compact">
+    <span class="spinner-inline" style="margin-right:0.4rem"></span>
+    <span class="text-soft small">Reading the node's containers…</span>
+  </div>
+</div>
+
+</div>
+{% endif %}
+
 <div class="tab-panel" id="tab-access">
 <div class="panel-head">
   <h2>Access</h2>

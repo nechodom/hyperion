@@ -393,6 +393,10 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::docker::get_hosting_chip),
         )
         .route(
+            "/docker/hosting-panel",
+            get(handlers::docker::get_hosting_panel),
+        )
+        .route(
             "/docker/:node/:project",
             get(handlers::docker::get_docker_stack),
         )

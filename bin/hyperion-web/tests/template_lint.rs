@@ -340,6 +340,8 @@ fn every_page_is_reachable_from_the_nav() {
         // Lazy fragment on a reverse-proxy hosting's page: which Docker stack
         // it forwards to. Empty unless one does.
         "/docker/hosting-chip",
+        // Lazy fragment: the Docker tab on a reverse-proxy hosting's page.
+        "/docker/hosting-panel",
         "/services/install-status",
         "/settings/panel-cert-status",
         "/settings/email-preview",
