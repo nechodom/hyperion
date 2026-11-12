@@ -639,6 +639,12 @@ pub trait AgentApi: Send + Sync + 'static {
         slug: String,
         theme: bool,
     ) -> Result<hyperion_types::WpPluginActionResult, RpcError>;
+    /// This node's ClamAV: its schedule, its last pass, what it found per site.
+    async fn antivirus_overview(
+        &self,
+    ) -> Result<hyperion_types::antivirus::AntivirusOverview, RpcError>;
+    /// Ask for a ClamAV pass now. `false`: one is already running.
+    async fn antivirus_run_now(&self) -> Result<bool, RpcError>;
     /// Every hosting's last stored integrity scan on this node.
     async fn integrity_findings_list(
         &self,

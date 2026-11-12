@@ -645,11 +645,21 @@ fn spawn_vendor_sweep(svc: &Svc) {
 /// minutes is cheap. Beside the site scan rather than in it: a pass can take
 /// hours, and a "Scan now" must not wait behind one.
 fn spawn_clamav_sweep(svc: &Svc) {
-    every(svc, 8 * MIN, 10 * MIN, |svc| async move {
-        match svc.site_scan_clamav_tick().await {
-            Ok(n) if n > 0 => tracing::warn!(flagged = n, "clamav sweep"),
-            Ok(_) => tracing::debug!("clamav sweep: no new hits"),
-            Err(e) => tracing::warn!(error=%e, "clamav sweep failed"),
+    let svc = svc.clone();
+    tokio::spawn(async move {
+        let mut wait = Duration::from_secs(8 * MIN);
+        loop {
+            // "Run now" on the Antivirus page needn't wait out the ten minutes.
+            tokio::select! {
+                () = tokio::time::sleep(wait) => {}
+                () = svc.antivirus_wait_for_request() => {}
+            }
+            wait = Duration::from_secs(10 * MIN);
+            match svc.site_scan_clamav_tick().await {
+                Ok(n) if n > 0 => tracing::warn!(flagged = n, "clamav sweep"),
+                Ok(_) => tracing::debug!("clamav sweep: no new hits"),
+                Err(e) => tracing::warn!(error=%e, "clamav sweep failed"),
+            }
         }
     });
 }

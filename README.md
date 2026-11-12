@@ -197,7 +197,9 @@ install to sites that are running and backed up:
   say what was and was not covered, and changes it cannot judge wait as "to
   review" until someone trusts or quarantines them. Sites without WordPress are
   scanned too. The database is not scanned. ClamAV is optional: one bounded
-  weekly pass for the node, only with 2 GiB of memory free. Findings alert
+  pass per node on a schedule you set (Settings → Antivirus; weekly, overnight
+  and with 2 GiB of memory free by default), with its detections and a "Run
+  now" on the Antivirus page. Findings alert
   once, care reports and `hctl` carry the same verdict, and repair of core files
   and reinstall of tampered plugins start from the findings. The new checks run
   as a silent pilot until `[integrity] new_layers_live` is switched on. That

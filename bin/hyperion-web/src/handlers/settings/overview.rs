@@ -78,6 +78,8 @@ pub struct Facts {
     pub ftp_active: bool,
     /// `[fail2ban] enabled`; `None` when agent.toml did not parse.
     pub fail2ban_on: Option<bool>,
+    /// `[antivirus]` as agent.toml holds it; `None` when the file is unreadable.
+    pub antivirus: Option<hyperion_types::antivirus::AntivirusSettings>,
     pub geoip_installed: bool,
     pub letter_lang: String,
     /// Catalogue sentences rewritten, not counting the Letters editor's own
@@ -186,6 +188,7 @@ async fn gather(state: &SharedState, nodes: &[hyperion_types::NodeSummary]) -> F
     }
     if let Ok(raw) = toml_res {
         f.fail2ban_on = super::parse_fail2ban_section(&raw).map(|v| v.cfg.enabled);
+        f.antivirus = super::page_antivirus::parse_antivirus_section(&raw);
         let cat = hyperion_core::service::letter_catalog_from_toml(&raw);
         f.letter_lang = cat.lang.as_str().to_string();
         let editor = super::page_letters::EDITOR_IDS;
@@ -592,6 +595,13 @@ fn state_of(slug: &str, f: &Facts, has_nodes: bool) -> String {
                 "no GeoIP database".into()
             });
         }
+        "antivirus" => parts.push(match f.antivirus {
+            Some(s) if s.enabled => {
+                format!("ClamAV pass {}, {}", s.every_text(), s.window_text())
+            }
+            Some(_) => "Scheduled ClamAV pass off".into(),
+            None => "Schedule unreadable".into(),
+        }),
         "cluster" => {
             parts.push(plural(f.nodes, "worker node", "worker nodes"));
             if f.sync_known > 0 {

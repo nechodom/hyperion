@@ -954,6 +954,14 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(r) => Response::WpPluginAction(r),
             Err(e) => Response::Error(e),
         },
+        Request::AntivirusOverview => match api.antivirus_overview().await {
+            Ok(v) => Response::AntivirusOverview(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::AntivirusRunNow => match api.antivirus_run_now().await {
+            Ok(queued) => Response::AntivirusRunNow { queued },
+            Err(e) => Response::Error(e),
+        },
         Request::IntegrityFindingsList => match api.integrity_findings_list().await {
             Ok(v) => Response::IntegrityFindingsList(v),
             Err(e) => Response::Error(e),
@@ -3293,6 +3301,14 @@ mod tests {
             &self,
         ) -> Result<Vec<hyperion_types::HostingIntegritySummary>, RpcError> {
             Ok(vec![])
+        }
+        async fn antivirus_overview(
+            &self,
+        ) -> Result<hyperion_types::antivirus::AntivirusOverview, RpcError> {
+            Ok(Default::default())
+        }
+        async fn antivirus_run_now(&self) -> Result<bool, RpcError> {
+            Ok(true)
         }
         async fn wp_staging_create(
             &self,

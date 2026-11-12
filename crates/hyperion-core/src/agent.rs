@@ -1034,6 +1034,16 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .await
     }
 
+    async fn antivirus_overview(
+        &self,
+    ) -> Result<hyperion_types::antivirus::AntivirusOverview, RpcError> {
+        self.svc.antivirus_overview().await
+    }
+
+    async fn antivirus_run_now(&self) -> Result<bool, RpcError> {
+        self.svc.antivirus_run_now().await
+    }
+
     async fn integrity_findings_list(
         &self,
     ) -> Result<Vec<hyperion_types::HostingIntegritySummary>, RpcError> {

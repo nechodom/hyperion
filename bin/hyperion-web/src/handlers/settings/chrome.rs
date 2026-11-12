@@ -93,6 +93,13 @@ pub const SECTIONS: &[Section] = &[
         cluster_only: false,
     },
     Section {
+        slug: "antivirus",
+        title: "Antivirus",
+        group: "Security",
+        lead: "When each node's ClamAV pass reads its sites' files, and how much memory it waits for.",
+        cluster_only: false,
+    },
+    Section {
         slug: "cluster",
         title: "Cluster",
         group: "Cluster",
@@ -143,6 +150,7 @@ pub const CARDS: &[(&str, &str)] = &[
     ("audit-retention", "access"),
     ("bruteforce-scanner", "bans"),
     ("geoip", "bans"),
+    ("antivirus-schedule", "antivirus"),
     ("placement", "cluster"),
     ("test-nodes", "cluster"),
     ("hardening", "cluster"),

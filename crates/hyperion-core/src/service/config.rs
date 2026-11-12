@@ -467,6 +467,41 @@ pub(super) fn parse_agent_section_fields(
                 }
                 crate::config_persist::FieldValue::Int(n)
             }
+            // [antivirus] — when each node's ClamAV pass runs. The ranges are
+            // the ones `AntivirusSettings::sanitized` leaves alone, so the
+            // file never holds a number the node reads as another.
+            ("antivirus", "enabled") => crate::config_persist::FieldValue::Bool(parse_bool(v)?),
+            ("antivirus", "every_days") => {
+                let n = parse_int(v)?;
+                let r = hyperion_types::antivirus::EVERY_DAYS_RANGE;
+                if !(i64::from(*r.start())..=i64::from(*r.end())).contains(&n) {
+                    return Err(bad(format!(
+                        "the pass can run every {}..={} days, got {n}",
+                        r.start(),
+                        r.end()
+                    )));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
+            ("antivirus", "window_start_hour") | ("antivirus", "window_end_hour") => {
+                let n = parse_int(v)?;
+                if !(0..=23).contains(&n) {
+                    return Err(bad(format!("an hour is 0..=23, got {n}")));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
+            ("antivirus", "min_free_memory_mb") => {
+                let n = parse_int(v)?;
+                let r = hyperion_types::antivirus::MIN_FREE_MEMORY_MB_RANGE;
+                if !(i64::from(*r.start())..=i64::from(*r.end())).contains(&n) {
+                    return Err(bad(format!(
+                        "free memory for the pass must be {}..={} MiB, got {n}",
+                        r.start(),
+                        r.end()
+                    )));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
             // [fail2ban] — native brute-force scanner tunables.
             ("fail2ban", "enabled") => crate::config_persist::FieldValue::Bool(parse_bool(v)?),
             // Every range below is a SUBSET of what `Fail2banConfig::sanitized`

@@ -12,6 +12,7 @@ mod overview;
 mod page_access;
 mod page_acme_dns;
 mod page_alerts;
+mod page_antivirus;
 mod page_backups;
 mod page_bans;
 mod page_cluster;
@@ -25,6 +26,7 @@ pub use overview::get_overview;
 pub use page_access::get_access;
 pub use page_acme_dns::{post_acme_dns, post_acme_dns_check};
 pub use page_alerts::{get_alert_recipients, get_alerts};
+pub use page_antivirus::get_antivirus;
 pub use page_backups::get_backups;
 pub use page_bans::get_bans;
 pub use page_cluster::{get_cluster, post_cluster_sync};
@@ -1231,6 +1233,7 @@ fn section_label(section: &str) -> &'static str {
         "notifications" => "Alert wording",
         "letters" => "Sentences",
         "fail2ban" => "Brute-force scanner",
+        "antivirus" => "Antivirus schedule",
         "update" => "Updates",
         "acme" => "Let's Encrypt contact",
         "slack" => "Slack",
@@ -1595,6 +1598,7 @@ fn section_to_tab(section: &str) -> &'static str {
         "backup_retention" => "backup-retention",
         "snapshots" => "snapshot-retention",
         "fail2ban" => "bruteforce-scanner",
+        "antivirus" => "antivirus-schedule",
         // [cluster] is written from five pages and every form says which
         // card it is; the fallback is a card every install has.
         "cluster" => "panel-domain",
@@ -3292,6 +3296,7 @@ from_address = "ops@example.cz"
         "backup_retention",
         "snapshots",
         "fail2ban",
+        "antivirus",
         "cluster",
         "",
         "no-such-section",

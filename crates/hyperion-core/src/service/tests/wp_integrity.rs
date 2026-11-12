@@ -573,8 +573,10 @@ async fn wp_integrity_stored_with_no_record_is_never_scanned() {
 /// stamp from the future doesn't hold it off.
 #[test]
 fn clamav_is_due_weekly_in_the_night_window() {
-    use super::super::scan_queue::clamav_sweep_due;
+    use super::super::scan_queue::{clamav_next_due, clamav_sweep_due};
     use chrono::TimeZone;
+    use hyperion_types::antivirus::AntivirusSettings;
+    let weekly = AntivirusSettings::default();
     let at = |day: u32, hour: u32, min: u32| {
         chrono::Utc
             .with_ymd_and_hms(2026, 11, day, hour, min, 0)
@@ -583,33 +585,104 @@ fn clamav_is_due_weekly_in_the_night_window() {
             .timestamp()
     };
     let last = at(2, 3, 0);
-    assert!(clamav_sweep_due(0, at(2, 2, 0), &chrono::Utc), "never ran");
     assert!(
-        !clamav_sweep_due(0, at(2, 1, 59), &chrono::Utc),
+        clamav_sweep_due(0, at(2, 2, 0), &chrono::Utc, &weekly),
+        "never ran"
+    );
+    assert!(
+        !clamav_sweep_due(0, at(2, 1, 59), &chrono::Utc, &weekly),
         "before the window"
     );
-    assert!(!clamav_sweep_due(0, at(2, 6, 0), &chrono::Utc), "after it");
     assert!(
-        !clamav_sweep_due(last, at(3, 3, 0), &chrono::Utc),
+        !clamav_sweep_due(0, at(2, 6, 0), &chrono::Utc, &weekly),
+        "after it"
+    );
+    assert!(
+        !clamav_sweep_due(last, at(3, 3, 0), &chrono::Utc, &weekly),
         "next night"
     );
     assert!(
-        !clamav_sweep_due(last, at(8, 3, 0), &chrono::Utc),
+        !clamav_sweep_due(last, at(8, 3, 0), &chrono::Utc, &weekly),
         "six days"
     );
     assert!(
-        clamav_sweep_due(last, at(9, 2, 0), &chrono::Utc),
+        clamav_sweep_due(last, at(9, 2, 0), &chrono::Utc, &weekly),
         "a week, early in the window"
     );
-    assert!(clamav_sweep_due(last, at(9, 5, 59), &chrono::Utc));
+    assert!(clamav_sweep_due(last, at(9, 5, 59), &chrono::Utc, &weekly));
     assert!(
-        !clamav_sweep_due(last, at(9, 12, 0), &chrono::Utc),
+        !clamav_sweep_due(last, at(9, 12, 0), &chrono::Utc, &weekly),
         "a week, wrong hour"
     );
     // A late start still comes round on the same night next week.
-    assert!(clamav_sweep_due(at(2, 5, 50), at(9, 2, 0), &chrono::Utc));
+    assert!(clamav_sweep_due(
+        at(2, 5, 50),
+        at(9, 2, 0),
+        &chrono::Utc,
+        &weekly
+    ));
     // The clock went back.
-    assert!(clamav_sweep_due(at(20, 3, 0), at(9, 3, 0), &chrono::Utc));
+    assert!(clamav_sweep_due(
+        at(20, 3, 0),
+        at(9, 3, 0),
+        &chrono::Utc,
+        &weekly
+    ));
+
+    // `[antivirus]` moves all of it: every night, from ten in the evening.
+    let nightly = AntivirusSettings {
+        every_days: 1,
+        window_start_hour: 22,
+        window_end_hour: 4,
+        ..weekly
+    };
+    let last = at(2, 22, 30);
+    assert!(
+        !clamav_sweep_due(last, at(3, 3, 0), &chrono::Utc, &nightly),
+        "same night"
+    );
+    assert!(
+        !clamav_sweep_due(last, at(3, 12, 0), &chrono::Utc, &nightly),
+        "noon"
+    );
+    assert!(
+        clamav_sweep_due(last, at(3, 22, 0), &chrono::Utc, &nightly),
+        "next night"
+    );
+    assert!(
+        clamav_sweep_due(0, at(3, 1, 0), &chrono::Utc, &nightly),
+        "past midnight"
+    );
+    // Off is off, however long ago the last one was.
+    let off = AntivirusSettings {
+        enabled: false,
+        ..weekly
+    };
+    assert!(!clamav_sweep_due(0, at(2, 3, 0), &chrono::Utc, &off));
+
+    // When the page says the next pass is.
+    assert_eq!(
+        clamav_next_due(0, at(2, 3, 20), &chrono::Utc, &weekly),
+        at(2, 3, 20),
+        "due now"
+    );
+    assert_eq!(
+        clamav_next_due(0, at(2, 12, 20), &chrono::Utc, &weekly),
+        at(3, 2, 0)
+    );
+    assert_eq!(
+        clamav_next_due(at(2, 3, 0), at(2, 12, 0), &chrono::Utc, &weekly),
+        at(9, 2, 0)
+    );
+    assert_eq!(
+        clamav_next_due(last, at(3, 9, 0), &chrono::Utc, &nightly),
+        at(3, 22, 0)
+    );
+    assert_eq!(
+        clamav_next_due(0, at(2, 3, 0), &chrono::Utc, &off),
+        0,
+        "none scheduled"
+    );
 }
 
 /// The start site moves one step a week and the steps join up across ISO years.
@@ -3155,6 +3228,151 @@ mod site_scan {
         assert!(rec.result.report_only);
     }
 
+    /// A node whose agent.toml holds this `[antivirus]` section.
+    fn antivirus_config(body: &str) -> (std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = dir.path().join("agent.toml");
+        std::fs::write(&cfg, format!("[antivirus]\n{body}\n")).expect("write");
+        (cfg, dir)
+    }
+
+    /// `[antivirus]` decides the hours, the interval and the memory the pass
+    /// waits for; switched off, nothing is scheduled at all.
+    #[tokio::test]
+    async fn the_schedule_is_the_settings_and_off_is_off() {
+        let pool = open_memory().await.expect("open");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let n = runs.clone();
+        let a = with_clamav(happy_mocks(), 3 * GIB, move |_| {
+            n.fetch_add(1, Ordering::SeqCst);
+            sweep(integrity::SweepEnd::Complete, vec![])
+        });
+        let (cfg, _dir) = antivirus_config(
+            "every_days = 1\nwindow_start_hour = 12\nwindow_end_hour = 14\nmin_free_memory_mb = 4096",
+        );
+        let s = svc(pool.clone(), a).with_agent_config_path(cfg.clone());
+        let site = site_named(&s, "kos.cz").await;
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(night(0) - 60, night(0)))
+            .await;
+        let tick = |t: i64| s.site_scan_clamav_tick_at(&chrono::Utc, t);
+
+        tick(night(0)).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "03:00 is outside 12–14");
+        assert_eq!(
+            record_of(&s, &site).await.result.error,
+            None,
+            "and says nothing"
+        );
+
+        // In the window, with 3 GiB where 4 were asked for.
+        tick(monday_at(0, 12, 30)).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        let said = record_of(&s, &site).await.result.error.expect("why");
+        assert!(said.contains("less than 4 GiB"), "{said}");
+        let o = s
+            .antivirus_overview_at(&chrono::Utc, monday_at(0, 12, 40))
+            .await
+            .expect("overview");
+        assert_eq!(o.held.as_deref(), Some(said.as_str()));
+        assert_eq!(o.held_at, monday_at(0, 12, 30));
+        assert_eq!(o.settings.min_free_memory_mb, 4096);
+        assert_eq!(o.sites.len(), 1);
+        assert_eq!(o.sites[0].covered_at, 0);
+
+        // The file is read at each tick: no restart for a new threshold.
+        std::fs::write(
+            &cfg,
+            "[antivirus]\nevery_days = 1\nwindow_start_hour = 12\nwindow_end_hour = 14\n",
+        )
+        .expect("write");
+        tick(monday_at(0, 12, 50)).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        tick(monday_at(0, 13, 30)).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "not twice a day");
+        tick(monday_at(1, 12, 0)).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "daily");
+        let o = s
+            .antivirus_overview_at(&chrono::Utc, monday_at(1, 15, 0))
+            .await
+            .expect("overview");
+        assert_eq!(o.held, None, "a pass that started takes the reason away");
+        assert_eq!(o.last_started, monday_at(1, 12, 0));
+        assert_eq!(o.last_end, "complete");
+        assert_eq!((o.last_sites, o.last_files, o.last_hits), (1, 2, 0));
+        assert_eq!(o.running_since, 0);
+        assert_eq!(o.next_due_at, monday_at(2, 12, 0));
+        assert_eq!(o.sites[0].covered_at, monday_at(1, 12, 0));
+
+        std::fs::write(&cfg, "[antivirus]\nenabled = false\n").expect("write");
+        tick(night(4)).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "off");
+        let o = s
+            .antivirus_overview_at(&chrono::Utc, night(4))
+            .await
+            .expect("overview");
+        assert_eq!(o.next_due_at, 0);
+    }
+
+    /// "Run now" starts a pass outside the window and with the schedule off, once;
+    /// a request the node has no memory for is dropped with its reason, not kept
+    /// for an hour nobody chose.
+    #[tokio::test]
+    async fn a_pass_asked_for_runs_now_and_only_once() {
+        let pool = open_memory().await.expect("open");
+        let mem = Arc::new(std::sync::atomic::AtomicU64::new(GIB));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (m, n) = (mem.clone(), runs.clone());
+        let mut a = happy_mocks();
+        a.expect_clamav_facts()
+            .returning(move || facts(m.load(Ordering::SeqCst)));
+        a.expect_clamav_stop_orphan().returning(|| ());
+        a.expect_clamav_prepare()
+            .returning(|roots, _, _| Ok(plan_for(roots, |_, _| {})));
+        a.expect_clamav_run().returning(move |plan| {
+            n.fetch_add(1, Ordering::SeqCst);
+            sweep(integrity::SweepEnd::Complete, vec![found_in(&plan, 0)])
+        });
+        let (cfg, _dir) = antivirus_config("enabled = false");
+        let s = svc(pool.clone(), a).with_agent_config_path(cfg);
+        let site = site_named(&s, "kos.cz").await;
+        let noon = monday_at(0, 12, 0);
+        s.set_stored_integrity_scan(site.id.as_str(), &scanned(noon - 60, noon))
+            .await;
+        let tick = |t: i64| s.site_scan_clamav_tick_at(&chrono::Utc, t);
+
+        assert!(s.antivirus_run_now().await.expect("asked"));
+        let o = s
+            .antivirus_overview_at(&chrono::Utc, noon)
+            .await
+            .expect("overview");
+        assert!(o.run_requested);
+        tick(noon).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "1 GiB free");
+        let o = s
+            .antivirus_overview_at(&chrono::Utc, noon)
+            .await
+            .expect("overview");
+        assert!(!o.run_requested, "dropped");
+        assert!(o.held.expect("why").contains("less than 2 GiB"));
+        mem.store(4 * GIB, Ordering::SeqCst);
+        tick(noon + 600).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "not at some later hour");
+
+        assert!(s.antivirus_run_now().await.expect("asked"));
+        tick(noon + 1200).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "noon, schedule off");
+        tick(noon + 1800).await.expect("tick");
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "once");
+        let o = s
+            .antivirus_overview_at(&chrono::Utc, noon + 1800)
+            .await
+            .expect("overview");
+        assert_eq!(o.last_hits, 1);
+        assert_eq!(o.sites[0].hits_total, 1);
+        assert_eq!(o.sites[0].hits[0].signature, "Php.Trojan.Webshell-1");
+        assert_eq!(o.sites[0].covered_at, noon + 1200);
+    }
+
     /// Under 2 GiB free the pass is skipped: the card says so, nothing is stamped
     /// as failed, "clean" is as clean as it was, and the next ten minutes try
     /// again, so the first quiet moment of the night gets the pass.
@@ -3736,7 +3954,7 @@ mod site_scan {
                 .result
                 .error
                 .expect("said")
-                .contains("tomorrow night"));
+                .contains("tried again tomorrow"));
             s.site_scan_clamav_tick_at(&chrono::Utc, night(0) + 600)
                 .await
                 .expect("tick");

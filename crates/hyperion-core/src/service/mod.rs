@@ -969,6 +969,8 @@ pub struct SiteScanShared {
     pub(crate) record: tokio::sync::Mutex<()>,
     /// Someone asked for a scan: the tick needn't wait out its ten minutes.
     pub(crate) wake: tokio::sync::Notify,
+    /// The same for the ClamAV pass.
+    pub(crate) clamav_wake: tokio::sync::Notify,
 }
 
 impl Default for SiteScanShared {
@@ -978,6 +980,7 @@ impl Default for SiteScanShared {
             node: Default::default(),
             record: Default::default(),
             wake: Default::default(),
+            clamav_wake: Default::default(),
         }
     }
 }
@@ -1220,6 +1223,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// [`read_new_layers_live`].
     pub fn site_scan_new_layers_live(&self) -> bool {
         read_new_layers_live(self.agent_config_path.as_deref())
+    }
+
+    /// When this node's ClamAV pass runs: `[antivirus]`, read each time it is
+    /// asked, so a save needs no restart.
+    pub fn antivirus_settings(&self) -> hyperion_types::antivirus::AntivirusSettings {
+        read_antivirus_settings(self.agent_config_path.as_deref())
     }
 
     /// [`read_vendor_refs_live`].

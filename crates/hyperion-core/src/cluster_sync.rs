@@ -44,6 +44,7 @@ pub const SYNCED_SECTIONS: &[&str] = &[
     "acme",
     "update",
     "fail2ban",
+    "antivirus",
     "cluster",
 ];
 
@@ -109,6 +110,15 @@ pub fn is_synced_key(section: &str, key: &str) -> bool {
         "cluster" => matches!(
             key,
             "trash_enabled" | "trash_retention_days" | "test_domain_template"
+        ),
+        // Each node runs its own ClamAV pass and reads this when its tick asks.
+        "antivirus" => matches!(
+            key,
+            "enabled"
+                | "every_days"
+                | "window_start_hour"
+                | "window_end_hour"
+                | "min_free_memory_mb"
         ),
         "fail2ban" => matches!(
             key,

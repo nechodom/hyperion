@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% block title %}Antivirus · Hyperion{% endblock %}
+{% block main %}
+
+<div class="page-header">
+  <div>
+    <h1>Antivirus</h1>
+    <div class="subtitle">
+      What ClamAV found in your sites' files, on which node, and when it last looked.
+      Changed core, plugin and theme files are on each site's own Security card.
+    </div>
+  </div>
+  <span class="grow"></span>
+  <div class="actions" data-require-caps="settings_manage">
+    <a href="/settings/antivirus#antivirus-schedule" class="btn ghost">Schedule</a>
+  </div>
+</div>
+
+{% if let Some(f) = flash %}
+<div class="flash success"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg><div class="flash-body">{{ f }}</div></div>
+{% endif %}
+{% if let Some(e) = flash_error %}
+<div class="flash error"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><div class="flash-body">{{ e }}</div></div>
+{% endif %}
+{% include "_node_auth_banner.html" %}
+{% if !unreachable.is_empty() %}
+<div class="flash error"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  <div class="flash-body"><strong>Incomplete view.</strong> No answer from {{ unreachable.join(", ") }} — its sites and detections are missing below.</div>
+</div>
+{% endif %}
+{% if !p.old_nodes.is_empty() %}
+<p class="note">{{ p.old_nodes.join(", ") }} {% if p.old_nodes.len() == 1 %}runs{% else %}run{% endif %} an older version and can't report {% if p.old_nodes.len() == 1 %}its{% else %}their{% endif %} passes. Update to see {% if p.old_nodes.len() == 1 %}its{% else %}their{% endif %} sites here.</p>
+{% endif %}
+
+<div class="svc-verdict {{ p.verdict_tone }}">
+  <span class="dot"></span>
+  <span>{{ p.verdict }}</span>
+</div>
+
+{# ── Detections ───────────────────────────────────────────────────── #}
+<div class="group" id="detections">
+  <div class="ghead">
+    Detections
+    <span class="grow"></span>
+    {% if p.hits_total > 0 %}<span class="ghead-note">{{ p.hits_total }} on {{ p.sites_hit }} site{% if p.sites_hit != 1 %}s{% endif %}</span>{% endif %}
+  </div>
+  {% if p.hits.is_empty() %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">
+      {% if !p.any_clamav %}Nothing to show: ClamAV isn't installed on any node. Add it on the <a href="/services">Services page</a>.
+      {% else if p.sites_covered == 0 %}Nothing yet: no pass has finished.
+      {% else %}None. The last pass over each covered site matched no signature.{% endif %}
+    </p>
+  </div>
+  {% else %}
+  <div class="table-wrap">
+    <table class="stats-table">
+      <thead><tr>
+        <th>Site</th><th>File</th><th>Signature</th>
+        {% if p.show_node %}<th class="hide-on-phone">Node</th>{% endif %}
+        <th class="hide-on-phone">Pass</th>
+      </tr></thead>
+      <tbody>
+      {% for h in p.hits %}
+        <tr>
+          <td><a href="/hostings/{{ h.hosting_id }}">{{ h.domain }}</a></td>
+          <td><code style="word-break:break-all">{{ h.path|tenant_text }}</code></td>
+          <td><span class="pill err">{{ h.signature|tenant_text }}</span></td>
+          {% if p.show_node %}<td class="hide-on-phone text-soft">{{ h.node_label }}</td>{% endif %}
+          <td class="hide-on-phone numeric small text-soft">{{ h.found }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="item">
+    <p class="text-soft small" style="margin:0">
+      {% if p.hits_cut %}Showing the first {{ p.hits.len() }} of {{ p.hits_total }}. {% endif %}
+      Open the site to quarantine a file or restore one: the Security card lists every detection with its actions.
+    </p>
+  </div>
+  {% endif %}
+</div>
+
+{# ── Nodes ────────────────────────────────────────────────────────── #}
+<div class="group" id="passes">
+  <div class="ghead">
+    Passes
+    <span class="grow"></span>
+    <span class="ghead-note">{% if p.schedule_on %}{{ p.schedule }}{% else %}scheduled pass off{% endif %}</span>
+  </div>
+  <div class="table-wrap">
+    <table class="stats-table">
+      <thead><tr>
+        <th>Node</th><th>ClamAV</th><th>Last pass</th><th>Now</th>
+        <th class="hide-on-phone right">Sites covered</th>
+        <th class="hide-on-phone right">Free memory</th>
+        <th class="right"></th>
+      </tr></thead>
+      <tbody>
+      {% for n in p.nodes %}
+        <tr>
+          <td>{{ n.label }}</td>
+          <td><span class="pill {{ n.clamav_tone }}">{{ n.clamav }}</span></td>
+          <td>
+            <span class="pill {{ n.last_tone }}">{{ n.last }}</span>
+            {% if !n.last_detail.is_empty() %}<div class="small text-soft" style="margin-top:0.25rem">{{ n.last_detail }}</div>{% endif %}
+          </td>
+          <td class="small{% if n.now_tone == "warn" %} tone-warn{% else if n.now_tone == "muted" %} text-soft{% endif %}">{{ n.now|tenant_text }}</td>
+          <td class="hide-on-phone right numeric">{{ n.covered }} of {{ n.sites }}</td>
+          <td class="hide-on-phone right numeric small text-soft">{{ n.free }}</td>
+          <td class="right">
+            {% if n.can_run %}
+            <form method="post" action="/antivirus/run" style="display:inline"
+                  data-confirm-title="Run a ClamAV pass on {{ n.label }} now?"
+                  data-confirm-body="It reads every file of every scanned site on this node, whatever the schedule says. It uses up to 3 GiB of memory at the lowest CPU and disk priority and can take hours."
+                  data-confirm-confirm-label="Run now">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="node_id" value="{{ n.node_id }}">
+              <button class="btn small ghost" type="submit">Run now</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# ── Not covered ──────────────────────────────────────────────────── #}
+{% if !p.gaps.is_empty() %}
+<div class="group" id="not-covered">
+  <div class="ghead">
+    Not fully covered
+    <span class="grow"></span>
+    <span class="ghead-note">{{ p.gaps.len() }} site{% if p.gaps.len() != 1 %}s{% endif %}</span>
+  </div>
+  <div class="table-wrap">
+    <table class="stats-table">
+      <thead><tr>
+        <th>Site</th>{% if p.show_node %}<th class="hide-on-phone">Node</th>{% endif %}
+        <th>Last covered</th><th>Why</th>
+      </tr></thead>
+      <tbody>
+      {% for g in p.gaps %}
+        <tr>
+          <td><a href="/hostings/{{ g.hosting_id }}">{{ g.domain }}</a></td>
+          {% if p.show_node %}<td class="hide-on-phone text-soft">{{ g.node_label }}</td>{% endif %}
+          <td class="numeric small">{{ g.covered }}</td>
+          <td class="small">{{ g.why|tenant_text }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{# ── Every site ───────────────────────────────────────────────────── #}
+{% if !p.sites.is_empty() %}
+<details class="group" id="sites">
+  <summary class="ghead" style="cursor:pointer">
+    All sites
+    <span class="grow"></span>
+    <span class="ghead-note">{{ p.sites_covered }} of {{ p.sites_total }} covered by a pass</span>
+  </summary>
+  <div class="table-wrap">
+    <table class="stats-table">
+      <thead><tr>
+        <th>Site</th>{% if p.show_node %}<th class="hide-on-phone">Node</th>{% endif %}
+        <th>Last covered</th><th class="right">Detections</th>
+        <th class="right hide-on-phone" title="From the file scan, not ClamAV: files that differ from their release, and changes waiting for a look">Changed files</th>
+      </tr></thead>
+      <tbody>
+      {% for s in p.sites %}
+        <tr>
+          <td><a href="/hostings/{{ s.hosting_id }}">{{ s.domain }}</a></td>
+          {% if p.show_node %}<td class="hide-on-phone text-soft">{{ s.node_label }}</td>{% endif %}
+          <td class="numeric small{% if s.covered == "never" %} tone-warn{% endif %}">{{ s.covered }}</td>
+          <td class="right numeric">{% if s.hits > 0 %}<span class="pill err">{{ s.hits }}</span>{% else %}0{% endif %}</td>
+          <td class="right numeric hide-on-phone">{% if s.file_findings > 0 %}<span class="pill warn">{{ s.file_findings }}</span>{% else %}0{% endif %}{% if s.file_review > 0 %} <span class="text-soft small">+{{ s.file_review }} to review</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
+
+{% endblock %}

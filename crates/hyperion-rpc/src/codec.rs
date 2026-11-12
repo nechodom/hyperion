@@ -762,6 +762,13 @@ pub enum Request {
     /// Every hosting's last stored integrity scan on this node — drives
     /// the cluster-wide integrity dashboard.
     IntegrityFindingsList,
+    /// What the cluster's Antivirus page needs from one node: its ClamAV, the
+    /// schedule it reads, its last pass and every site's detections. An older
+    /// node cannot decode it and drops the connection; the page says so.
+    AntivirusOverview,
+    /// Start this node's ClamAV pass now, whatever its schedule says. Returns
+    /// at once; the node's tick runs it.
+    AntivirusRunNow,
     /// Create a `staging.<domain>` copy of a hosting (files + DB + WP
     /// URL rewrite). Same-node only. `staging_domain` overrides the
     /// default `staging.<domain>` hostname when `Some` + non-empty.
@@ -2663,6 +2670,11 @@ pub enum Response {
     WpIntegrityScan(hyperion_types::WpIntegrityScanResult),
     ScanQuarantineList(hyperion_types::QuarantineList),
     IntegrityFindingsList(Vec<hyperion_types::HostingIntegritySummary>),
+    AntivirusOverview(hyperion_types::antivirus::AntivirusOverview),
+    AntivirusRunNow {
+        /// `false`: a pass was already running, so nothing was queued.
+        queued: bool,
+    },
     WpStagingCreate {
         staging_domain: String,
     },

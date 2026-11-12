@@ -47,9 +47,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "php8.4-fpm php8.4-cli php8.4-mysql php8.4-pgsql \
                  php8.4-curl php8.4-gd php8.4-mbstring php8.4-xml php8.4-zip php8.4-soap",
             ),
-            // ClamAV, optional: one weekly pass over every scanned site, in the
-            // night window, and only with 2 GiB of memory free (the signatures
-            // are over a gigabyte loaded). The scanner is the `clamscan` CLI
+            // ClamAV, optional: one pass over every scanned site on the
+            // schedule `[antivirus]` sets (weekly, in the night window and
+            // with 2 GiB of memory free unless changed; the signatures are
+            // over a gigabyte loaded). The scanner is the `clamscan` CLI
             // (from the `clamav` package), not a daemon, so there is no unit to
             // "start" — but `clamav-freshclam` IS a service, and it is what
             // keeps the virus database current, so that is the unit the

@@ -496,6 +496,21 @@ pub(super) fn read_new_layers_live(cfg_path: Option<&std::path::Path>) -> bool {
         .unwrap_or(false)
 }
 
+/// `[antivirus]`: when the node's ClamAV pass runs. A file that can't be read,
+/// or says nothing, is the defaults.
+pub(super) fn read_antivirus_settings(
+    cfg_path: Option<&std::path::Path>,
+) -> hyperion_types::antivirus::AntivirusSettings {
+    let doc = cfg_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| raw.parse::<toml_edit::DocumentMut>().ok());
+    let get = |key: &str| doc.as_ref()?.get("antivirus")?.get(key).cloned();
+    hyperion_types::antivirus::AntivirusSettings::from_lookup(
+        |k| get(k)?.as_bool(),
+        |k| get(k)?.as_integer(),
+    )
+}
+
 /// Whether a difference from a vendor's package counts as a finding, from
 /// `[integrity] vendor_refs_live`. Off until real licences have shown these
 /// references can be believed: it's a change to review until then.
