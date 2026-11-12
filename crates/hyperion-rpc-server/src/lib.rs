@@ -164,6 +164,10 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::HostingSearchIndex => match api.hosting_search_index().await {
+            Ok(v) => Response::HostingSearchIndex(v),
+            Err(e) => Response::Error(e),
+        },
         Request::TrashList => match api.trash_list().await {
             Ok(v) => Response::TrashList(v),
             Err(e) => Response::Error(e),
@@ -2547,6 +2551,11 @@ mod tests {
             v: hyperion_types::PhpVersion,
         ) -> Result<hyperion_types::PhpVersion, RpcError> {
             Ok(v)
+        }
+        async fn hosting_search_index(
+            &self,
+        ) -> Result<Vec<hyperion_types::HostingSearchTerm>, RpcError> {
+            Ok(vec![])
         }
         async fn trash_list(&self) -> Result<Vec<hyperion_types::TrashEntry>, RpcError> {
             Ok(vec![])

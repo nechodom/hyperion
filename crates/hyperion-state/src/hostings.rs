@@ -258,6 +258,43 @@ pub async fn list_trashed_expired(
     Ok(out)
 }
 
+/// Every secondary name of every live hosting on this node — aliases, the
+/// Linux user, database names and users, FTP logins — as
+/// `(hosting_id, kind, value)`. Backs the ⌘K search; trashed sites are left
+/// out, the same as the hosting list leaves them out.
+pub async fn search_terms(
+    pool: &SqlitePool,
+) -> Result<Vec<hyperion_types::HostingSearchTerm>, StateError> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT h.id, 'alias', a.alias_domain FROM hosting_aliases a \
+           JOIN hostings h ON h.id = a.hosting_id WHERE h.state != 'trashed' \
+         UNION ALL \
+         SELECT h.id, 'system_user', s.name FROM hostings h \
+           JOIN system_users s ON s.id = h.system_user_id WHERE h.state != 'trashed' \
+         UNION ALL \
+         SELECT h.id, 'database', d.db_name FROM databases d \
+           JOIN hostings h ON h.id = d.hosting_id WHERE h.state != 'trashed' \
+         UNION ALL \
+         SELECT h.id, 'db_user', d.db_user FROM databases d \
+           JOIN hostings h ON h.id = d.hosting_id WHERE h.state != 'trashed' \
+         UNION ALL \
+         SELECT h.id, 'ftp', f.login FROM ftp_accounts f \
+           JOIN hostings h ON h.id = f.hosting_id WHERE h.state != 'trashed'",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(hosting_id, kind, value)| hyperion_types::HostingSearchTerm {
+                hosting_id,
+                kind,
+                value,
+            },
+        )
+        .collect())
+}
+
 /// Every domain a hosting on this node answers to: primary names and aliases,
 /// trashed sites included.
 pub async fn all_domains(pool: &SqlitePool) -> Result<Vec<String>, StateError> {
@@ -1342,6 +1379,65 @@ mod tests {
         let got = get_by_id(&pool, &id).await.expect("get").expect("present");
         assert_eq!(got.state, HostingState::Active);
         assert_eq!(got.updated_at, 2);
+    }
+
+    #[tokio::test]
+    async fn search_terms_cover_every_secondary_name_of_live_sites() {
+        let pool = open_memory().await.expect("open");
+        let live_user = fresh_user(&pool, "eshop", 1101).await;
+        let bin_user = fresh_user(&pool, "binned", 1102).await;
+        let live = HostingId::new_v7();
+        insert(&pool, &live, "eshop.cz", live_user, None, "/x", 1, None)
+            .await
+            .expect("live");
+        let binned = HostingId::new_v7();
+        insert(&pool, &binned, "bin.cz", bin_user, None, "/y", 1, None)
+            .await
+            .expect("binned");
+        set_state(&pool, &binned, HostingState::Trashed, 2)
+            .await
+            .expect("trash");
+        for id in [&live, &binned] {
+            insert_alias(&pool, id, &format!("www.{}", id.as_str()))
+                .await
+                .expect("alias");
+        }
+        sqlx::query(
+            r#"INSERT INTO databases (hosting_id, engine, db_name, db_user, secret_id, created_at)
+               VALUES (?, 'mariadb', 'eshop_db', 'eshop_u', 'sec-s1', 1)"#,
+        )
+        .bind(live.as_str())
+        .execute(&pool)
+        .await
+        .expect("db");
+        sqlx::query(
+            "INSERT INTO ftp_accounts (hosting_id, login, local_root, created_at) \
+             VALUES (?, 'anna.eshop.cz', '/x', 1)",
+        )
+        .bind(live.as_str())
+        .execute(&pool)
+        .await
+        .expect("ftp");
+
+        let mut got: Vec<(String, String)> = search_terms(&pool)
+            .await
+            .expect("terms")
+            .into_iter()
+            .map(|t| {
+                assert_eq!(t.hosting_id, live.as_str(), "trashed site leaked: {t:?}");
+                (t.kind, t.value)
+            })
+            .collect();
+        got.sort();
+        let mut want = vec![
+            ("alias".to_string(), format!("www.{}", live.as_str())),
+            ("database".into(), "eshop_db".into()),
+            ("db_user".into(), "eshop_u".into()),
+            ("ftp".into(), "anna.eshop.cz".into()),
+            ("system_user".into(), "eshop".into()),
+        ];
+        want.sort();
+        assert_eq!(got, want);
     }
 
     #[tokio::test]

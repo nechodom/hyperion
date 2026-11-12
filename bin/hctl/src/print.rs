@@ -206,6 +206,11 @@ pub fn print_pretty(resp: &Response) {
                 println!("{message}");
             }
         }
+        Response::HostingSearchIndex(terms) => {
+            for t in terms.iter() {
+                println!("{:<38} {:<12} {}", t.hosting_id, t.kind, t.value);
+            }
+        }
         Response::TrashList(entries) => {
             if entries.is_empty() {
                 println!("trash is empty");

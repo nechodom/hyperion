@@ -100,6 +100,18 @@ pub struct HostingSummary {
     pub last_backup_ok: Option<bool>,
 }
 
+/// One searchable name that belongs to a hosting but is not its primary
+/// domain: an alias, the Linux user, a database name or user, an extra FTP
+/// login. A node hands back every one of them in one go so the ⌘K search
+/// can find a site by any name the operator remembers it by.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostingSearchTerm {
+    pub hosting_id: String,
+    /// "alias" | "system_user" | "database" | "db_user" | "ftp".
+    pub kind: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostingDetail {
     pub id: HostingId,

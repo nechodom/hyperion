@@ -213,6 +213,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.set_php_version(sel, version).await
     }
 
+    async fn hosting_search_index(
+        &self,
+    ) -> Result<Vec<hyperion_types::HostingSearchTerm>, RpcError> {
+        hyperion_state::hostings::search_terms(&self.svc.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "search index");
+                RpcError::Internal {
+                    message: format!("search index: {e}"),
+                }
+            })
+    }
     async fn trash_list(&self) -> Result<Vec<hyperion_types::TrashEntry>, RpcError> {
         self.svc.list_trash().await
     }
