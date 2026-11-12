@@ -3417,6 +3417,11 @@
   </form>
 </div>
 
+{# Profile + Price share the right column: Expiration is tall, and as three
+   loose grid items Price dropped to a second row under it, leaving a hole
+   below the short profile card. An inline save error lands in this stack,
+   above the card it is about. #}
+<div class="card-stack">
 <div class="card">
   <div class="card-head">
     <h2>
@@ -3593,6 +3598,7 @@
   </form>
   {% endif %}
 </div>
+</div>{# /card-stack #}
 
 </div>{# /card-grid #}
 
