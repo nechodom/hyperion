@@ -633,7 +633,7 @@ pub fn failures_since(lines: &[String], since: i64) -> usize {
 /// Hand-rolled because this crate has no date library and pulling one in to
 /// compare two strings would be the tail wagging the dog. Civil-from-days is
 /// the standard algorithm; it is exact for every timestamp this can see.
-fn iso_utc(secs: i64) -> String {
+pub(crate) fn iso_utc(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);

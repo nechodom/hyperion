@@ -232,6 +232,17 @@ pub enum Request {
         sel: HostingSelector,
         enabled: bool,
     },
+    /// Read the contact form guard state for one hosting (owning node).
+    FormGuardView {
+        sel: HostingSelector,
+    },
+    /// Turn the contact form guard on or off for one hosting. On enable,
+    /// writes its module of the must-use plugin; on disable, removes it.
+    /// Owning node.
+    FormGuardSet {
+        sel: HostingSelector,
+        enabled: bool,
+    },
     HostingRotateRedisPassword {
         sel: HostingSelector,
     },
@@ -2480,6 +2491,8 @@ pub enum Response {
     HostingSetRedis(hyperion_types::WpExtras),
     RegGuardView(hyperion_types::regguard::RegGuardView),
     RegGuardSet(hyperion_types::regguard::RegGuardView),
+    FormGuardView(hyperion_types::formguard::FormGuardView),
+    FormGuardSet(hyperion_types::formguard::FormGuardView),
     HostingRotateRedisPassword(hyperion_types::WpExtras),
     HostingRotateWpDebugLog,
     HostingUsage(Vec<HostingUsageBucket>),

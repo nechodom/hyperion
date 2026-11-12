@@ -1088,6 +1088,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_regguard),
         )
         .route(
+            "/hostings/:selector/formguard-panel",
+            get(handlers::hostings::get_formguard_panel),
+        )
+        .route(
+            "/hostings/formguard",
+            post(handlers::hostings::post_formguard),
+        )
+        .route(
             "/hostings/gitsync/config",
             post(handlers::hostings::post_gitsync_config),
         )

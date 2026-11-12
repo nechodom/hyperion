@@ -1056,6 +1056,92 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.regguard_view_for(&detail).await
     }
 
+    /// Contact form guard state for one hosting: the operator's intent (from
+    /// `hosting_kv`), what is on disk, and what the module has refused.
+    pub async fn formguard_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::formguard::FormGuardView, RpcError> {
+        let detail = self.get(sel).await?;
+        self.formguard_view_for(&detail).await
+    }
+
+    pub(super) async fn formguard_view_for(
+        &self,
+        detail: &hyperion_types::HostingDetail,
+    ) -> Result<hyperion_types::formguard::FormGuardView, RpcError> {
+        use hyperion_adapters::formguard::{self, RefusalLog};
+        /// How many refusals the card lists.
+        const RECENT: usize = 20;
+        let enabled =
+            hyperion_state::hosting_kv::get(&self.pool, detail.id.as_str(), FORMGUARD_KV_KEY)
+                .await
+                .ok()
+                .flatten()
+                .map(|v| v == "1")
+                .unwrap_or(false);
+        let is_wordpress =
+            tokio::fs::try_exists(std::path::Path::new(&detail.root_dir).join("wp-content"))
+                .await
+                .unwrap_or(false);
+        if !is_wordpress {
+            return Ok(hyperion_types::formguard::FormGuardView {
+                enabled,
+                ..Default::default()
+            });
+        }
+        let (refused_7d, recent) = match formguard::read_refusals(&detail.root_dir).await {
+            RefusalLog::Read(hits) => (
+                Some(formguard::refused_since(&hits, now_secs() - 7 * 86_400)),
+                hits.into_iter().rev().take(RECENT).collect(),
+            ),
+            RefusalLog::Absent => (Some(0), Vec::new()),
+            RefusalLog::Unreadable => (None, Vec::new()),
+        };
+        Ok(hyperion_types::formguard::FormGuardView {
+            enabled,
+            installed: formguard::is_installed(&detail.root_dir).await,
+            is_wordpress,
+            has_elementor_pro: formguard::has_elementor_pro(&detail.root_dir).await,
+            refused_7d,
+            recent,
+        })
+    }
+
+    /// Turn the contact form guard on or off: install/remove its module on
+    /// the owning node and record the operator's intent in `hosting_kv`.
+    pub async fn formguard_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<hyperion_types::formguard::FormGuardView, RpcError> {
+        let detail = self.get(sel).await?;
+        if enabled {
+            hyperion_adapters::formguard::install(&detail.root_dir, &detail.system_user)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("install form guard: {e}")))?;
+        } else {
+            hyperion_adapters::formguard::remove(&detail.root_dir).await;
+        }
+        hyperion_state::hosting_kv::set(
+            &self.pool,
+            detail.id.as_str(),
+            FORMGUARD_KV_KEY,
+            if enabled { "1" } else { "0" },
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("save form guard state: {e}")))?;
+        self.append_audit(
+            "hosting.formguard_set",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "domain": detail.domain, "enabled": enabled }).to_string(),
+            "ok",
+        )
+        .await;
+        self.formguard_view_for(&detail).await
+    }
+
     pub async fn rotate_redis_password(
         &self,
         sel: HostingSelector,
