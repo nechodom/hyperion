@@ -24,7 +24,7 @@ mod page_panel;
 
 pub use overview::get_overview;
 pub use page_access::get_access;
-pub use page_acme_dns::{post_acme_dns, post_acme_dns_check};
+pub use page_acme_dns::{get_acme_dns_check, post_acme_dns};
 pub use page_alerts::{get_alert_recipients, get_alerts};
 pub use page_antivirus::get_antivirus;
 pub use page_backups::get_backups;

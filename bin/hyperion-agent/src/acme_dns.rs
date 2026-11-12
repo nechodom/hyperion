@@ -10,7 +10,7 @@
 use hyperion_core::acme_dns_status::{self, Status};
 use hyperion_core::{acme_dns_answer, acme_dns_answer_tcp, AcmeDnsZoneView};
 use sqlx::SqlitePool;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -37,18 +37,43 @@ pub fn spawn(pool: SqlitePool) {
     tokio::spawn(run(pool));
 }
 
-/// What a running responder was started for; any change rebinds.
+/// What the responder serves. A change restarts every socket; a change of
+/// addresses alone does not.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Wanted {
+struct Identity {
     zone: String,
     ns_host: String,
     check_token: String,
-    addrs: Vec<IpAddr>,
+}
+
+/// The UDP and the TCP task of one address.
+type Pair = [JoinHandle<()>; 2];
+
+struct Running {
+    identity: Identity,
+    shared: Arc<Shared>,
+    sockets: BTreeMap<IpAddr, Pair>,
+}
+
+async fn stop(pair: Pair) {
+    // Await each so its socket is closed before the address is bound again.
+    for task in pair {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+async fn stop_all(running: Option<Running>) {
+    if let Some(r) = running {
+        for pair in r.sockets.into_values() {
+            stop(pair).await;
+        }
+    }
 }
 
 async fn run(pool: SqlitePool) {
-    let mut running: Option<(Wanted, Vec<JoinHandle<()>>)> = None;
-    let mut last_logged: Option<String> = None;
+    let mut running: Option<Running> = None;
+    let mut last_logged: Option<Status> = None;
     loop {
         let cfg = match hyperion_state::acme_dns::config_get(&pool).await {
             Ok(c) => c,
@@ -58,78 +83,117 @@ async fn run(pool: SqlitePool) {
                 continue;
             }
         };
-        let wanted = match cfg {
-            Some(c) if c.enabled => match c.zone {
-                Some(zone) => Some(Wanted {
+        let wanted = cfg.filter(|c| c.enabled).and_then(|c| {
+            let zone = c.zone.clone()?;
+            Some((
+                Identity {
                     zone,
-                    ns_host: c.ns_host,
-                    check_token: c.check_token,
-                    addrs: interface_addrs().await,
-                }),
-                None => None,
-            },
-            _ => None,
+                    ns_host: c.ns_host.clone(),
+                    check_token: c.check_token.clone(),
+                },
+                c,
+            ))
+        });
+        let Some((identity, cfg)) = wanted else {
+            stop_all(running.take()).await;
+            acme_dns_status::set(Status::default());
+            last_logged = None;
+            tokio::time::sleep(CONFIG_EVERY).await;
+            continue;
         };
-        // A bind that failed is retried every pass; a healthy one is only
-        // touched when what it serves (or where) changed.
-        let healthy = acme_dns_status::get().last_error.is_none();
-        if running.as_ref().map(|(w, _)| w) != wanted.as_ref() || !healthy {
-            if let Some((_, tasks)) = running.take() {
-                // Await each so its socket is closed before the rebind.
-                for t in tasks {
-                    t.abort();
-                    let _ = t.await;
-                }
-            }
-            match wanted {
-                Some(w) => {
-                    let (tasks, status) = start(&pool, &w).await;
-                    if status.last_error != last_logged {
-                        match &status.last_error {
-                            Some(e) => tracing::warn!(error = %e, "acme-dns: responder"),
-                            None => tracing::info!(
-                                zone = %w.zone,
-                                listening = ?status.listening,
-                                "acme-dns: responder listening"
-                            ),
-                        }
-                        last_logged = status.last_error.clone();
-                    }
-                    acme_dns_status::set(status);
-                    running = Some((w, tasks));
-                }
-                None => {
-                    acme_dns_status::set(Status::default());
-                    last_logged = None;
-                }
-            }
+        if running.as_ref().is_some_and(|r| r.identity != identity) {
+            stop_all(running.take()).await;
         }
+        let r = running.get_or_insert_with(|| Running {
+            shared: Arc::new(Shared::new(
+                pool.clone(),
+                identity.zone.clone(),
+                identity.ns_host.clone(),
+                identity.check_token.clone(),
+            )),
+            identity,
+            sockets: BTreeMap::new(),
+        });
+        // `ip` failing says nothing about the addresses: keep what is bound.
+        let mut errors = match interface_addrs().await {
+            Some(local) => {
+                let addrs = bind_addrs(
+                    &local,
+                    cfg.public_ipv4.as_deref(),
+                    cfg.public_ipv6.as_deref(),
+                );
+                let mut errors = reconcile(&mut r.sockets, &addrs, PORT, &r.shared).await;
+                if addrs.is_empty() {
+                    errors.push("no non-loopback interface address to bind".to_string());
+                }
+                errors
+            }
+            None => vec!["could not list the interface addresses".to_string()],
+        };
+        errors.sort();
+        let status = Status {
+            listening: r
+                .sockets
+                .keys()
+                .map(|ip| SocketAddr::new(*ip, PORT).to_string())
+                .collect(),
+            last_error: (!errors.is_empty()).then(|| errors.join("; ")),
+        };
+        if last_logged.as_ref() != Some(&status) {
+            match &status.last_error {
+                Some(e) => tracing::warn!(
+                    error = %e,
+                    listening = ?status.listening,
+                    "acme-dns: responder"
+                ),
+                None => tracing::info!(
+                    zone = %r.identity.zone,
+                    listening = ?status.listening,
+                    "acme-dns: responder listening"
+                ),
+            }
+            last_logged = Some(status.clone());
+        }
+        acme_dns_status::set(status);
         tokio::time::sleep(CONFIG_EVERY).await;
     }
 }
 
-async fn start(pool: &SqlitePool, w: &Wanted) -> (Vec<JoinHandle<()>>, Status) {
-    let shared = Arc::new(Shared::new(
-        pool.clone(),
-        w.zone.clone(),
-        w.ns_host.clone(),
-        w.check_token.clone(),
-    ));
-    let mut tasks = Vec::new();
-    let mut status = Status::default();
-    let mut errors = Vec::new();
-    if w.addrs.is_empty() {
-        errors.push("no non-loopback interface address to bind".to_string());
+/// Bring the bound sockets in line with `addrs` and return what could not
+/// be bound. An address that is already served is left alone, so one that
+/// fails (held by another daemon, an IPv6 address still tentative) is
+/// retried every pass without the working ones dropping a query.
+async fn reconcile(
+    sockets: &mut BTreeMap<IpAddr, Pair>,
+    addrs: &[IpAddr],
+    port: u16,
+    shared: &Arc<Shared>,
+) -> Vec<String> {
+    let stale: Vec<IpAddr> = sockets
+        .iter()
+        .filter(|(ip, pair)| !addrs.contains(ip) || pair.iter().any(JoinHandle::is_finished))
+        .map(|(ip, _)| *ip)
+        .collect();
+    for ip in stale {
+        if let Some(pair) = sockets.remove(&ip) {
+            stop(pair).await;
+        }
     }
-    for ip in &w.addrs {
-        let addr = SocketAddr::new(*ip, PORT);
-        let udp = UdpSocket::bind(addr).await;
-        let tcp = TcpListener::bind(addr).await;
-        match (udp, tcp) {
+    let mut errors = Vec::new();
+    for ip in addrs {
+        if sockets.contains_key(ip) {
+            continue;
+        }
+        let addr = SocketAddr::new(*ip, port);
+        match (UdpSocket::bind(addr).await, TcpListener::bind(addr).await) {
             (Ok(u), Ok(t)) => {
-                tasks.push(tokio::spawn(serve_udp(u, shared.clone())));
-                tasks.push(tokio::spawn(serve_tcp(t, shared.clone())));
-                status.listening.push(addr.to_string());
+                sockets.insert(
+                    *ip,
+                    [
+                        tokio::spawn(serve_udp(u, shared.clone())),
+                        tokio::spawn(serve_tcp(t, shared.clone())),
+                    ],
+                );
             }
             (u, t) => {
                 let e = u
@@ -141,10 +205,35 @@ async fn start(pool: &SqlitePool, w: &Wanted) -> (Vec<JoinHandle<()>>, Status) {
             }
         }
     }
-    if !errors.is_empty() {
-        status.last_error = Some(errors.join("; "));
+    errors
+}
+
+/// Where to listen, out of this machine's `local` addresses. A configured
+/// public address the machine holds is the only one of its family that is
+/// published in DNS, so only that is bound: bridge addresses (Docker,
+/// libvirt) come and go and nobody asks them. Behind NAT the public address
+/// is not local, so every address of that family is bound, and with no
+/// address configured at all, every address there is.
+fn bind_addrs(local: &[IpAddr], v4: Option<&str>, v6: Option<&str>) -> Vec<IpAddr> {
+    let parse = |s: Option<&str>| s.map(|s| s.trim().parse::<IpAddr>().ok());
+    let (v4, v6) = (parse(v4), parse(v6));
+    if v4.is_none() && v6.is_none() {
+        return local.to_vec();
     }
-    (tasks, status)
+    let family = |want: Option<Option<IpAddr>>, is_v4: bool| -> Vec<IpAddr> {
+        match want {
+            None => Vec::new(),
+            Some(Some(ip)) if local.contains(&ip) => vec![ip],
+            Some(_) => local
+                .iter()
+                .filter(|ip| ip.is_ipv4() == is_v4)
+                .copied()
+                .collect(),
+        }
+    };
+    let mut out = family(v4, true);
+    out.extend(family(v6, false));
+    out
 }
 
 /// Per-source token bucket: `RATE_QPS` sustained, `RATE_BURST` at once,
@@ -203,7 +292,8 @@ impl Shared {
             zone: zone.to_ascii_lowercase(),
             ns_host,
             check_token,
-            serial: 0,
+            // Never 0: seconds, like every later bump.
+            serial: hyperion_types::now_secs() as u32,
             txt: HashMap::new(),
             known_labels: HashSet::new(),
         };
@@ -337,14 +427,17 @@ async fn serve_tcp_conn(mut stream: TcpStream, ip: IpAddr, shared: &Shared) {
 }
 
 /// Non-loopback interface addresses from `ip -j addr show`.
-async fn interface_addrs() -> Vec<IpAddr> {
+/// `None` when `ip` itself failed, which is not "no addresses".
+async fn interface_addrs() -> Option<Vec<IpAddr>> {
     match tokio::process::Command::new("ip")
         .args(["-j", "addr", "show"])
         .output()
         .await
     {
-        Ok(o) if o.status.success() => addrs_from_ip_json(&String::from_utf8_lossy(&o.stdout)),
-        _ => Vec::new(),
+        Ok(o) if o.status.success() => {
+            Some(addrs_from_ip_json(&String::from_utf8_lossy(&o.stdout)))
+        }
+        _ => None,
     }
 }
 
@@ -411,6 +504,79 @@ mod tests {
             .collect();
         assert_eq!(got, vec!["10.0.0.5", "203.0.113.5", "2001:db8::5"]);
         assert!(addrs_from_ip_json("not json").is_empty());
+    }
+
+    fn ips(list: &[&str]) -> Vec<IpAddr> {
+        list.iter().map(|s| s.parse().expect("ip")).collect()
+    }
+
+    #[test]
+    fn only_the_published_address_is_bound_when_the_machine_holds_it() {
+        let local = ips(&["172.17.0.1", "203.0.113.5", "2001:db8::5"]);
+        // Docker's bridge and the unpublished IPv6 are left alone.
+        assert_eq!(
+            bind_addrs(&local, Some("203.0.113.5"), None),
+            ips(&["203.0.113.5"])
+        );
+        assert_eq!(
+            bind_addrs(&local, Some(" 203.0.113.5 "), Some("2001:db8::5")),
+            ips(&["203.0.113.5", "2001:db8::5"])
+        );
+    }
+
+    #[test]
+    fn behind_nat_every_address_of_the_family_is_bound() {
+        let local = ips(&["10.0.0.5", "10.0.1.5", "2001:db8::5"]);
+        // The public IPv4 is the router's: any private one may be the
+        // forward target. IPv6 is not published, so it stays closed.
+        assert_eq!(
+            bind_addrs(&local, Some("198.51.100.7"), None),
+            ips(&["10.0.0.5", "10.0.1.5"])
+        );
+        // NAT for IPv4 must not cost the IPv6 its own address.
+        assert_eq!(
+            bind_addrs(&local, Some("198.51.100.7"), Some("2001:db8::5")),
+            ips(&["10.0.0.5", "10.0.1.5", "2001:db8::5"])
+        );
+        // Nothing configured: as before, everything.
+        assert_eq!(bind_addrs(&local, None, None), local);
+    }
+
+    async fn empty_shared() -> Arc<Shared> {
+        let pool = hyperion_state::open_memory().await.expect("db");
+        Arc::new(Shared::new(
+            pool,
+            "acme.panel.example".into(),
+            "ns-acme.panel.example".into(),
+            "t".repeat(32),
+        ))
+    }
+
+    #[tokio::test]
+    async fn an_address_that_cannot_be_bound_leaves_the_working_one_alone() {
+        let shared = empty_shared().await;
+        let good: IpAddr = "127.0.0.1".parse().expect("ip");
+        // TEST-NET-1 is never assigned to a machine, so binding it fails.
+        let bad: IpAddr = "192.0.2.1".parse().expect("ip");
+        let mut sockets = BTreeMap::new();
+        let errors = reconcile(&mut sockets, &[good, bad], 0, &shared).await;
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("bind 192.0.2.1:0"), "{errors:?}");
+        let first = sockets[&good][0].id();
+        // The next pass retries the bad one and must not rebind the good.
+        let errors = reconcile(&mut sockets, &[good, bad], 0, &shared).await;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(sockets.keys().copied().collect::<Vec<_>>(), vec![good]);
+        assert_eq!(sockets[&good][0].id(), first, "the socket was restarted");
+        // An address that is no longer wanted is closed.
+        let errors = reconcile(&mut sockets, &[], 0, &shared).await;
+        assert!(errors.is_empty() && sockets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_serial_is_never_zero() {
+        let shared = empty_shared().await;
+        assert!(shared.view().await.serial > 0);
     }
 
     /// A TXT query for `name`, no EDNS.

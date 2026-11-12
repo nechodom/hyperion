@@ -491,7 +491,7 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route(
             "/settings/https/acme-dns/check",
-            post(handlers::settings::post_acme_dns_check),
+            get(handlers::settings::get_acme_dns_check),
         )
         .route(
             "/settings/https/preview/:node/acme-dns/setup",
