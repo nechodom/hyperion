@@ -2110,6 +2110,52 @@ pub fn print_pretty(resp: &Response) {
             println!("{} file(s) in quarantine", l.total);
         }
         Response::WpIntegrityScan(r) => print!("{}", integrity_scan_text(r)),
+        Response::AntivirusOverview(o) => {
+            let s = &o.settings;
+            println!(
+                "clamav: {}",
+                match (o.installed, o.db_present) {
+                    (false, _) => "not installed",
+                    (true, false) => "signatures still downloading",
+                    (true, true) => "ready",
+                }
+            );
+            println!(
+                "schedule: {}, {}, {} free ({})",
+                s.every_text(),
+                s.window_text(),
+                s.min_free_text(),
+                if s.enabled { "on" } else { "off" }
+            );
+            if o.running_since > 0 {
+                println!("running since {}", o.running_since);
+            }
+            if o.last_finished > 0 {
+                println!(
+                    "last pass: {} at {} ({} site(s), {} file(s), {} detection(s))",
+                    o.last_end, o.last_finished, o.last_sites, o.last_files, o.last_hits
+                );
+            }
+            if let Some(why) = &o.held {
+                println!("held: {why}");
+            }
+            for site in &o.sites {
+                println!(
+                    "{} covered_at={} detections={}",
+                    site.domain, site.covered_at, site.hits_total
+                );
+                for h in &site.hits {
+                    println!("  {} {}", h.signature, h.path.escape_debug());
+                }
+            }
+        }
+        Response::AntivirusRunNow { queued } => {
+            if *queued {
+                println!("pass requested");
+            } else {
+                println!("a pass is already running");
+            }
+        }
         Response::IntegrityFindingsList(list) => {
             if list.is_empty() {
                 println!("no stored integrity scans");

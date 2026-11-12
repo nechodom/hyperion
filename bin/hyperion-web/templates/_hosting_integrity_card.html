@@ -187,13 +187,13 @@
       {% if scan.coverage.symlinks_skipped > 0 %}· {{ scan.coverage.symlinks_skipped }} symlink(s) not followed{% endif %}
       {% endif %}
       · Malware:
-      {# ClamAV is the node's own weekly pass, optional, over every scanned site
-         (one with no WordPress too). "Scan now" doesn't run it, so the card says
-         when it last did. #}
-      {% if scan.clamav_available %}ClamAV scanned the site's files{% if scan.clamav_at != 0 %} {{ crate::handlers::stats::fmt_ago(scan.clamav_at) }}{% endif %} (a weekly pass, overnight)
+      {# ClamAV is the node's own scheduled pass, optional, over every scanned
+         site (one with no WordPress too). "Scan now" doesn't run it, so the card
+         says when it last did; the schedule and "Run now" are on /antivirus. #}
+      {% if scan.clamav_available %}ClamAV scanned the site's files{% if scan.clamav_at != 0 %} {{ crate::handlers::stats::fmt_ago(scan.clamav_at) }}{% endif %} (the node's scheduled pass)
       {% else if scan.coverage.no_upstream %}files are read for known malware patterns; ClamAV is optional{% if scan.clamav_installed %} and hasn't covered this site yet{% else %} and not installed on this node{% endif %}
-      {% else if scan.clamav_installed %}<span class="tone-warn">not scanned</span> — ClamAV is installed, but its weekly pass (overnight, when the node has 2 GiB of memory free) hasn't covered this site yet (the reason, if it was skipped, is below)
-      {% else %}<span class="tone-warn">not scanned</span> — ClamAV isn't installed on this node. It is optional: once added on the <a href="/services">Services page</a> it reads every file of the site but media and files over 64 MiB, once a week overnight{% endif %}
+      {% else if scan.clamav_installed %}<span class="tone-warn">not scanned yet</span> — ClamAV is installed, but it runs as one scheduled pass per node, not with "Scan now", and none has covered this site yet<span data-require-caps="security_manage" data-require-scope-all> (<a href="/antivirus#passes">when is the next one?</a>)</span>
+      {% else %}<span class="tone-warn">not scanned</span> — ClamAV isn't installed on this node. It is optional: once added on the <a href="/services">Services page</a> it reads every file of the site but media and files over 64 MiB, on the schedule under Settings → Antivirus{% endif %}
       {% if scan.wp_cli_ok || scan.coverage.no_upstream %}{% if let Some(e) = scan.error %}· {{ e|tenant_text }}{% endif %}{% endif %}.
       {% endif %}
       The database is not scanned.

@@ -1,0 +1,99 @@
+{% extends "settings_base.html" %}
+{% block section %}
+<p class="text-soft small" style="margin:0 0 1rem">
+  What the passes found, when each node last ran one and a button to run one
+  now are on <a href="/antivirus">Antivirus</a>.
+</p>
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">ClamAV{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+  <div class="item" id="antivirus-schedule">
+    {% if let Some(s) = settings %}
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Scheduled pass</h3>
+      {% if s.enabled %}<span class="pill ok">{{ s.every_text() }} · {{ s.window_text() }}</span>
+      {% else %}<span class="pill warn">off</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      One <code>clamscan</code> per node reads every file of every scanned site,
+      except media and files over 64 MiB. It runs only on nodes where ClamAV is
+      installed, and takes minutes to hours depending on how many files there are.
+    </p>
+
+    <form method="post" action="/settings/config" autocomplete="off" style="margin-top:0.9rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="antivirus">
+      <input type="hidden" name="_return_tab" value="antivirus-schedule">
+      <input type="hidden" name="_checkboxes" value="enabled">
+      <label class="field-checkbox" style="margin:0">
+        <input type="checkbox" name="enabled" value="true" {% if s.enabled %}checked{% endif %}>
+        <span><strong>Run the pass on a schedule</strong></span>
+      </label>
+      <p class="text-soft small" style="margin:0.3rem 0 1rem 1.6rem">
+        Off: nothing starts by itself. <em>Run now</em> on the Antivirus page still works.
+      </p>
+
+      <div class="field-row three">
+        <div class="field">
+          <label for="av_every">How often <span class="hint">days · 1 = every day</span></label>
+          <input id="av_every" name="every_days" type="number" min="1" max="30"
+                 value="{{ s.every_days }}">
+        </div>
+        <div class="field">
+          <label for="av_from">May start from <span class="hint">node's local time</span></label>
+          <select id="av_from" name="window_start_hour">
+            {% for h in hours.clone() %}<option value="{{ h }}"{% if h == s.window_start_hour %} selected{% endif %}>{{ "{:02}"|format(h) }}:00</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="av_to">Until <span class="hint">same as the start = any hour</span></label>
+          <select id="av_to" name="window_end_hour">
+            {% for h in hours.clone() %}<option value="{{ h }}"{% if h == s.window_end_hour %} selected{% endif %}>{{ "{:02}"|format(h) }}:00</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="av_mem">Free memory needed to start <span class="hint">MiB · 1024–65536</span></label>
+        <input id="av_mem" name="min_free_memory_mb" type="number" min="1024" max="65536" step="256"
+               value="{{ s.min_free_memory_mb }}" style="max-width:12rem">
+        <span class="help">
+          ClamAV loads over a gigabyte of signatures and is capped at 3 GiB.
+          A node with less than this available skips the pass and tries again
+          every ten minutes while the window is open.
+        </span>
+      </div>
+
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+
+    <details class="howto">
+      <summary>How the schedule is read</summary>
+      <p>
+        A pass is due once the chosen number of days has gone by since the last
+        one <em>began</em>, and starts in the first hour of the window after
+        that. A window whose end is before its start runs past midnight
+        (22:00 to 04:00). A pass that is running when the window closes is not
+        cut off; it is stopped only after six hours.
+      </p>
+      <p>
+        A pass that could not start or was interrupted by a restart is tried
+        again the next day rather than a whole interval later. One the kernel
+        stopped for lack of memory rests for a week, unless someone runs it by hand.
+      </p>
+      <p>
+        Each node reads this when it checks whether a pass is due, so a change
+        applies without a restart, as soon as the settings sync has delivered it.
+      </p>
+    </details>
+    {% else %}
+    <h3 style="margin:0">Scheduled pass</h3>
+    <div class="alert alert-warn" role="status" style="margin:0.9rem 0 0">
+      <code>agent.toml</code> can't be shown: {{ error }}. Nodes are running
+      the built-in schedule (every 7 days, 02:00–06:00).
+    </div>
+    {% endif %}
+  </div>
+</fieldset>
+{% endblock %}

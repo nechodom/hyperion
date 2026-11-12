@@ -40,8 +40,9 @@ pub const UNIT_NAME: &str = "hyperion-clamscan";
 /// The unit is stopped after this long (6 hours).
 const RUNTIME_MAX_SEC: u64 = 21_600;
 
-/// The pass needs this much `MemAvailable` to start: the signature database is
-/// over a gigabyte once loaded, and the unit is capped at 3 GiB.
+/// The pass needs this much `MemAvailable` to start unless `[antivirus]` says
+/// otherwise: the signature database is over a gigabyte once loaded, and the
+/// unit is capped at 3 GiB.
 pub const MIN_MEM_AVAILABLE: u64 = 2 << 30;
 /// A pass the kernel killed for memory is not tried again for this long.
 pub const OOM_BACKOFF_SECS: i64 = 7 * 24 * 3600;
@@ -145,7 +146,7 @@ pub fn clamav_available() -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClamPreflight {
     Run,
-    /// Under [`MIN_MEM_AVAILABLE`] free.
+    /// Less memory free than the pass was told to wait for.
     SkipLowMemory,
     SignaturesDownloading,
     /// The last pass was killed for memory and is resting.
@@ -157,6 +158,7 @@ pub enum ClamPreflight {
 pub fn clamav_preflight(
     installed: bool,
     mem_available: u64,
+    min_mem_available: u64,
     db_present: bool,
     backoff_until: i64,
     now: i64,
@@ -167,7 +169,7 @@ pub fn clamav_preflight(
         ClamPreflight::SignaturesDownloading
     } else if now < backoff_until {
         ClamPreflight::BackingOff
-    } else if mem_available < MIN_MEM_AVAILABLE {
+    } else if mem_available < min_mem_available {
         ClamPreflight::SkipLowMemory
     } else {
         ClamPreflight::Run
@@ -1802,8 +1804,19 @@ exit {exit}"#,
     fn preflight_says_why_it_will_not_run() {
         const GIB: u64 = 1 << 30;
         let now = 1_700_000_000;
-        let p = |installed, mem, db, until| clamav_preflight(installed, mem, db, until, now);
+        let p = |installed, mem, db, until| {
+            clamav_preflight(installed, mem, MIN_MEM_AVAILABLE, db, until, now)
+        };
         assert_eq!(p(true, 2 * GIB, true, 0), ClamPreflight::Run);
+        // The threshold is the caller's: what `[antivirus]` asks for.
+        assert_eq!(
+            clamav_preflight(true, 2 * GIB, 4 * GIB, true, 0, now),
+            ClamPreflight::SkipLowMemory
+        );
+        assert_eq!(
+            clamav_preflight(true, GIB + 1, GIB, true, 0, now),
+            ClamPreflight::Run
+        );
         assert_eq!(p(true, 2 * GIB - 1, true, 0), ClamPreflight::SkipLowMemory);
         assert_eq!(p(false, 8 * GIB, true, 0), ClamPreflight::NotInstalled);
         assert_eq!(

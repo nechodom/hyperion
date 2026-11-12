@@ -52,6 +52,16 @@ impl StubAdapters {
 
 #[async_trait]
 impl hyperion_core::AdapterPort for StubAdapters {
+    /// A pretend ClamAV with its signatures and 5 GiB to spare, so the
+    /// Antivirus page has a node that could run a pass. Nothing ever runs:
+    /// "Run now" asks, and the stub's pass fails to list.
+    async fn clamav_facts(&self) -> hyperion_adapters::integrity::ClamFacts {
+        hyperion_adapters::integrity::ClamFacts {
+            installed: true,
+            db_present: true,
+            mem_available: 5 << 30,
+        }
+    }
     async fn modsec_status(&self) -> hyperion_types::crs::ModsecStatus {
         let on = self.modsec_installed.load(Ordering::SeqCst);
         hyperion_types::crs::ModsecStatus {
@@ -1503,6 +1513,7 @@ async fn seed_demo(svc: &Arc<StubService>) {
         .expect("audit");
     }
     seed_demo_waf(svc, &ids, now).await;
+    seed_demo_antivirus(svc, &ids, now).await;
 }
 
 /// WAF levels, a week of refusals and a few bans, so /protection has a
@@ -1567,6 +1578,67 @@ fn seed_demo_cpu(
             );
         }
     });
+}
+
+/// A finished ClamAV pass from last night: most sites covered and clean, one
+/// with two detections, one whose listing was cut short, one never covered.
+/// Written as the stored records and node stamps the agent itself leaves.
+async fn seed_demo_antivirus(svc: &StubService, ids: &[String], now: i64) {
+    use hyperion_types::{WpIntegrityScanResult, WpMalwareHit};
+    let pool = &svc.pool;
+    let pass = now - 9 * 3600;
+    for (i, id) in ids.iter().enumerate() {
+        // The last site joined after the pass.
+        let covered = i + 1 < ids.len();
+        let malware = if i == 3 {
+            vec![
+                WpMalwareHit {
+                    path: "/home/atelier-hora/htdocs/wp-content/uploads/2026/10/cache.php".into(),
+                    signature: "Php.Trojan.Webshell-1".into(),
+                },
+                WpMalwareHit {
+                    path: "/home/atelier-hora/htdocs/wp-includes/class-wp-locale-x.php".into(),
+                    signature: "Php.Malware.Agent-7604492-0".into(),
+                },
+            ]
+        } else {
+            vec![]
+        };
+        let note = (i == 1).then_some("ClamAV looked at the first 200000 files of this site only");
+        let record = serde_json::json!({
+            "scanned_at": now - 1800,
+            "clamav_at": if covered { pass } else { 0 },
+            "clamav_error": note,
+            "full_at": now - 86_400,
+            "result": WpIntegrityScanResult {
+                core_ok: true,
+                wp_cli_ok: true,
+                clamav_available: covered,
+                clamav_installed: true,
+                clamav_at: if covered { pass } else { 0 },
+                scanned_at: now - 1800,
+                malware,
+                ..Default::default()
+            },
+        });
+        hyperion_state::hosting_kv::set(pool, id, "integrity_scan", &record.to_string(), now)
+            .await
+            .expect("integrity record");
+    }
+    let last = serde_json::json!({
+        "started": pass, "finished": pass + 2520, "end": "partial",
+        "sites": ids.len() - 1, "files": 184_302, "hits": 2,
+    });
+    for (key, value) in [
+        ("site_scan_clamav_at", pass.to_string()),
+        ("clamav_sweep_state", format!("finished {}", pass + 2520)),
+        ("site_scan_clamav_last_pass", last.to_string()),
+        ("site_scan_clamav_facts", "ready".to_string()),
+    ] {
+        hyperion_state::node_kv::set(pool, key, &value, now)
+            .await
+            .expect("node kv");
+    }
 }
 
 async fn seed_demo_waf(svc: &StubService, ids: &[String], now: i64) {

@@ -220,6 +220,7 @@ async fn clam(list: &str, vanish: &str, sites: &[&str]) -> Res<Value> {
     let go = clamav_preflight(
         facts.installed,
         facts.mem_available,
+        hyperion_adapters::integrity::MIN_MEM_AVAILABLE,
         facts.db_present,
         0,
         unix_now(),

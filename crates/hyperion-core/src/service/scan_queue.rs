@@ -17,6 +17,7 @@ use hyperion_adapters::sitescan::scan::{
     ScanInput, ScanMode, SiteScanOutcome, WriterAccepted, WriterKind, MAX_CARRIED_RELS,
 };
 use hyperion_adapters::sitescan::vendor::{self, VendorError};
+use hyperion_types::antivirus::{AntivirusOverview, AntivirusSettings, AntivirusSite};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -55,19 +56,25 @@ const SCAN_START_OVER_KV_KEY: &str = "scan_start_over";
 /// `node_kv` key: unix seconds the manifest cache and the quarantine were last swept.
 const EVICT_LAST_RUN_KV: &str = "site_scan_evict_last_run_at";
 
-/// `node_kv` key: unix seconds the weekly ClamAV pass last started. Written before
+/// `node_kv` key: unix seconds the ClamAV pass last started. Written before
 /// it does, so a restart in the middle can't run it again.
 const CLAMAV_LAST_KV: &str = "site_scan_clamav_at";
+/// `node_kv` key: unix seconds someone asked for a pass now. Gone as soon as a
+/// tick has looked at it, whether or not the pass could start.
+const CLAMAV_REQUEST_KV: &str = "site_scan_clamav_requested";
+/// `node_kv` key: the last pass that came to an end, a [`ClamLastPass`] as JSON.
+const CLAMAV_LAST_PASS_KV: &str = "site_scan_clamav_last_pass";
+/// `node_kv` key: why a pass that was due or asked for did not start, a
+/// [`ClamHeld`] as JSON. Gone once one starts.
+const CLAMAV_HELD_KV: &str = "site_scan_clamav_held";
 /// `node_kv` key: unix seconds before which a pass the kernel killed isn't tried again.
 const CLAMAV_BACKOFF_KV: &str = "site_scan_clamav_backoff_until";
 /// `hosting_kv` key: hits a restore from quarantine brought back, for the pass
 /// that may be running. JSON, a list of [`ClamRestored`].
 pub(super) const CLAMAV_RESTORED_KV_KEY: &str = "clamav_restored";
-/// Weekly, but not quite: a pass that began late in the night's window mustn't push
-/// the next one past its night. Half a day over six keeps it on the same night.
-const CLAMAV_MIN_AGE_SECS: i64 = 6 * DAY_SECS + 12 * HOUR_SECS;
 /// A pass the agent lost (a restart, a crash) or one that could not start is tried
-/// again this long after, which in practice is the next night's window.
+/// again this long after, which in practice is the next night's window. How often
+/// it runs otherwise, and in which hours, is `[antivirus]`'s to say.
 const CLAMAV_RETRY_SECS: i64 = 20 * HOUR_SECS;
 /// `node_kv` key: `started <unix>` while a pass runs, `finished <unix>` after. A
 /// `started` found by a tick is an agent's that is gone.
@@ -83,22 +90,20 @@ const CLAMAV_LOG_BYTES: usize = 2048;
 
 // What the card says when ClamAV did not run or did not finish. Generic on
 // purpose: clamscan's own words name tenant files.
-const CLAMAV_LOW_MEMORY: &str =
-    "ClamAV skipped this week's pass: the node has less than 2 GiB of memory free";
 const CLAMAV_SIGNATURES: &str = "ClamAV is waiting: its signatures are still downloading";
 const CLAMAV_NOT_LISTED: &str =
     "ClamAV could not list all of this site's files, so more may be hiding";
 const CLAMAV_NODE_FULL: &str =
     "ClamAV's list for this node was full before the end of this site, so more may be hiding";
-const CLAMAV_FAILED: &str = "ClamAV could not run; it is tried again tomorrow night";
+const CLAMAV_FAILED: &str = "ClamAV could not run; it is tried again tomorrow";
 const CLAMAV_INTERRUPTED: &str =
-    "ClamAV's pass was interrupted by a restart; it is tried again tomorrow night";
+    "ClamAV's pass was interrupted by a restart; it is tried again tomorrow";
 const CLAMAV_PARTIAL: &str =
     "ClamAV could not finish reading every file, so more may be hiding; what it found is listed";
 const CLAMAV_UNREAD: &str =
     "ClamAV could not read some of this site's files, so more may be hiding";
 const CLAMAV_TIMED_OUT: &str =
-    "ClamAV ran out of its six hours; what it found is listed, and it is tried again next week";
+    "ClamAV ran out of its six hours; what it found is listed, and it is tried again at its next pass";
 const CLAMAV_TOO_MANY: &str =
     "ClamAV found more than 1000 detections here; only the first 1000 are kept";
 
@@ -398,25 +403,99 @@ pub(super) fn merge_restored(
     (hits, keep)
 }
 
-/// The weekly pass is due: a night-window hour, and the last one started long
-/// enough ago. A node that was down the whole window waits for the next night, and
-/// a stamp from the future (the clock moved back) doesn't hold it off for ever.
-pub(super) fn clamav_sweep_due<Tz: chrono::TimeZone>(last: i64, now: i64, tz: &Tz) -> bool {
+/// The scheduled pass is due: switched on, an hour inside its window, and the
+/// last one started long enough ago. A node that was down the whole window waits
+/// for the next one, and a stamp from the future (the clock moved back) doesn't
+/// hold it off for ever.
+pub(super) fn clamav_sweep_due<Tz: chrono::TimeZone>(
+    last: i64,
+    now: i64,
+    tz: &Tz,
+    settings: &AntivirusSettings,
+) -> bool {
     let Some(local) = tz.timestamp_opt(now, 0).single() else {
         return false;
     };
-    FULL_REHASH_HOURS.contains(&local.hour())
-        && (last <= 0 || stamped_ahead(last, now) || now - last >= CLAMAV_MIN_AGE_SECS)
+    settings.enabled
+        && settings.in_window(local.hour())
+        && (last <= 0 || stamped_ahead(last, now) || now - last >= settings.min_age_secs())
+}
+
+/// When the next scheduled pass may start at the earliest: now if it is due, else
+/// the first top of an hour that is. 0 when none is scheduled.
+pub(super) fn clamav_next_due<Tz: chrono::TimeZone>(
+    last: i64,
+    now: i64,
+    tz: &Tz,
+    settings: &AntivirusSettings,
+) -> i64 {
+    if !settings.enabled {
+        return 0;
+    }
+    if clamav_sweep_due(last, now, tz, settings) {
+        return now;
+    }
+    // The interval, a day for the window to come round, and one for a clock change.
+    let hours = (i64::from(settings.every_days) + 2) * 24;
+    let top = now - now.rem_euclid(HOUR_SECS);
+    (1..=hours)
+        .map(|h| top + h * HOUR_SECS)
+        .find(|t| clamav_sweep_due(last, *t, tz, settings))
+        .unwrap_or(0)
+}
+
+fn low_memory_note(settings: &AntivirusSettings) -> String {
+    format!(
+        "ClamAV skipped its pass: the node has less than {} of memory free",
+        settings.min_free_text()
+    )
 }
 
 /// Why the pass did not start, for the card. `None` for the two that say nothing.
-fn clamav_hold_note(go: integrity::ClamPreflight, backoff_until: i64) -> Option<String> {
+fn clamav_hold_note(
+    go: integrity::ClamPreflight,
+    backoff_until: i64,
+    settings: &AntivirusSettings,
+) -> Option<String> {
     use integrity::ClamPreflight::*;
     match go {
         Run | NotInstalled => None,
-        SkipLowMemory => Some(CLAMAV_LOW_MEMORY.into()),
+        SkipLowMemory => Some(low_memory_note(settings)),
         SignaturesDownloading => Some(CLAMAV_SIGNATURES.into()),
         BackingOff => Some(oom_note(backoff_until)),
+    }
+}
+
+/// The last pass that came to an end, for the overview.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(super) struct ClamLastPass {
+    pub(super) started: i64,
+    pub(super) finished: i64,
+    /// One of `hyperion_types::antivirus::pass_end`.
+    pub(super) end: String,
+    pub(super) sites: u32,
+    pub(super) files: u64,
+    pub(super) hits: u32,
+}
+
+/// Why a pass did not start, and when that was decided.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct ClamHeld {
+    at: i64,
+    why: String,
+}
+
+fn pass_end_word(end: integrity::SweepEnd) -> &'static str {
+    use hyperion_types::antivirus::pass_end;
+    use integrity::SweepEnd::*;
+    match end {
+        Complete => pass_end::COMPLETE,
+        Partial => pass_end::PARTIAL,
+        OutOfMemory => pass_end::OUT_OF_MEMORY,
+        TimedOut => pass_end::TIMED_OUT,
+        Failed => pass_end::FAILED,
     }
 }
 
@@ -957,9 +1036,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await;
     }
 
-    /// The node's weekly ClamAV pass: one `clamscan` over a file list of every
-    /// scanned site, in the night window, when the box has memory to spare.
-    /// Returns the number of hostings with a new hit.
+    /// The node's ClamAV pass: one `clamscan` over a file list of every scanned
+    /// site, as often and in the hours `[antivirus]` says, when the box has
+    /// memory to spare; or now, when someone asked. Returns the number of
+    /// hostings with a new hit.
     pub async fn site_scan_clamav_tick(&self) -> Result<i64, RpcError> {
         self.site_scan_clamav_tick_at(&chrono::Local, now_secs())
             .await
@@ -980,13 +1060,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 return Ok(0);
             }
         };
-        if !clamav_sweep_due(last, now, tz) {
+        let settings = self.antivirus_settings();
+        // Asked for by hand: the schedule, its window and its switch don't apply,
+        // and neither does the rest after a pass the kernel killed. Memory does.
+        let requested = self.node_stamp(CLAMAV_REQUEST_KV).await.unwrap_or(0) > 0;
+        if !requested && !clamav_sweep_due(last, now, tz, &settings) {
             return Ok(0);
         }
-        let backoff_until = self.node_stamp(CLAMAV_BACKOFF_KV).await.unwrap_or(0);
+        if requested {
+            // Once, whatever comes of it: a request must not start a pass at
+            // some later hour nobody chose.
+            if let Err(e) = hyperion_state::node_kv::delete(&self.pool, CLAMAV_REQUEST_KV).await {
+                tracing::warn!(error = %e, "clamav: request not cleared; not starting");
+                return Ok(0);
+            }
+        }
+        let backoff_until = if requested {
+            0
+        } else {
+            self.node_stamp(CLAMAV_BACKOFF_KV).await.unwrap_or(0)
+        };
         let go = integrity::clamav_preflight(
             facts.installed,
             facts.mem_available,
+            settings.min_free_bytes(),
             facts.db_present,
             backoff_until,
             now,
@@ -999,12 +1096,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if go != integrity::ClamPreflight::Run {
             // Not a failure and not a stamp: the next ten minutes try again, and
             // the card says why in the meantime.
-            let note = clamav_hold_note(go, backoff_until);
+            let note = clamav_hold_note(go, backoff_until, &settings);
+            self.set_clamav_held(note.as_deref(), now).await;
             for d in &sites {
                 self.clamav_store(d, ClamUpdate::Note(note.clone())).await;
             }
             return Ok(0);
         }
+        self.set_clamav_held(None, now).await;
         // Before anything starts, so a restart in the middle can't run it again.
         if let Err(e) =
             hyperion_state::node_kv::set(&self.pool, CLAMAV_LAST_KV, &now.to_string(), now).await
@@ -1032,16 +1131,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
         {
             Ok(p) => p,
-            Err(e) => return Ok(self.clamav_could_not_run(&sites, "list", &e, now).await),
+            Err(e) => {
+                return Ok(self
+                    .clamav_could_not_run(&sites, "list", &e, now, &settings)
+                    .await)
+            }
         };
         let listings = plan.sites.clone();
         let sweep = match self.adapters.clamav_run(plan).await {
             Ok(s) => s,
-            Err(e) => return Ok(self.clamav_could_not_run(&sites, "start", &e, now).await),
+            Err(e) => {
+                return Ok(self
+                    .clamav_could_not_run(&sites, "start", &e, now, &settings)
+                    .await)
+            }
         };
         // Passes take hours, so the clock has to keep up with them.
         let finished = now + i64::try_from(started.elapsed().as_secs()).unwrap_or(0);
         self.set_clamav_state("finished", finished).await;
+        self.set_clamav_last_pass(&ClamLastPass {
+            started: now,
+            finished,
+            end: pass_end_word(sweep.end).into(),
+            sites: u32::try_from(sites.len()).unwrap_or(u32::MAX),
+            files: listings.iter().map(|l| l.files).sum(),
+            hits: u32::try_from(sweep.hits.len()).unwrap_or(u32::MAX),
+        })
+        .await;
         match sweep.end {
             integrity::SweepEnd::OutOfMemory => {
                 let until = finished + integrity::OOM_BACKOFF_SECS;
@@ -1057,7 +1173,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
             // The unit name was taken, or nothing started: tomorrow, not next week.
-            integrity::SweepEnd::Failed => self.clamav_retry_tomorrow(finished).await,
+            integrity::SweepEnd::Failed => self.clamav_retry_tomorrow(finished, &settings).await,
             _ => {}
         }
         let end_note = clamav_end_note(sweep.end, finished + integrity::OOM_BACKOFF_SECS);
@@ -1110,6 +1226,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         stage: &str,
         e: &AdapterError,
         now: i64,
+        settings: &AntivirusSettings,
     ) -> i64 {
         let mut why = e.to_string();
         clip(&mut why, CLAMAV_LOG_BYTES);
@@ -1119,14 +1236,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await;
         }
         self.set_clamav_state("finished", now).await;
-        self.clamav_retry_tomorrow(now).await;
+        self.set_clamav_last_pass(&ClamLastPass {
+            started: now,
+            finished: now,
+            end: hyperion_types::antivirus::pass_end::FAILED.into(),
+            sites: u32::try_from(sites.len()).unwrap_or(u32::MAX),
+            ..Default::default()
+        })
+        .await;
+        self.clamav_retry_tomorrow(now, settings).await;
         0
     }
 
-    /// Put the weekly stamp where the next pass is due after the next night
-    /// begins rather than a week on.
-    async fn clamav_retry_tomorrow(&self, now: i64) {
-        let stamp = now + CLAMAV_RETRY_SECS - CLAMAV_MIN_AGE_SECS;
+    /// Put the pass's stamp where the next one is due after the next night
+    /// begins rather than a whole interval on. Never ahead of the clock: a stamp
+    /// from the future reads as a clock that moved back, and is due at once.
+    async fn clamav_retry_tomorrow(&self, now: i64, settings: &AntivirusSettings) {
+        let min_age = settings.min_age_secs();
+        let stamp = now + CLAMAV_RETRY_SECS.min(min_age) - min_age;
         if let Err(e) =
             hyperion_state::node_kv::set(&self.pool, CLAMAV_LAST_KV, &stamp.to_string(), now).await
         {
@@ -1164,7 +1291,173 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         self.set_clamav_state("finished", now).await;
-        self.clamav_retry_tomorrow(now).await;
+        self.set_clamav_last_pass(&ClamLastPass {
+            // The pass's own stamp, written before anything ran.
+            started: self.node_stamp(CLAMAV_LAST_KV).await.unwrap_or(0),
+            finished: now,
+            end: hyperion_types::antivirus::pass_end::INTERRUPTED.into(),
+            ..Default::default()
+        })
+        .await;
+        self.clamav_retry_tomorrow(now, &self.antivirus_settings())
+            .await;
+    }
+
+    async fn clamav_last_pass(&self) -> ClamLastPass {
+        hyperion_state::node_kv::get(&self.pool, CLAMAV_LAST_PASS_KV)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default()
+    }
+
+    async fn set_clamav_last_pass(&self, pass: &ClamLastPass) {
+        let Ok(json) = serde_json::to_string(pass) else {
+            return;
+        };
+        if let Err(e) =
+            hyperion_state::node_kv::set(&self.pool, CLAMAV_LAST_PASS_KV, &json, pass.finished)
+                .await
+        {
+            tracing::warn!(error = %e, "clamav: last pass not written");
+        }
+    }
+
+    /// Why a pass did not start, for the overview; `None` takes it away.
+    async fn set_clamav_held(&self, why: Option<&str>, now: i64) {
+        let done = match why {
+            Some(why) => {
+                let held = ClamHeld {
+                    at: now,
+                    why: why.to_string(),
+                };
+                let Ok(json) = serde_json::to_string(&held) else {
+                    return;
+                };
+                hyperion_state::node_kv::set(&self.pool, CLAMAV_HELD_KV, &json, now).await
+            }
+            None => hyperion_state::node_kv::delete(&self.pool, CLAMAV_HELD_KV).await,
+        };
+        if let Err(e) = done {
+            tracing::warn!(error = %e, "clamav: hold reason not written");
+        }
+    }
+
+    /// Ask for a pass now, whatever the schedule says. `false` when one is
+    /// already running: there is one `clamscan` to a node.
+    pub async fn antivirus_run_now(&self) -> Result<bool, RpcError> {
+        if !self.adapters.clamav_facts().await.installed {
+            return Err(RpcError::Internal_with(
+                "ClamAV is not installed on this node".into(),
+            ));
+        }
+        let state = hyperion_state::node_kv::get(&self.pool, CLAMAV_STATE_KV)
+            .await
+            .ok()
+            .flatten();
+        if state.is_some_and(|s| s.starts_with("started ")) {
+            return Ok(false);
+        }
+        let now = now_secs();
+        hyperion_state::node_kv::set(&self.pool, CLAMAV_REQUEST_KV, &now.to_string(), now)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("antivirus request: {e}")))?;
+        self.site_scan.clamav_wake.notify_one();
+        Ok(true)
+    }
+
+    /// Returns when someone has asked for a pass since the last call returned.
+    pub async fn antivirus_wait_for_request(&self) {
+        self.site_scan.clamav_wake.notified().await;
+    }
+
+    /// What the cluster's antivirus page needs from this node.
+    pub async fn antivirus_overview(&self) -> Result<AntivirusOverview, RpcError> {
+        self.antivirus_overview_at(&chrono::Local, now_secs()).await
+    }
+
+    pub(super) async fn antivirus_overview_at<Tz: chrono::TimeZone>(
+        &self,
+        tz: &Tz,
+        now: i64,
+    ) -> Result<AntivirusOverview, RpcError> {
+        let facts = self.adapters.clamav_facts().await;
+        let settings = self.antivirus_settings();
+        let kv = |key: &'static str| async move {
+            hyperion_state::node_kv::get(&self.pool, key)
+                .await
+                .ok()
+                .flatten()
+        };
+        let running_since = kv(CLAMAV_STATE_KV)
+            .await
+            .and_then(|s| s.strip_prefix("started ")?.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let last = self.clamav_last_pass().await;
+        let held: Option<ClamHeld> = kv(CLAMAV_HELD_KV)
+            .await
+            .and_then(|j| serde_json::from_str(&j).ok());
+        let stamp = self.node_stamp(CLAMAV_LAST_KV).await.unwrap_or(0);
+        let backoff_until = self.node_stamp(CLAMAV_BACKOFF_KV).await.unwrap_or(0);
+        let mut next_due_at = if facts.installed {
+            clamav_next_due(stamp, now, tz, &settings)
+        } else {
+            0
+        };
+        if next_due_at > 0 && backoff_until > next_due_at {
+            next_due_at = clamav_next_due(stamp, backoff_until, tz, &settings);
+        }
+
+        let mut sites = Vec::new();
+        for d in self.clamav_sites().await? {
+            let rec = self.integrity_record(d.id.as_str()).await.ok().flatten();
+            let mut site = AntivirusSite {
+                hosting_id: d.id.as_str().to_string(),
+                domain: d.domain.clone(),
+                ..Default::default()
+            };
+            if let Some(rec) = rec {
+                site.covered_at = rec.clamav_at;
+                site.note = rec.clamav_error;
+                site.hits_total = u32::try_from(rec.result.malware.len()).unwrap_or(u32::MAX);
+                site.hits = rec.result.malware;
+                site.hits.truncate(hyperion_types::antivirus::MAX_HITS_SENT);
+                site.file_findings = u32::try_from(rec.result.findings.len()).unwrap_or(u32::MAX);
+                site.file_review = u32::try_from(rec.result.review.len()).unwrap_or(u32::MAX);
+            }
+            sites.push(site);
+        }
+        // Detections first, then the sites no pass has covered, then by name.
+        sites.sort_by(|a, b| {
+            b.hits_total
+                .cmp(&a.hits_total)
+                .then((a.covered_at != 0).cmp(&(b.covered_at != 0)))
+                .then(a.domain.cmp(&b.domain))
+        });
+        Ok(AntivirusOverview {
+            installed: facts.installed,
+            db_present: facts.db_present,
+            mem_available: facts.mem_available,
+            settings,
+            running_since,
+            last_started: last.started,
+            last_finished: last.finished,
+            last_end: last.end,
+            last_sites: last.sites,
+            last_files: last.files,
+            last_hits: last.hits,
+            held_at: held.as_ref().map_or(0, |h| h.at),
+            held: held.map(|h| h.why),
+            backoff_until: if backoff_until > now {
+                backoff_until
+            } else {
+                0
+            },
+            next_due_at,
+            run_requested: self.node_stamp(CLAMAV_REQUEST_KV).await.unwrap_or(0) > 0,
+            sites,
+        })
     }
 
     /// Tell the cards when ClamAV appears, goes, or finishes downloading its

@@ -375,9 +375,7 @@ fn installed_clamav_without_a_pass_is_not_called_missing() {
         clamav_installed: true,
         plugins_checked: 3,
         plugins_total: 3,
-        error: Some(
-            "ClamAV skipped this week's pass: the node has less than 2 GiB of memory free".into(),
-        ),
+        error: Some("ClamAV skipped its pass: the node has less than 2 GiB of memory free".into()),
         scanned_at: 1_700_000_000,
         ..Default::default()
     });
@@ -389,21 +387,19 @@ fn installed_clamav_without_a_pass_is_not_called_missing() {
     assert!(!html.contains("Clean —"));
 }
 
-/// ClamAV is the node's weekly pass, not part of "Scan now", so the card says
-/// when it last looked, and a skipped week doesn't take that away.
+/// ClamAV is the node's scheduled pass, not part of "Scan now", so the card says
+/// when it last looked, and a skipped pass doesn't take that away.
 #[test]
 fn the_card_says_when_clamav_last_ran() {
     let html = render_integrity(hyperion_types::WpIntegrityScanResult {
         clamav_available: true,
         clamav_installed: true,
         clamav_at: 1_700_000_000,
-        error: Some(
-            "ClamAV skipped this week's pass: the node has less than 2 GiB of memory free".into(),
-        ),
+        error: Some("ClamAV skipped its pass: the node has less than 2 GiB of memory free".into()),
         ..native_scan()
     });
     assert!(html.contains("ClamAV scanned the site's files"));
-    assert!(html.contains("a weekly pass"));
+    assert!(html.contains("the node's scheduled pass"));
     assert!(html.contains("less than 2 GiB of memory free"));
     assert!(
         html.contains(r#"data-verdict="clean""#),
@@ -414,7 +410,15 @@ fn the_card_says_when_clamav_last_ran() {
         clamav_at: 0,
         ..native_scan()
     });
-    assert!(never.contains("a weekly pass"));
+    assert!(never.contains("the node's scheduled pass"));
+    // Installed, never covered: the card says what to wait for and where to look.
+    let waiting = render_integrity(hyperion_types::WpIntegrityScanResult {
+        clamav_installed: true,
+        ..native_scan()
+    });
+    assert!(waiting.contains("none has covered this site yet"));
+    assert!(waiting.contains(r#"href="/antivirus#passes""#));
+    assert!(!waiting.contains("2 GiB"), "the threshold is a setting now");
 }
 
 /// Both signals ran and both came back empty — the only state allowed

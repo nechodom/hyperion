@@ -71,6 +71,27 @@ node_label   = "node5.example.com"
 # enrollment.
 state_file = "/etc/hyperion/node-id.json"
 
+[antivirus]
+# When this node's ClamAV pass runs: one clamscan over every scanned site.
+# Only does anything where ClamAV is installed. Every value below is the
+# default; the whole section is optional. On a cluster the master's values
+# are copied to every node (Settings → Antivirus), and each node reads the
+# section when it checks whether a pass is due, so no restart is needed.
+
+# false = nothing starts by itself; "Run now" on the Antivirus page still works.
+enabled = true
+
+# A pass this many days after the last one began (1..=30).
+every_days = 7
+
+# The pass may start between these local hours (0..=23, end exclusive). An end
+# before the start runs past midnight; the same hour twice means any hour.
+window_start_hour = 2
+window_end_hour = 6
+
+# The pass starts only with this much memory available, in MiB (1024..=65536).
+min_free_memory_mb = 2048
+
 [fail2ban]
 # Native brute-force scanner. Runs every scheduler tick, scans logs +
 # journals for auth-failure floods, and auto-bans offenders via nftables.

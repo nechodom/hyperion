@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod acme_dns;
+pub mod antivirus;
 pub mod care_check;
 pub mod cert;
 pub mod clock;

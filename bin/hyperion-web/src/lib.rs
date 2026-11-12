@@ -522,6 +522,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/settings/letters", get(handlers::settings::get_letters))
         .route("/settings/access", get(handlers::settings::get_access))
         .route("/settings/bans", get(handlers::settings::get_bans))
+        .route(
+            "/settings/antivirus",
+            get(handlers::settings::get_antivirus),
+        )
         .route("/settings/cluster", get(handlers::settings::get_cluster))
         .route(
             "/settings/cluster/sync",
@@ -827,6 +831,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/protection", get(handlers::protection::get_protection))
         .route("/bans", get(handlers::bans::get_bans))
         .route("/bans/unban", post(handlers::bans::post_unban))
+        .route("/antivirus", get(handlers::antivirus::get_antivirus))
+        .route("/antivirus/run", post(handlers::antivirus::post_run))
         .route("/certs/renew-all", post(handlers::certs::post_renew_all))
         .route("/certs/issue-all", post(handlers::certs::post_issue_all))
         .route("/firewall", get(handlers::firewall::get_firewall))
