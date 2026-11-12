@@ -307,6 +307,20 @@ pub fn print_pretty(resp: &Response) {
             println!("  installed   = {}", v.installed);
             println!("  is_wordpress= {}", v.is_wordpress);
         }
+        Response::FormGuardView(v) | Response::FormGuardSet(v) => {
+            println!("✓ contact form guard");
+            println!("  enabled          = {}", v.enabled);
+            println!("  installed        = {}", v.installed);
+            println!("  is_wordpress     = {}", v.is_wordpress);
+            println!("  has_elementor_pro= {}", v.has_elementor_pro);
+            match v.refused_7d {
+                Some(n) => println!("  refused_7d       = {n}"),
+                None => println!("  refused_7d       = unknown (log not readable)"),
+            }
+            for h in &v.recent {
+                println!("  {}  {:<12} {}  {}  {}", h.at, h.rule, h.form, h.email, h.ip);
+            }
+        }
         Response::HostingRotateWpDebugLog => println!("✓ debug.log rotated"),
         Response::NotificationsFeed(f) => {
             println!("unread total: {}", f.unread_total);

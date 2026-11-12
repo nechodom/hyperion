@@ -222,6 +222,14 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::RegGuardSet(v),
             Err(e) => Response::Error(e),
         },
+        Request::FormGuardView { sel } => match api.formguard_view(sel).await {
+            Ok(v) => Response::FormGuardView(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::FormGuardSet { sel, enabled } => match api.formguard_set(sel, enabled).await {
+            Ok(v) => Response::FormGuardSet(v),
+            Err(e) => Response::Error(e),
+        },
         Request::HostingRotateRedisPassword { sel } => {
             match api.hosting_rotate_redis_password(sel).await {
                 Ok(v) => Response::HostingRotateRedisPassword(v),
@@ -2605,6 +2613,19 @@ mod tests {
             _: bool,
         ) -> Result<hyperion_types::regguard::RegGuardView, RpcError> {
             Ok(hyperion_types::regguard::RegGuardView::default())
+        }
+        async fn formguard_view(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::formguard::FormGuardView, RpcError> {
+            Ok(hyperion_types::formguard::FormGuardView::default())
+        }
+        async fn formguard_set(
+            &self,
+            _: HostingSelector,
+            _: bool,
+        ) -> Result<hyperion_types::formguard::FormGuardView, RpcError> {
+            Ok(hyperion_types::formguard::FormGuardView::default())
         }
         async fn hosting_rotate_redis_password(
             &self,

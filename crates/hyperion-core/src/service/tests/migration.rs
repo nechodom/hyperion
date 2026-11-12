@@ -278,6 +278,7 @@ fn carried_kv_allow_list() {
         "wp.system_cron",
         "wp_auto_update",
         "regguard_enabled",
+        "formguard_enabled",
         "gitsync_repo",
         "scan_trust",
     ] {

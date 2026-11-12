@@ -283,6 +283,21 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.regguard_set(sel, enabled).await
     }
 
+    async fn formguard_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::formguard::FormGuardView, RpcError> {
+        self.svc.formguard_view(sel).await
+    }
+
+    async fn formguard_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<hyperion_types::formguard::FormGuardView, RpcError> {
+        self.svc.formguard_set(sel, enabled).await
+    }
+
     async fn hosting_rotate_redis_password(
         &self,
         sel: HostingSelector,

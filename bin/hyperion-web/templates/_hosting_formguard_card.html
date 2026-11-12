@@ -1,0 +1,59 @@
+{# Contact form guard — one row of the WordPress tab's Checks group, lazily
+   loaded, swaps itself on toggle. Turning it on drops a module of the
+   Hyperion must-use plugin on the OWNING node that refuses Elementor Pro form
+   submissions nobody can act on: no message, the same one twice, too many
+   from one sender. What it refused is listed here, because a guard that
+   quietly eats a real enquiry is worse than the junk. #}
+<div class="chk-row" id="formguard-panel">
+  <div class="chk-head">
+    {% if !view.is_wordpress %}<span class="chk-dot"></span>
+    {% else if view.enabled && (!view.installed || !view.has_elementor_pro || view.refused_7d.is_none()) %}<span class="chk-dot warn"></span>
+    {% else if view.enabled %}<span class="chk-dot ok"></span>
+    {% else %}<span class="chk-dot"></span>{% endif %}
+    <h3 class="chk-name">Contact form guard</h3>
+    <span class="chk-sum">
+      {% if !view.is_wordpress %}Not a WordPress site — nothing to guard yet
+      {% else if view.enabled && !view.installed %}On, but the plugin file is missing — re-installs on the next toggle
+      {% else if view.enabled && !view.has_elementor_pro %}On, but this site has no Elementor Pro — other form plugins are not covered
+      {% else if view.enabled %}
+        {{ self.refused_summary() }}
+      {% else if !view.has_elementor_pro %}Off — covers Elementor Pro forms, which this site does not have
+      {% else %}Off — empty and repeated form submissions are not filtered{% endif %}
+    </span>
+    {% if view.is_wordpress %}
+    <div class="chk-actions">
+      <form hx-post="/hostings/formguard" hx-target="#formguard-panel" hx-swap="outerHTML" hx-trigger="change">
+        <input type="hidden" name="_csrf" value="{{ csrf_toggle }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <label class="chk-switch" title="Elementor Pro forms only. Refuses a submission with no message, the same submission sent again within 10 minutes, and more than 3 an hour from one e-mail address or 5 from one IP address. The visitor is told why and can correct it. It does not stop bots — a honeypot or reCAPTCHA on the form does that.">
+          <input type="checkbox" class="switch" name="enabled" value="on" aria-label="Refuse empty and repeated contact form submissions"{% if view.enabled %} checked{% endif %}{% if !can_manage %} disabled{% endif %}>
+        </label>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+  {% if error.is_some() || !view.recent.is_empty() %}
+  <div class="chk-body">
+    {% if let Some(e) = error %}<p class="chk-note tone-warn">{{ e }}</p>{% endif %}
+    {% if !view.recent.is_empty() %}
+    <details class="chk-fold">
+      <summary>Last {{ view.recent.len() }} refused</summary>
+      <ul class="chk-list">
+        {% for h in view.recent %}
+        <li>
+          <span class="chk-dot"></span>
+          <strong>{{ Self::rule_label(h.rule) }}</strong>
+          <span class="chk-detail">{{ Self::when(h.at) }}{% if !h.form.is_empty() %} · {{ h.form }}{% endif %}{% if !h.email.is_empty() %} · {{ h.email }}{% endif %}{% if !h.ip.is_empty() %} · {{ h.ip }}{% endif %}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      <p class="chk-note">
+        Each of these visitors was told why and could send again. If a real
+        enquiry shows up here, switch the guard off and tell us which rule
+        caught it.
+      </p>
+    </details>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>

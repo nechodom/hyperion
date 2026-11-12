@@ -22,6 +22,7 @@ pub mod db;
 pub mod dkim;
 pub mod dns;
 pub mod docker;
+pub mod formguard;
 pub mod fpm_own;
 pub mod gitsync;
 pub mod hosting;

@@ -1735,6 +1735,11 @@
        hx-trigger="intersect once" hx-swap="outerHTML">
     <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Sign-up spam guard</h3><span class="chk-sum"><span class="spinner-inline"></span> Reading…</span></div>
   </div>
+  <div class="chk-row" id="formguard-panel"
+       hx-get="/hostings/{{ detail.id.as_str() }}/formguard-panel"
+       hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Contact form guard</h3><span class="chk-sum"><span class="spinner-inline"></span> Reading…</span></div>
+  </div>
 </div>
 
 {# Plugin manager — the server populates wp_plugins by shelling out to

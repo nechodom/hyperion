@@ -1012,6 +1012,9 @@ pub(super) async fn nft_unban(ip: &str) {
     .await;
 }
 pub(super) const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
+
+/// `hosting_kv` key: "1" while the contact form guard is switched on.
+pub(super) const FORMGUARD_KV_KEY: &str = "formguard_enabled";
 /// Per-hosting WAF auto-ban switch (`hosting_kv`). Absent ⇒ on; "off" opts
 /// the site out. Hits are still recorded either way.
 pub(super) const WAF_AUTOBAN_KV_KEY: &str = "waf_autoban_enabled";
