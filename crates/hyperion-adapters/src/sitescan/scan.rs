@@ -892,6 +892,19 @@ impl<'a> Scan<'a> {
             ..Baseline::default()
         });
         baseline.trusted.clear();
+        // A finished scan that recorded nothing saw a site with nothing in it
+        // yet: created a minute ago, its owner still to upload. It is not the
+        // scan to measure "new" against, or everything they upload is a change
+        // to review. The first scan is the one with something to remember, and
+        // watching starts then. The rules read every file either way.
+        if baseline.first_done
+            && baseline.entries.is_empty()
+            && baseline.verified.is_empty()
+            && baseline.churn.is_empty()
+        {
+            baseline.first_done = false;
+            baseline.since = input.now;
+        }
         let first = !baseline.first_done;
         let rules_bumped = baseline.rule_pack < RULE_PACK_VERSION;
         if rules_bumped {
@@ -2285,6 +2298,49 @@ mod tests {
         let root = base.join("htdocs");
         fs::create_dir(&root).expect("mkdir");
         (t, base, root)
+    }
+
+    /// A site is active the moment it is created and is scanned at the next
+    /// tick, before its owner has uploaded anything. That scan has nothing to
+    /// remember, so it is not the first scan: the first file uploaded would
+    /// otherwise be "new since the first scan" on a site that never had one.
+    #[test]
+    fn a_scan_of_an_empty_site_is_not_the_first_scan() {
+        let (_t, base, root) = tree();
+        let mut inp = input(&base, &root);
+        let out = scan_with_limits(&inp, &|| false, &LIMITS).expect("scan");
+        assert!(out.review.is_empty());
+        assert_eq!(out.coverage.files_watched, 0);
+
+        // The owner's first upload: plain code no rule hits.
+        write(&root, "send.php", b"<?php\nmail($to, $subject, $body);\n");
+        inp.now = 500;
+        let out = scan_with_limits(&inp, &|| false, &LIMITS).expect("scan");
+        assert!(out.review.is_empty(), "{:?}", out.review);
+        assert!(out.findings.is_empty(), "{:?}", out.findings);
+        assert_eq!(out.coverage.files_watched, 1);
+        // Watching starts with the first file there was to watch.
+        assert_eq!(out.coverage.watching_since, 500);
+
+        // From here on the site has a first scan, and a new file is news.
+        write(&root, "later.php", b"<?php\necho 'hi';\n");
+        inp.now = 900;
+        let out = scan_with_limits(&inp, &|| false, &LIMITS).expect("scan");
+        let names: Vec<_> = out.review.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(names, ["later.php"]);
+        assert_eq!(out.coverage.watching_since, 500);
+    }
+
+    /// Nothing is blessed blind: the rules read the first upload like any file.
+    #[test]
+    fn a_first_upload_to_an_empty_site_still_meets_the_rules() {
+        let (_t, base, root) = tree();
+        let inp = input(&base, &root);
+        scan_with_limits(&inp, &|| false, &LIMITS).expect("scan");
+        write(&root, "x.php", b"<?php eval(base64_decode($_POST['x']));\n");
+        let out = scan_with_limits(&inp, &|| false, &LIMITS).expect("scan");
+        assert_eq!(out.findings.len(), 1, "{:?}", out.findings);
+        assert_eq!(out.coverage.files_watched, 0);
     }
 
     /// Each save writes the whole baseline, so a fixed interval costs the square of

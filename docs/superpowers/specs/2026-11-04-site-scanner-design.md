@@ -166,6 +166,11 @@ File types: `.php .phtml .phar .php3-8 .pht .inc .js .mjs .htaccess .user.ini`.
 - First scan: the baseline is written and Layer C runs over all of it, so nothing
   is blessed blind. The card says "watching since <date>; earlier changes can't
   be proven".
+- A scan that finds nothing to record is not the first scan. A site is active
+  from `create` and scanned at the next tick, before its owner has uploaded
+  anything; measured against that, every upload is a change to review. The
+  first scan is the first one with something to remember, and "watching since"
+  is its date. Layer C reads those files like any others.
 - New or changed file with a rule hit: **finding**.
 - New or changed file with no rule hit: **change to review**, a separate, lower
   bucket. It stays until someone trusts it or it changes again.
