@@ -55,6 +55,7 @@ pub(crate) fn read_backup_remote_section(
     v.password_set = !s("password").is_empty();
     v.base_path = s("base_path");
     v.keep_latest = read_ftp_keep_latest(cfg_path) as i64;
+    v.host_key_sha256 = read_ftp_host_key(cfg_path);
     v
 }
 
@@ -313,6 +314,23 @@ pub(super) fn parse_agent_section_fields(
             | ("backup_remote", "password")
             | ("backup_remote", "base_path") => crate::config_persist::FieldValue::Str(v.clone()),
             ("backup_remote", "port") => crate::config_persist::FieldValue::Int(parse_int(v)?),
+            // The SFTP server's pinned host key. Empty clears the pin (the next
+            // Test pins whatever the server presents then). Anything else must
+            // be a SHA-256 in base64 — it goes into a curl config verbatim.
+            ("backup_remote", "host_key_sha256") => {
+                if v.trim().is_empty() {
+                    crate::config_persist::FieldValue::Str(String::new())
+                } else {
+                    let key =
+                        hyperion_adapters::backup::normalize_host_key(v).ok_or_else(|| {
+                            bad(format!(
+                                "host_key_sha256 must be a SHA-256 fingerprint in base64 \
+                             (SHA256:… as ssh-keygen -l prints it), got {v:?}"
+                            ))
+                        })?;
+                    crate::config_persist::FieldValue::Str(key)
+                }
+            }
             // 0 = off: the FTP target keeps everything, as it always has.
             ("backup_remote", "keep_latest") => {
                 let n = parse_int(v)?;

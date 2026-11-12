@@ -140,7 +140,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .ok_or_else(|| RpcError::Validation {
                 message: "agent_config_path not wired — UI editing disabled".into(),
             })?;
-        let parsed = parse_agent_section_fields(&section, &fields)?;
+        let mut parsed = parse_agent_section_fields(&section, &fields)?;
+        if section == "backup_remote" {
+            if let Some(clear) =
+                host_key_pin_to_clear(&read_backup_remote_section(Some(path.as_path())), &fields)
+            {
+                parsed.push(clear);
+            }
+        }
         // Convert to the &[(&str, FieldValue)] shape the persist module
         // wants. Done in two steps so the &str references live long
         // enough for the slice.
@@ -235,4 +242,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         });
         Ok(())
     }
+}
+
+/// A pinned SFTP host key belongs to one server. A save that points the
+/// target somewhere else (scheme, host or port) drops it, so the new server's
+/// key is pinned by the check that follows the save — instead of the new
+/// server being refused as "the key changed". A save that names the key
+/// itself (the "trust the new key" action) decides on its own.
+fn host_key_pin_to_clear(
+    current: &hyperion_types::BackupRemoteConfigView,
+    fields: &std::collections::BTreeMap<String, String>,
+) -> Option<(String, crate::config_persist::FieldValue)> {
+    if current.host_key_sha256.is_empty() || fields.contains_key("host_key_sha256") {
+        return None;
+    }
+    let differs = |k: &str, cur: &str| fields.get(k).is_some_and(|v| v.trim() != cur);
+    let moved = differs("scheme", &current.scheme)
+        || differs("host", &current.host)
+        || differs("port", &current.port.to_string());
+    moved.then(|| {
+        (
+            "host_key_sha256".to_string(),
+            crate::config_persist::FieldValue::Str(String::new()),
+        )
+    })
 }

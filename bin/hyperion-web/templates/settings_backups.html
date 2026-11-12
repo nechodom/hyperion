@@ -312,6 +312,19 @@
         <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
       </form>
     </fieldset>
+    {#- SFTP host key: pinned by the first Test that succeeds (a save runs
+        one), sent to curl on every push, and never replaced on its own — a
+        server that presents another key is refused until someone trusts the
+        new one from the Test result. -#}
+    {% if config.backup_remote.scheme == "sftp" %}
+    <p class="text-soft small" style="margin:0.6rem 0 0">
+      {% if config.backup_remote.host_key_sha256.is_empty() %}
+      Server host key: <strong>not pinned yet</strong> — the next successful Test pins the key the server presents, and every node then accepts only that key.
+      {% else %}
+      Server host key: <code style="word-break:break-all">SHA256:{{ config.backup_remote.host_key_sha256 }}</code> (pinned). A server that presents another key is refused. Changing the host or port drops the pin.
+      {% endif %}
+    </p>
+    {% endif %}
     {#- Tests the SAVED target: connect, log in, list the base path. A save
         restarts the agent (~5 s), so after one the result span fires the
         check on its own, late enough for the agent to be back. -#}
