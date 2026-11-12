@@ -5352,6 +5352,12 @@ summary.btn::marker { content: ""; }
   .card-grid.cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .card-grid > .span-2 { grid-column: 1 / -1; }
+/* An inline save error is put in front of the card it is about. In a grid it
+   must not take a cell (that pushed every later card one place on), and the
+   gap already spaces it. */
+.card-grid > .flash { grid-column: 1 / -1; }
+.card-grid > .flash,
+.card-stack > .flash { margin-bottom: 0; }
 
 /* ── Overview: KPI strip + two columns ────────────────────────── */
 .site-kpis {
