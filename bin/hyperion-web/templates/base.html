@@ -253,13 +253,14 @@
 {# ============================================================
    Command palette — Cmd+K / Ctrl+K. Indexed client-side from the
    nav items + a small set of quick actions. For live entity
-   search (hostings, users) we hit /api/search which returns JSON.
+   search (hostings by domain, alias, Linux user, DB or FTP login;
+   users, nodes, profiles, care packages) we hit /api/search.
    ============================================================ #}
 <div class="cmdk-backdrop" id="cmdk" role="dialog" aria-modal="true" aria-label="Command palette">
   <div class="cmdk-panel">
     <div class="cmdk-input-row">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input class="cmdk-input" id="cmdk-input" placeholder="Search pages, hostings, users, or run a command…" autocomplete="off" spellcheck="false">
+      <input class="cmdk-input" id="cmdk-input" placeholder="Search pages, sites, databases, FTP logins, nodes… or run a command" autocomplete="off" spellcheck="false">
       <span class="cmdk-hint">esc</span>
     </div>
     <ul class="cmdk-list" id="cmdk-list" role="listbox"></ul>

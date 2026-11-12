@@ -188,6 +188,11 @@ pub enum Request {
         sel: HostingSelector,
         version: hyperion_types::PhpVersion,
     },
+    /// ⌘K search: every alias, Linux user, database name/user and FTP
+    /// login of every live hosting on this node. Read-only. An agent that
+    /// predates it answers with an error and the panel searches that node
+    /// by domain only.
+    HostingSearchIndex,
     TrashList,
     TrashRestore(HostingSelector),
     TrashPurge(HostingSelector),
@@ -2488,6 +2493,7 @@ pub enum Response {
     /// Echoes the new (or already-current, on no-op) PHP version
     /// so the caller's UI flash can confirm.
     HostingSetPhpVersion(hyperion_types::PhpVersion),
+    HostingSearchIndex(Vec<hyperion_types::HostingSearchTerm>),
     TrashList(Vec<hyperion_types::TrashEntry>),
     TrashRestore,
     TrashPurge,

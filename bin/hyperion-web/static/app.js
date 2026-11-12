@@ -315,8 +315,18 @@ document.addEventListener('click', function (ev) {
       const btn = document.createElement('button');
       btn.className = 'cmdk-item' + (idx === active ? ' active' : '');
       btn.dataset.idx = String(idx);
-      btn.innerHTML = `<span>${escapeHtml(it.label)}</span>` +
-        (it.meta ? `<span class="cmdk-meta">${escapeHtml(it.meta)}</span>` : '');
+      // Built with textContent: labels are domains, DB names and FTP
+      // logins straight from the nodes. (This used to call a global
+      // escapeHtml that #271 removed, so the palette threw on open.)
+      const lbl = document.createElement('span');
+      lbl.textContent = it.label;
+      btn.appendChild(lbl);
+      if (it.meta) {
+        const meta = document.createElement('span');
+        meta.className = 'cmdk-meta';
+        meta.textContent = it.meta;
+        btn.appendChild(meta);
+      }
       btn.addEventListener('click', () => activate(idx));
       btn.addEventListener('mouseenter', () => { active = idx; updateActive(); });
       li.appendChild(btn);
@@ -372,29 +382,42 @@ document.addEventListener('click', function (ev) {
       const j = await r.json();
       const out = [];
       for (const h of (j.hostings || [])) {
-        out.push({ group: 'Hostings', label: h.domain, href: `/hostings/${encodeURIComponent(h.domain)}`, meta: h.state, keys: [h.domain] });
+        // `matched` = found by an alias / Linux user / DB / FTP login, not
+        // the domain: show that name so the hit doesn't look random.
+        const meta = h.matched ? `${h.matched} · ${h.state}` : h.state;
+        out.push({ group: 'Hostings', label: h.domain, href: `/hostings/${encodeURIComponent(h.domain)}`, meta, keys: [h.domain] });
       }
       for (const u of (j.users || [])) {
         out.push({ group: 'Users', label: u.username, href: '/admin/users', meta: u.role, keys: [u.username] });
+      }
+      for (const [kind, group] of [['nodes', 'Nodes'], ['profiles', 'Profiles'], ['packages', 'Care packages']]) {
+        for (const n of (j[kind] || [])) {
+          out.push({ group, label: n.label, href: n.href, meta: n.meta || '', keys: [n.label] });
+        }
       }
       return out;
     } catch (e) {
       return [];
     }
   }
-  input.addEventListener('input', async () => {
+  // Live search asks every node, so wait for a short typing pause instead
+  // of firing one cluster fan-out per keystroke.
+  let liveTimer = null;
+  input.addEventListener('input', () => {
     const q = input.value;
     items = filterStatic(q);
     active = 0;
     render();
-    if (q.trim().length >= 2) {
+    clearTimeout(liveTimer);
+    if (q.trim().length < 2) return;
+    liveTimer = setTimeout(async () => {
       const live = await liveSearch(q);
-      if (input.value === q) {
+      if (input.value === q && live.length) {
         items = [...live, ...filterStatic(q)];
         active = 0;
         render();
       }
-    }
+    }, 150);
   });
   input.addEventListener('keydown', (ev) => {
     if (ev.key === 'ArrowDown') { active = Math.min(active + 1, items.length - 1); updateActive(); ev.preventDefault(); }

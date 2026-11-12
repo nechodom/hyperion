@@ -53,6 +53,12 @@ pub trait AgentApi: Send + Sync + 'static {
         version: hyperion_types::PhpVersion,
     ) -> Result<hyperion_types::PhpVersion, RpcError>;
 
+    /// ⌘K search index: secondary names (alias, Linux user, DB name/user,
+    /// FTP login) of every live hosting on this node.
+    async fn hosting_search_index(
+        &self,
+    ) -> Result<Vec<hyperion_types::HostingSearchTerm>, RpcError>;
+
     /// /trash page: list every trashed hosting on this node with
     /// seconds-remaining until GC.
     async fn trash_list(&self) -> Result<Vec<hyperion_types::TrashEntry>, RpcError>;

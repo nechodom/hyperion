@@ -56,7 +56,8 @@ pub use db::{DbProvision, DbSummary};
 pub use dkim::DkimStatus;
 pub use dns::{CertIssueRequest, DnsCheckResult};
 pub use hosting::{
-    HostingDetail, HostingState, HostingSummary, SftpStatus, VhostOptions, WpExtras, WpRedisConfig,
+    HostingDetail, HostingSearchTerm, HostingState, HostingSummary, SftpStatus, VhostOptions,
+    WpExtras, WpRedisConfig,
 };
 pub use ids::{AgentId, HostingId, SecretId};
 pub use import::{ImportTokenInfo, ImportTokenOp, ImportTokenResult};
