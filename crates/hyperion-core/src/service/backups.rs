@@ -462,6 +462,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             user: &remote.user,
             password: &remote.password,
             remote_dir: &hosting_dir,
+            host_key_sha256: read_ftp_host_key(self.agent_config_path.as_deref()),
         };
         let archive_result =
             hyperion_adapters::backup::upload_remote(&files.archive, &upload).await;
@@ -1169,6 +1170,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 user: &remote.user,
                 password: &remote.password,
                 remote_dir: hosting_dir,
+                host_key_sha256: read_ftp_host_key(self.agent_config_path.as_deref()),
             };
             asked += 1;
             match hyperion_adapters::backup::verify_remote(file, &upload).await {

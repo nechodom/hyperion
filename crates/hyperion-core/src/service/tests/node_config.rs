@@ -199,3 +199,75 @@ async fn node_config_set_writes_php_own_masters() {
     let written = std::fs::read_to_string(&toml).expect("read back");
     assert!(written.contains("own_masters = true"), "{written}");
 }
+
+/// `[backup_remote] host_key_sha256`: stored in one form whatever the
+/// operator pasted, refused when it is not a SHA-256 (it goes into a curl
+/// config), and dropped by a save that points the target at another
+/// server — but never by a save of the same server, and never silently
+/// replaced by a different key.
+#[tokio::test]
+async fn sftp_host_key_pin_parses_reads_back_and_follows_the_server() {
+    const KEY: &str = "Gjo4+v6WY/LpuOKaBteiqta5IP0Iks0DEqd1Q+Io0n0";
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("agent.toml");
+    std::fs::write(
+        &path,
+        "[backup_remote]\nenabled = true\nscheme = \"sftp\"\nhost = \"bk.example\"\nport = 22\n",
+    )
+    .expect("seed");
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool, happy_mocks()).with_agent_config_path(path.clone());
+    let save = |pairs: Vec<(&str, String)>| {
+        let fields: std::collections::BTreeMap<String, String> =
+            pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        s.agent_config_update("backup_remote".to_string(), fields)
+    };
+    let pinned = || read_backup_remote_section(Some(&path)).host_key_sha256;
+
+    // Pasted the way ssh-keygen -l prints it: stored bare.
+    save(vec![("host_key_sha256", format!("SHA256:{KEY}"))])
+        .await
+        .expect("trust");
+    assert_eq!(pinned(), KEY);
+    assert_eq!(read_ftp_host_key(Some(&path)), KEY);
+    for bad in ["MD5:aa:bb", "x\"\ninsecure", &KEY[..40]] {
+        assert!(
+            save(vec![("host_key_sha256", bad.to_string())])
+                .await
+                .is_err(),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(pinned(), KEY, "a refused value leaves the pin alone");
+
+    // The same server re-saved (the whole form posts again): kept.
+    save(vec![
+        ("scheme", "sftp".into()),
+        ("host", "bk.example".into()),
+        ("port", "22".into()),
+        ("user", "bk".into()),
+    ])
+    .await
+    .expect("same server");
+    assert_eq!(pinned(), KEY);
+
+    // Another port, then another host: the pin belonged to the old one.
+    save(vec![("port", "2222".into())]).await.expect("port");
+    assert_eq!(pinned(), "");
+    save(vec![("host_key_sha256", KEY.into())])
+        .await
+        .expect("re-pin");
+    save(vec![("host", "other.example".into())])
+        .await
+        .expect("host");
+    assert_eq!(pinned(), "");
+
+    // A form that names the key decides it, even alongside a move.
+    save(vec![
+        ("host", "third.example".into()),
+        ("host_key_sha256", KEY.into()),
+    ])
+    .await
+    .expect("explicit");
+    assert_eq!(pinned(), KEY);
+}

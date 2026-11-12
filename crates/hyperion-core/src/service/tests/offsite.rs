@@ -1583,6 +1583,7 @@ async fn orphan_list_and_delete_against_a_real_ftp_server() {
             user: &remote.user,
             password: &remote.password,
             remote_dir: &dir,
+            host_key_sha256: String::new(),
         };
         hyperion_adapters::backup::upload_remote(&f, &up)
             .await

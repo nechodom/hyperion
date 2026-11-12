@@ -30,6 +30,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             user: &remote.user,
             password: &remote.password,
             remote_dir: "",
+            host_key_sha256: read_ftp_host_key(self.agent_config_path.as_deref()),
         })
     }
 
@@ -1351,34 +1352,103 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ok,
             message,
             put_latency_ms: latency,
+            ..Default::default()
         })
     }
 
     /// Connection check for the node's configured FTP/FTPS/SFTP off-site target
     /// (`[backup_remote]`): connect + log in + list the base directory. Lets the
     /// operator confirm the target works without running a whole backup.
+    ///
+    /// For SFTP this is also where the server's host key gets pinned: with no
+    /// key pinned yet, the key curl sees is fetched, the check runs against it,
+    /// and only a check that then succeeds writes it to agent.toml as
+    /// `host_key_sha256` (trust on first use — the save of a target triggers
+    /// this check on its own). A pinned key is never replaced here: a server
+    /// that presents a different one is refused, and the operator has to trust
+    /// the new key explicitly.
     pub async fn backup_remote_probe(&self) -> Result<hyperion_types::BackupTargetProbe, RpcError> {
         let Some(remote) = self.remote_backup.as_ref() else {
             return Ok(hyperion_types::BackupTargetProbe {
                 ok: false,
                 message: "no FTP/FTPS/SFTP off-site target is configured on this node".into(),
-                put_latency_ms: 0,
+                ..Default::default()
             });
         };
-        let upload = hyperion_adapters::backup::RemoteUpload {
+        let mut upload = hyperion_adapters::backup::RemoteUpload {
             scheme: &remote.scheme,
             host: &remote.host,
             port: remote.port,
             user: &remote.user,
             password: &remote.password,
             remote_dir: &remote.base_path,
+            host_key_sha256: read_ftp_host_key(self.agent_config_path.as_deref()),
         };
-        let (ok, message, latency_ms) = hyperion_adapters::backup::probe_remote(&upload).await;
+        let pin_now = remote.scheme == "sftp" && upload.host_key_sha256.is_empty();
+        if pin_now {
+            match hyperion_adapters::backup::fetch_sftp_host_key(&remote.host, remote.port).await {
+                Ok(key) => upload.host_key_sha256 = key,
+                Err(e) => {
+                    return Ok(hyperion_types::BackupTargetProbe {
+                        ok: false,
+                        message: format!("could not read the SFTP server's host key: {e}"),
+                        ..Default::default()
+                    })
+                }
+            }
+        }
+        let p = hyperion_adapters::backup::probe_remote(&upload).await;
+        let mut message = p.message;
+        if p.ok && pin_now {
+            message = match self.pin_ftp_host_key(&upload.host_key_sha256).await {
+                Ok(()) => format!(
+                    "{message}; pinned the server's host key SHA256:{} — a different key \
+                     from now on is refused",
+                    upload.host_key_sha256
+                ),
+                Err(e) => format!(
+                    "{message}, but the server's host key SHA256:{} could not be pinned: {e}",
+                    upload.host_key_sha256
+                ),
+            };
+        }
         Ok(hyperion_types::BackupTargetProbe {
-            ok,
+            ok: p.ok,
             message,
-            put_latency_ms: latency_ms as i64,
+            put_latency_ms: p.latency_ms as i64,
+            host_key_sha256: if remote.scheme == "sftp" && (p.ok || !pin_now) {
+                upload.host_key_sha256.clone()
+            } else {
+                String::new()
+            },
+            presented_host_key: p.presented_host_key.unwrap_or_default(),
         })
+    }
+
+    /// Write `[backup_remote] host_key_sha256` to this node's agent.toml.
+    /// No restart: every remote call reads the pin live.
+    async fn pin_ftp_host_key(&self, key: &str) -> Result<(), String> {
+        let path = self
+            .agent_config_path
+            .as_ref()
+            .ok_or("agent_config_path not wired")?;
+        crate::config_persist::set_many(
+            path,
+            "backup_remote",
+            &[(
+                "host_key_sha256",
+                crate::config_persist::FieldValue::Str(key.to_string()),
+            )],
+        )
+        .map_err(|e| e.to_string())?;
+        self.append_audit(
+            "backup_remote.host_key.pin",
+            None,
+            &serde_json::json!({"sha256": key}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -1685,6 +1755,21 @@ pub(super) fn ftp_archives_beyond_keep<'a>(
         .filter(|n| *n != just_pushed)
         .map(str::to_string)
         .collect()
+}
+
+/// `[backup_remote] host_key_sha256`, read live so a pin made by the Test
+/// button (or a "trust the new key") applies to the next push without an
+/// agent restart. Empty = not pinned; a value that is not a SHA-256 in base64
+/// reads as not pinned too, which curl then refuses loudly rather than
+/// trusting anything.
+pub(crate) fn read_ftp_host_key(cfg_path: Option<&std::path::Path>) -> String {
+    read_agent_doc(cfg_path)
+        .as_ref()
+        .and_then(|d| d.get("backup_remote"))
+        .and_then(|s| s.get("host_key_sha256"))
+        .and_then(|v| v.as_str())
+        .and_then(hyperion_adapters::backup::normalize_host_key)
+        .unwrap_or_default()
 }
 
 /// `[backup_remote] keep_latest`, read live: 0 (or missing, or not a whole
