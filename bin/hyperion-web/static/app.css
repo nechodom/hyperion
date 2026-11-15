@@ -1019,7 +1019,12 @@ details.howto ul { padding-left: 1.2rem; }
 }
 .chk-list li > .chk-dot { width: 6px; height: 6px; align-self: start; margin-top: 0.45em; }
 .chk-list li > strong { font-weight: 500; }
-.chk-list.chk-files li { grid-template-columns: 6px minmax(0, max-content) minmax(0, 1fr); }
+/* File rows: the path and its buttons share the first line, what was found
+   sits under the path at full width. Side by side, a long path left the detail
+   a column a few characters wide. */
+.chk-list.chk-files li { grid-template-columns: 6px minmax(0, 1fr) auto; row-gap: 0.15rem; }
+.chk-list.chk-files li > code { justify-self: start; }
+.chk-list.chk-files li > .chk-detail { grid-column: 2 / -1; grid-row: 2; }
 .chk-list.chk-files code { word-break: break-all; }
 .chk-detail { color: var(--text-soft); word-break: break-word; }
 /* Updates row: a fourth column holds each row's "update now" button. */
@@ -1027,8 +1032,8 @@ details.howto ul { padding-left: 1.2rem; }
 .upd-act { display: flex; justify-content: flex-end; }
 .upd-act form { margin: 0; }
 .upd-act .btn { white-space: nowrap; }
-/* Integrity card: a fourth column holds a file's quarantine and trust buttons. */
-.chk-list.chk-files.file-acts li { grid-template-columns: 6px minmax(0, max-content) minmax(0, 1fr) auto; }
+/* Integrity card: a file's quarantine and trust buttons, at the end of the path's line. */
+.chk-list.chk-files li > .file-act { grid-column: 3; grid-row: 1; }
 .file-act { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
 .file-act form { margin: 0; }
 .file-act .btn { white-space: nowrap; }
@@ -1098,8 +1103,7 @@ details.howto ul { padding-left: 1.2rem; }
   .chk-list li > :nth-child(3) { grid-column: 2; }
   .chk-list.upd-list li { grid-template-columns: 6px minmax(0, 1fr); }
   .chk-list.upd-list li > :nth-child(4) { grid-column: 2; }
-  .chk-list.chk-files.file-acts li { grid-template-columns: 6px minmax(0, 1fr); }
-  .chk-list.chk-files.file-acts li > :nth-child(4) { grid-column: 2; justify-content: flex-start; }
+  .chk-list.chk-files li > .file-act { grid-column: 2; grid-row: 3; justify-content: flex-start; }
   .upd-act { justify-content: flex-start; margin-top: 0.3rem; }
 }
 
