@@ -1,7 +1,10 @@
 //! Contact form guard — a module of the Hyperion must-use plugin that refuses
 //! contact-form submissions nobody can act on: no message, the same message
-//! sent again a moment later, too many from one sender in an hour, a link in
-//! the name field.
+//! sent again a moment later, too many from one sender in an hour, a link or
+//! only digits in the name field, a phone number with too few digits, the name
+//! typed again as the message, keyboard mashing. Each refusal also records
+//! whether the visitor arrived by an ad click, so the panel can say when the
+//! junk is bought traffic.
 //!
 //! It is NOT a bot filter. The incident it was written for had a honeypot and
 //! reCAPTCHA v3 on every form and they held: the junk came from real people on
@@ -28,7 +31,7 @@ use crate::wpplugin::Module;
 use crate::AdapterError;
 
 /// Bumped whenever [`FORMGUARD_TEMPLATE`] changes in a way that matters.
-pub const FORMGUARD_VERSION: u32 = 1;
+pub const FORMGUARD_VERSION: u32 = 2;
 
 /// `<site dir>/logs/<this>`. The module derives the same path from
 /// `WP_CONTENT_DIR`; the two must agree.
@@ -47,8 +50,9 @@ const FORMGUARD_TEMPLATE: &str = r#"<?php
  * Hyperion contact form guard — loaded by mu-plugins/hyperion.php.
  *
  * Refuses Elementor Pro form submissions that carry no message, repeat one
- * just sent, come too often from one sender, or have a link in the name
- * field. Managed by Hyperion — edits are overwritten.
+ * just sent, come too often from one sender, have a link or only digits in
+ * the name field, a phone number that is not one, or a message that is
+ * keyboard mashing. Managed by Hyperion — edits are overwritten.
  * Version: {{VERSION}}
  */
 if (!defined('ABSPATH')) { exit; }
@@ -64,6 +68,10 @@ if (!class_exists('Hyperion_Form_Guard', false)) {
         const DUP_WINDOW     = 600;  // seconds an identical submission is refused for
         const PER_HOUR_IP    = 5;    // accepted submissions per address per hour
         const PER_HOUR_EMAIL = 3;    // accepted submissions per e-mail per hour
+        const PHONE_MIN      = 7;    // digits; fewer is not a number anyone can call
+        const PHONE_MAX      = 20;
+        const MASH_LETTERS   = 12;   // letters before the vowel share is judged
+        const MASH_RUN       = 45;   // letters in one unbroken run nobody types on purpose
 
         public static function boot() {
             // After Elementor's own validators (required fields, reCAPTCHA):
@@ -126,6 +134,53 @@ if (!class_exists('Hyperion_Form_Guard', false)) {
             return (bool) preg_match('~(https?://|www\.[a-z0-9-]|[a-z0-9-]{2,}\.[a-z]{2,}/)~i', $s);
         }
 
+        protected static function is_name($r) {
+            return $r['type'] === 'text'
+                && preg_match('~name|nombre|nom\b|jm[eé]no~iu', $r['id'] . ' ' . $r['title']);
+        }
+
+        /** A `tel` field, or a text field that is labelled as one. */
+        protected static function is_phone($r) {
+            if ($r['type'] === 'tel') { return true; }
+            return $r['type'] === 'text'
+                && preg_match('~phone|tel[eé]fon|\btel\b|m[oó]vil|celular|mobil|handy~iu', $r['id'] . ' ' . $r['title']);
+        }
+
+        protected static function count_of($pattern, $s) {
+            $n = preg_match_all($pattern, $s);
+            return $n === false ? 0 : $n;
+        }
+
+        protected static function flat($s) {
+            $s = preg_replace('~\s+~u', ' ', (string) $s);
+            $s = trim((string) $s);
+            return function_exists('mb_strtolower') ? mb_strtolower($s, 'UTF-8') : strtolower($s);
+        }
+
+        /**
+         * Keyboard mashing: Latin-script text with next to no vowels, or one
+         * unbroken run of letters far longer than a word. Other scripts are
+         * left alone — neither test means anything there.
+         */
+        protected static function is_mash($s) {
+            if (self::has_link($s)) { return false; }
+            if (preg_match('~(?!\p{Latin})\p{L}~u', $s)) { return false; }
+            if (preg_match('~\p{L}{' . self::MASH_RUN . ',}~u', $s)) { return true; }
+            $letters = self::count_of('~\p{L}~u', $s);
+            if ($letters < self::MASH_LETTERS) { return false; }
+            $vowels = self::count_of('~[aeiouyáéíóúýàèìòùâêîôûäëïöüÿãõåæøœěůąęı]~iu', $s);
+            return $vowels * 5 < $letters;
+        }
+
+        /** Which ad network sent this visitor, from the page address Elementor posts. */
+        public static function ad_source() {
+            $ref = isset($_POST['referrer']) && is_string($_POST['referrer']) ? $_POST['referrer'] : '';
+            if ($ref === '') { return ''; }
+            if (preg_match('~[?&](gclid|gbraid|wbraid|gad_source|gad_campaignid)=~i', $ref)) { return 'google'; }
+            if (preg_match('~[?&]msclkid=~i', $ref)) { return 'microsoft'; }
+            return '';
+        }
+
         protected static function email_of($rows) {
             foreach ($rows as $r) {
                 if ($r['type'] === 'email' && $r['value'] !== '') { return strtolower($r['value']); }
@@ -148,19 +203,26 @@ if (!class_exists('Hyperion_Form_Guard', false)) {
          */
         public static function judge_content($rows) {
             foreach ($rows as $r) {
-                if ($r['type'] === 'text'
-                    && preg_match('~name|nombre|nom\b|jm[eé]no~iu', $r['id'] . ' ' . $r['title'])
-                    && self::has_link($r['value'])) {
-                    return 'link_in_name';
+                if ($r['value'] === '') { continue; }
+                if (self::is_name($r)) {
+                    if (self::has_link($r['value'])) { return 'link_in_name'; }
+                    // "17", "92867346": a name has a letter in it.
+                    if (!preg_match('~\p{L}~u', $r['value'])) { return 'bad_name'; }
+                } elseif (self::is_phone($r)) {
+                    // A required phone field and a visitor with no phone to give.
+                    if (preg_match('~^(n\s*/?\s*a|none?|-+)$~i', $r['value'])) { continue; }
+                    $d = self::count_of('~\d~', $r['value']);
+                    if ($d < self::PHONE_MIN || $d > self::PHONE_MAX) { return 'bad_phone'; }
                 }
             }
             // "Says nothing" needs a message field to be empty AND nothing
             // else chosen: a booking form with a date and a party size is a
             // complete request with no message at all.
-            $has_message = false; $longest = 0; $other = false;
+            $has_message = false; $longest = 0; $other = false; $said = '';
             foreach ($rows as $r) {
                 if ($r['type'] === 'textarea') {
                     $has_message = true;
+                    if (self::len($r['value']) >= $longest) { $said = $r['value']; }
                     $longest = max($longest, self::len($r['value']));
                 } elseif (in_array($r['type'], array('select', 'radio', 'checkbox', 'date',
                                                      'time', 'number', 'upload'), true)
@@ -170,6 +232,17 @@ if (!class_exists('Hyperion_Form_Guard', false)) {
             }
             if ($has_message && !$other && $longest < self::MIN_MESSAGE) {
                 return $longest === 0 ? 'empty' : 'short';
+            }
+            if ($has_message && !$other) {
+                // The name or the phone typed again where the message goes.
+                $flat = self::flat($said);
+                foreach ($rows as $r) {
+                    if ($r['type'] !== 'textarea' && $r['type'] !== 'email'
+                        && $r['value'] !== '' && self::flat($r['value']) === $flat) {
+                        return 'echo';
+                    }
+                }
+                if (self::is_mash($said)) { return 'mash'; }
             }
             return '';
         }
@@ -235,16 +308,33 @@ if (!class_exists('Hyperion_Form_Guard', false)) {
                     'es' => 'Escriba su nombre sin una dirección web.',
                     'cs' => 'Zadejte prosím jméno bez webové adresy.',
                 ),
+                'bad_name' => array(
+                    'en' => 'Please enter your name.',
+                    'es' => 'Por favor, escriba su nombre.',
+                    'cs' => 'Zadejte prosím své jméno.',
+                ),
+                'bad_phone' => array(
+                    'en' => 'Please enter a full phone number, or leave this field empty.',
+                    'es' => 'Escriba un número de teléfono completo o deje este campo vacío.',
+                    'cs' => 'Zadejte prosím celé telefonní číslo, nebo pole nechte prázdné.',
+                ),
             );
-            $k = $rule === 'short' ? 'empty' : $rule;
+            $k = in_array($rule, array('short', 'echo', 'mash'), true) ? 'empty' : $rule;
             if (!isset($t[$k])) { return ''; }
             return isset($t[$k][$lang]) ? $t[$k][$lang] : $t[$k]['en'];
         }
 
         /** The field the message is shown under. */
         protected static function target_field($rule, $rows) {
-            $want = $rule === 'link_in_name' ? 'text' : 'textarea';
-            foreach ($rows as $r) { if ($r['type'] === $want) { return $r['id']; } }
+            foreach ($rows as $r) {
+                if ($rule === 'bad_phone') {
+                    if (self::is_phone($r)) { return $r['id']; }
+                } elseif ($rule === 'link_in_name' || $rule === 'bad_name') {
+                    if (self::is_name($r)) { return $r['id']; }
+                } elseif ($r['type'] === 'textarea') {
+                    return $r['id'];
+                }
+            }
             return isset($rows[0]) ? $rows[0]['id'] : '';
         }
 
@@ -261,7 +351,7 @@ if (!class_exists('Hyperion_Form_Guard', false)) {
             $field = self::target_field($rule, $rows);
             if ($field === '') { return; }
             $ajax->add_error($field, self::message($rule));
-            self::log($rule, self::form_name($record), self::email_of($rows), self::ip());
+            self::log($rule, self::form_name($record), self::email_of($rows), self::ip(), self::ad_source());
         }
 
         public static function accepted($record, $ajax = null) {
@@ -281,12 +371,12 @@ if (!class_exists('Hyperion_Form_Guard', false)) {
         }
 
         /** One line per refusal, capped, never throws. */
-        protected static function log($rule, $form, $email, $ip) {
+        protected static function log($rule, $form, $email, $ip, $ad = '') {
             $path = self::log_path();
             if ($path === '' || !is_dir(dirname($path))) { return; }
             $flat = function ($s) { return substr(str_replace(array("\n", "\r", "\t"), ' ', (string) $s), 0, 200); };
             $line = gmdate('Y-m-d\TH:i:s') . "\t" . $flat($rule) . "\t" . $flat($form) . "\t"
-                  . $flat($email) . "\t" . $flat($ip) . "\n";
+                  . $flat($email) . "\t" . $flat($ip) . "\t" . $flat($ad) . "\n";
             // Keep the newest half, as the mail log does.
             $size = @filesize($path);
             if ($size !== false && $size > 131072) {
@@ -379,7 +469,15 @@ fn parse_line(line: &str) -> Option<FormGuardHit> {
     }
     if !matches!(
         rule,
-        "empty" | "short" | "duplicate" | "rate" | "link_in_name"
+        "empty"
+            | "short"
+            | "duplicate"
+            | "rate"
+            | "link_in_name"
+            | "bad_name"
+            | "bad_phone"
+            | "echo"
+            | "mash"
     ) {
         return None;
     }
@@ -389,6 +487,12 @@ fn parse_line(line: &str) -> Option<FormGuardHit> {
         form: clip(f.next().unwrap_or("")),
         email: clip(f.next().unwrap_or("")),
         ip: clip(f.next().unwrap_or("")),
+        // Absent in lines written by version 1. Only the names the module
+        // writes are passed on.
+        ad: match f.next().unwrap_or("") {
+            a @ ("google" | "microsoft") => a.to_string(),
+            _ => String::new(),
+        },
     })
 }
 
@@ -439,6 +543,15 @@ pub async fn read_refusals(root_dir: &str) -> RefusalLog {
         lines.next();
     }
     RefusalLog::Read(lines.filter_map(parse_line).collect())
+}
+
+/// How many of `hits` at or after `since` (unix seconds) came from a visitor
+/// who had clicked an ad.
+pub fn refused_from_ads_since(hits: &[FormGuardHit], since: i64) -> u32 {
+    let cutoff = crate::wpmail::iso_utc(since);
+    hits.iter()
+        .filter(|h| h.at.as_str() >= cutoff.as_str() && !h.ad.is_empty())
+        .count() as u32
 }
 
 /// How many of `hits` are at or after `since` (unix seconds).
@@ -534,6 +647,27 @@ mod tests {
             hit("2026-11-12T08:00:00"),
         ];
         assert_eq!(refused_since(&hits, since), 2);
+        assert_eq!(refused_from_ads_since(&hits, since), 0);
+        let mut from_ad = hit("2026-11-12T09:00:00");
+        from_ad.ad = "google".into();
+        let mut old_ad = hit("2026-11-10T09:00:00");
+        old_ad.ad = "google".into();
+        let hits = [hits[1].clone(), from_ad, old_ad];
+        assert_eq!(refused_from_ads_since(&hits, since), 1);
+    }
+
+    #[test]
+    fn the_ad_source_is_one_of_ours_or_nothing() {
+        let line = |tail: &str| format!("2026-11-12T02:21:39\tbad_phone\tf\te\t1.2.3.4{tail}");
+        // A line written by version 1 has no sixth field.
+        assert_eq!(parse_line(&line("")).unwrap().ad, "");
+        assert_eq!(parse_line(&line("\t")).unwrap().ad, "");
+        assert_eq!(parse_line(&line("\tgoogle")).unwrap().ad, "google");
+        assert_eq!(parse_line(&line("\tmicrosoft")).unwrap().ad, "microsoft");
+        assert_eq!(parse_line(&line("\t<b>google</b>")).unwrap().ad, "");
+        for rule in ["bad_name", "bad_phone", "echo", "mash"] {
+            assert!(parse_line(&format!("2026-11-12T02:21:39\t{rule}")).is_some());
+        }
     }
 
     #[tokio::test]

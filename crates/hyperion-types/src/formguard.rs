@@ -12,7 +12,8 @@ pub struct FormGuardHit {
     /// `YYYY-MM-DDTHH:MM:SS`, UTC.
     #[serde(default)]
     pub at: String,
-    /// `empty`, `short`, `duplicate`, `rate` or `link_in_name`.
+    /// `empty`, `short`, `duplicate`, `rate`, `link_in_name`, `bad_name`,
+    /// `bad_phone`, `echo` or `mash`.
     #[serde(default)]
     pub rule: String,
     /// The form's name in Elementor.
@@ -22,6 +23,10 @@ pub struct FormGuardHit {
     pub email: String,
     #[serde(default)]
     pub ip: String,
+    /// `google` or `microsoft` when the visitor arrived by clicking an ad,
+    /// else empty.
+    #[serde(default)]
+    pub ad: String,
 }
 
 /// State of the contact form guard for one hosting, read from the owning node.
@@ -43,6 +48,11 @@ pub struct FormGuardView {
     /// read — which is not the same as none.
     #[serde(default)]
     pub refused_7d: Option<u32>,
+    /// How many of `refused_7d` came from a visitor who had clicked an ad.
+    /// When that is most of them the junk is bought traffic, and the fix is
+    /// in the campaign rather than in a filter.
+    #[serde(default)]
+    pub refused_ads_7d: u32,
     /// The most recent refusals, newest first.
     #[serde(default)]
     pub recent: Vec<FormGuardHit>,

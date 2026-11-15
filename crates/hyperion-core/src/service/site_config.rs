@@ -1090,20 +1090,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 ..Default::default()
             });
         }
-        let (refused_7d, recent) = match formguard::read_refusals(&detail.root_dir).await {
-            RefusalLog::Read(hits) => (
-                Some(formguard::refused_since(&hits, now_secs() - 7 * 86_400)),
-                hits.into_iter().rev().take(RECENT).collect(),
-            ),
-            RefusalLog::Absent => (Some(0), Vec::new()),
-            RefusalLog::Unreadable => (None, Vec::new()),
-        };
+        let (refused_7d, refused_ads_7d, recent) =
+            match formguard::read_refusals(&detail.root_dir).await {
+                RefusalLog::Read(hits) => {
+                    let since = now_secs() - 7 * 86_400;
+                    (
+                        Some(formguard::refused_since(&hits, since)),
+                        formguard::refused_from_ads_since(&hits, since),
+                        hits.into_iter().rev().take(RECENT).collect(),
+                    )
+                }
+                RefusalLog::Absent => (Some(0), 0, Vec::new()),
+                RefusalLog::Unreadable => (None, 0, Vec::new()),
+            };
         Ok(hyperion_types::formguard::FormGuardView {
             enabled,
             installed: formguard::is_installed(&detail.root_dir).await,
             is_wordpress,
             has_elementor_pro: formguard::has_elementor_pro(&detail.root_dir).await,
             refused_7d,
+            refused_ads_7d,
             recent,
         })
     }
