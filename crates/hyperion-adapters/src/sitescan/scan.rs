@@ -1782,7 +1782,7 @@ impl<'a> Scan<'a> {
         }
         // Twig's compiled templates (WPML keeps them under uploads) are
         // rewritten in place whenever a template changes, so a change to one
-        // is as expected as a new one. WP All Import's functions.php is the
+        // is as expected as a new one. WP All Import's or Export's functions.php is the
         // admin's own code: a new one is the plugin's, a later edit is a
         // change like any other.
         if is_twig_cache(&m.rel, &read.head)

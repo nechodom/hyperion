@@ -1258,6 +1258,8 @@ fn wp_all_import_functions_file_is_watched_not_flagged() {
     settle();
     let rel = "wp-content/uploads/wpallimport/functions.php";
     s.write(rel, "<?php\n");
+    // WP All Export keeps the same file, and creates it empty.
+    s.write("wp-content/uploads/wpallexport/functions.php", "");
     for _ in 0..2 {
         let out = s.scan();
         assert_eq!(rels(&out.findings), Vec::<&str>::new());

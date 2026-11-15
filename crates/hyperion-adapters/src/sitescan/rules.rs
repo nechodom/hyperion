@@ -469,12 +469,15 @@ pub fn is_twig_cache(rel_path: &str, bytes: &[u8]) -> bool {
     head.starts_with(b"<?php") && TWIG_CLASS.is_match(head)
 }
 
-/// WP All Import's Function Editor: PHP the site's admin writes, which the
-/// plugin `require_once`s on every import from `<uploads>/wpallimport/` (a
-/// multisite's `uploads/sites/<n>/` too). Its own code, not a drop.
+/// WP All Import's and WP All Export's Function Editor: PHP the site's admin
+/// writes, which the plugin `require_once`s on every run from
+/// `<uploads>/wpallimport/` or `<uploads>/wpallexport/` (a multisite's
+/// `uploads/sites/<n>/` too). Its own code, not a drop.
 pub fn is_wp_all_import_functions(rel_path: &str) -> bool {
     let mut parts = rel_path.rsplit('/');
-    if parts.next() != Some("functions.php") || parts.next() != Some("wpallimport") {
+    if parts.next() != Some("functions.php")
+        || !matches!(parts.next(), Some("wpallimport" | "wpallexport"))
+    {
         return false;
     }
     match parts.next() {
@@ -508,10 +511,13 @@ pub fn is_rsssl_code_execution_test(rel_path: &str, bytes: &[u8]) -> bool {
     }
 }
 
-/// PHP a known plugin keeps under uploads by design. Not a `php_in_uploads`
-/// finding; the content rules still apply.
+/// PHP a known plugin keeps under uploads by design, or a file with nothing in
+/// it (there is no code to run until someone writes some, and that is a change
+/// the next scan reads). Not a `php_in_uploads` finding; the content rules
+/// still apply.
 fn is_plugin_php_in_uploads(rel_path: &str, bytes: &[u8]) -> bool {
-    is_silence_stub(rel_path, bytes)
+    bytes.is_empty()
+        || is_silence_stub(rel_path, bytes)
         || is_twig_cache(rel_path, bytes)
         || is_wp_all_import_functions(rel_path)
         || is_rsssl_code_execution_test(rel_path, bytes)
@@ -546,7 +552,7 @@ fn is_core_lookalike(rel_path: &str) -> bool {
 /// JavaScript, HTML and PHP settings files get content rules; any PHP-like file
 /// under a directory named `uploads` is a finding by its path alone, unless a
 /// known plugin keeps it there (an `index.php` stub, a Twig cache file, WP All
-/// Import's functions.php). Never panics and
+/// Import's or Export's functions.php) or the file is empty. Never panics and
 /// never returns more than 20 hits, sorted by line.
 ///
 /// Only the first `INSPECT_MAX_BYTES` are matched. The caller must pass up to
@@ -1568,12 +1574,28 @@ return () => {
     }
 
     #[test]
+    fn empty_php_under_uploads_is_not_php_in_uploads() {
+        for p in [
+            "wp-content/uploads/2026/x.php",
+            "wp-content/uploads/wpallexport/other.php",
+            "wp-content/uploads/x.phtml",
+        ] {
+            assert!(inspect(p, b"").is_empty(), "{p}");
+            // One byte is a file with something in it.
+            assert_eq!(ids(&inspect(p, b" ")), ["php_in_uploads"], "{p}");
+            assert_eq!(ids(&inspect(p, b"<?php\n")), ["php_in_uploads"], "{p}");
+        }
+    }
+
+    #[test]
     fn wp_all_import_functions_is_not_php_in_uploads() {
         let src = b"<?php\nfunction my_price($p) { return round((float) $p * 1.21, 2); }\n";
         for p in [
             "wp-content/uploads/wpallimport/functions.php",
             "wp-content/uploads/sites/3/wpallimport/functions.php",
             "blog/wp-content/uploads/wpallimport/functions.php",
+            "wp-content/uploads/wpallexport/functions.php",
+            "wp-content/uploads/sites/3/wpallexport/functions.php",
         ] {
             assert!(is_wp_all_import_functions(p), "{p}");
             assert!(inspect(p, src).is_empty(), "{p}");
