@@ -151,6 +151,86 @@ check('a dotted name is a name', submit(contact('J.Co Smith', 'x@example.com', '
 fresh();
 check('a link in the message is allowed', submit(contact('Ann', 'x@example.com', '', 'See https://example.org/menu for what I mean.')) === array());
 
+// A phone number that is not one. The field is often plain text with a label.
+function textphone($name, $phone, $message) {
+    return new Fake_Record(array(
+        'name'    => array('id' => 'name', 'type' => 'text', 'title' => 'Name', 'value' => $name),
+        'email'   => array('id' => 'email', 'type' => 'email', 'title' => 'Email', 'value' => 'x@example.com'),
+        'field_9' => array('id' => 'field_9', 'type' => 'text', 'title' => 'Teléfono', 'value' => $phone),
+        'message' => array('id' => 'message', 'type' => 'textarea', 'title' => 'Message', 'value' => $message),
+    ), array('id' => 'c0ffee1', 'form_name' => 'Contact'));
+}
+$long = 'A perfectly long message here.';
+foreach (array('Cesar', '12345', '504 pedro', 'Pedro13') as $bad) {
+    fresh();
+    $e = submit(contact('Ann', 'x@example.com', $bad, $long));
+    check("phone '$bad' refused under the phone field", array_keys($e) === array('field_1'));
+    fresh();
+    $e = submit(textphone('Ann', $bad, $long));
+    check("labelled text phone '$bad' refused under it", array_keys($e) === array('field_9'));
+}
+foreach (array('', 'N/A', 'na', 'none', '-', '5550-0144', '+504 5550 0100', '(555) 010-9888', '5550100123 ext 4') as $good) {
+    fresh();
+    check("phone '$good' accepted", submit(contact('Ann', 'x@example.com', $good, $long)) === array());
+    fresh();
+    check("labelled text phone '$good' accepted", submit(textphone('Ann', $good, $long)) === array());
+}
+// A text field that is not a phone is not held to one.
+fresh();
+check('a company field is free text', submit(new Fake_Record(array(
+    'name'    => array('id' => 'name', 'type' => 'text', 'title' => 'Name', 'value' => 'Ann'),
+    'field_3' => array('id' => 'field_3', 'type' => 'text', 'title' => 'Company', 'value' => 'Acme'),
+    'message' => array('id' => 'message', 'type' => 'textarea', 'title' => 'Message', 'value' => $long),
+), array('id' => 'c0', 'form_name' => 'Contact'))) === array());
+
+// Digits where a name belongs.
+fresh();
+$e = submit(contact('12345678', 'x@example.com', '', $long));
+check('a name of digits refused under the name field', array_keys($e) === array('name'));
+fresh();
+check('a name with a digit in it is a name', submit(contact('Ann 2nd', 'x@example.com', '', $long)) === array());
+
+// The name or the phone typed again as the message.
+fresh();
+$e = submit(contact('Pedro Amador', 'x@example.com', '', 'pedro  AMADOR'));
+check('message repeating the name refused under the message', array_keys($e) === array('message'));
+fresh();
+check('message repeating the phone refused', submit(contact('Ann', 'x@example.com', '5550100123', '5550100123')) !== array());
+
+// Keyboard mashing, and what must not be taken for it.
+foreach (array("Kslqjfhgbtldbdkzbz\r\nZnqnzxzb\r\nSbznzl", "Jgqv\nHfgvt\nHbbd\nHhbk\nYjjm",
+               'Dndodidieoeoejfjckfufiejdifjfejfifkrifiehdidfnifrjirdjoxjd') as $m) {
+    fresh();
+    $e = submit(contact('Ann', 'x@example.com', '', $m));
+    check("mash refused: $m", array_keys($e) === array('message'));
+}
+foreach (array('Table for two on Friday at 7 pm, please.', 'Prosím zavolejte mi zpět ohledně rezervace.',
+               'Rindfleischetikettierungsüberwachung ist das Thema.', 'Хотел бы забронировать столик на двоих',
+               '二名で予約をお願いします。金曜日の夜', 'See https://example.org/averyveryverylongpathsegmentwithoutanybreaksinit ok',
+               'Pls call bck') as $m) {
+    fresh();
+    check("not mash: $m", submit(contact('Ann', 'x@example.com', '', $m)) === array());
+}
+// A booking is judged by what was chosen, not by its message.
+fresh();
+check('booking with a mashed message accepted', submit(booking('Hfgvh Hbbb Hhbh Zzzz')) === array());
+
+// Where the visitor came from is read from what Elementor posts.
+$_POST['referrer'] = 'https://example.com/contact/?gad_source=5&gclid=abc';
+check('google ad click recognised', Hyperion_Form_Guard::ad_source() === 'google');
+$_POST['referrer'] = 'https://example.com/contact/?msclkid=abc';
+check('microsoft ad click recognised', Hyperion_Form_Guard::ad_source() === 'microsoft');
+$_POST['referrer'] = 'https://example.com/contact/?page=gclid';
+check('a value is not a parameter', Hyperion_Form_Guard::ad_source() === '');
+$_POST['referrer'] = array('x');
+check('a referrer that is not text is ignored', Hyperion_Form_Guard::ad_source() === '');
+$_POST['referrer'] = "https://example.com/?gclid=1\tforged\n";
+fresh();
+submit(contact('Ann', 'ann@example.com', '', ''));
+$last = explode("\t", trim(substr(file_get_contents(Hyperion_Form_Guard::log_path()), -200)));
+check('the ad source is the last field of the line', end($last) === 'google');
+unset($_POST['referrer']);
+
 // Elementor already refused it: not ours to judge or to count.
 fresh();
 $ajax = new Fake_Ajax();
@@ -189,13 +269,13 @@ check('refusals were logged', count($lines) >= 10);
 $rules = array();
 foreach ($lines as $l) {
     $f = explode("\t", $l);
-    check("log line has five fields: $l", count($f) === 5);
+    check("log line has six fields: $l", count($f) === 6);
     check("log line starts with a timestamp: $l", (bool) preg_match('~^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$~', $f[0]));
     $rules[$f[1]] = true;
 }
 ksort($rules);
 check('every rule appears in the log: ' . implode(',', array_keys($rules)),
-    array_keys($rules) === array('duplicate', 'empty', 'link_in_name', 'rate', 'short'));
+    array_keys($rules) === array('bad_name', 'bad_phone', 'duplicate', 'echo', 'empty', 'link_in_name', 'mash', 'rate', 'short'));
 
 // A value with a tab or a newline cannot forge a second line or field.
 fresh();
@@ -206,16 +286,16 @@ submit(new Fake_Record(array(
 ), array('id' => 'x', 'form_name' => "Evil\tForm\n")));
 $after = file($log, FILE_IGNORE_NEW_LINES);
 check('a forged newline adds exactly one line', count($after) === $before + 1);
-check('a forged tab adds no field', count(explode("\t", end($after))) === 5);
+check('a forged tab adds no field', count(explode("\t", end($after))) === 6);
 
 // The log stays bounded.
 fresh();
-file_put_contents($log, str_repeat(gmdate('Y-m-d\TH:i:s') . "\tempty\tContact\tx@example.com\t203.0.113.7\n", 4000));
+file_put_contents($log, str_repeat(gmdate('Y-m-d\TH:i:s') . "\tempty\tContact\tx@example.com\t203.0.113.7\t\n", 4000));
 submit(contact('Ann', 'ann@example.com', '', ''));
 clearstatcache();
 check('log is cut back once it grows: ' . filesize($log), filesize($log) < 100000);
 $kept = file($log, FILE_IGNORE_NEW_LINES);
-check('the cut keeps whole lines', count(explode("\t", $kept[0])) === 5);
+check('the cut keeps whole lines', count(explode("\t", $kept[0])) === 6);
 
 echo $failed ? "$failed failed\n" : "ok\n";
 exit($failed ? 1 : 0);

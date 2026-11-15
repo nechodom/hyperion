@@ -16,7 +16,7 @@
       {% else if view.enabled && !view.installed %}On, but the plugin file is missing — re-installs on the next toggle
       {% else if view.enabled && !view.has_elementor_pro %}On, but this site has no Elementor Pro — other form plugins are not covered
       {% else if view.enabled %}
-        {{ self.refused_summary() }}
+        {{ self.refused_summary() }}{% if view.refused_ads_7d > 0 %}, {{ view.refused_ads_7d }} of them after an ad click{% endif %}
       {% else if !view.has_elementor_pro %}Off — covers Elementor Pro forms, which this site does not have
       {% else %}Off — empty and repeated form submissions are not filtered{% endif %}
     </span>
@@ -25,16 +25,24 @@
       <form hx-post="/hostings/formguard" hx-target="#formguard-panel" hx-swap="outerHTML" hx-trigger="change">
         <input type="hidden" name="_csrf" value="{{ csrf_toggle }}">
         <input type="hidden" name="selector" value="{{ selector }}">
-        <label class="chk-switch" title="Elementor Pro forms only. Refuses a submission with no message, the same submission sent again within 10 minutes, and more than 3 an hour from one e-mail address or 5 from one IP address. The visitor is told why and can correct it. It does not stop bots — a honeypot or reCAPTCHA on the form does that.">
+        <label class="chk-switch" title="Elementor Pro forms only. Refuses a submission with no message, the same submission sent again within 10 minutes, more than 3 an hour from one e-mail address or 5 from one IP address, a name that is only digits, a phone number with fewer than 7 digits, a message that repeats the name or phone, and keyboard mashing. The visitor is told why and can correct it. It does not stop bots — a honeypot or reCAPTCHA on the form does that.">
           <input type="checkbox" class="switch" name="enabled" value="on" aria-label="Refuse empty and repeated contact form submissions"{% if view.enabled %} checked{% endif %}{% if !can_manage %} disabled{% endif %}>
         </label>
       </form>
     </div>
     {% endif %}
   </div>
-  {% if error.is_some() || !view.recent.is_empty() %}
+  {% if error.is_some() || !view.recent.is_empty() || self.mostly_ads() %}
   <div class="chk-body">
     {% if let Some(e) = error %}<p class="chk-note tone-warn">{{ e }}</p>{% endif %}
+    {% if self.mostly_ads() %}
+    <p class="chk-note tone-warn">
+      Most of these visitors clicked an ad before they sent the form. They are
+      people, not bots, so a filter only catches the ones who type nothing
+      useful. Check where the campaign is shown (mobile apps and games send
+      this kind of traffic) and whether it should land on a page with a form.
+    </p>
+    {% endif %}
     {% if !view.recent.is_empty() %}
     <details class="chk-fold">
       <summary>Last {{ view.recent.len() }} refused</summary>
@@ -43,7 +51,7 @@
         <li>
           <span class="chk-dot"></span>
           <strong>{{ Self::rule_label(h.rule) }}</strong>
-          <span class="chk-detail">{{ Self::when(h.at) }}{% if !h.form.is_empty() %} · {{ h.form }}{% endif %}{% if !h.email.is_empty() %} · {{ h.email }}{% endif %}{% if !h.ip.is_empty() %} · {{ h.ip }}{% endif %}</span>
+          <span class="chk-detail">{{ Self::when(h.at) }}{% if !h.form.is_empty() %} · {{ h.form }}{% endif %}{% if !h.email.is_empty() %} · {{ h.email }}{% endif %}{% if !h.ip.is_empty() %} · {{ h.ip }}{% endif %}{% if !h.ad.is_empty() %} · after an ad click{% endif %}</span>
         </li>
         {% endfor %}
       </ul>

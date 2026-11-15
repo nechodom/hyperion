@@ -322,8 +322,12 @@ pub fn print_pretty(resp: &Response) {
                 Some(n) => println!("  refused_7d       = {n}"),
                 None => println!("  refused_7d       = unknown (log not readable)"),
             }
+            println!("  refused_ads_7d   = {}", v.refused_ads_7d);
             for h in &v.recent {
-                println!("  {}  {:<12} {}  {}  {}", h.at, h.rule, h.form, h.email, h.ip);
+                println!(
+                    "  {}  {:<12} {}  {}  {}  {}",
+                    h.at, h.rule, h.form, h.email, h.ip, h.ad
+                );
             }
         }
         Response::HostingRotateWpDebugLog => println!("✓ debug.log rotated"),

@@ -375,6 +375,10 @@ impl FormGuardCardTpl {
             "duplicate" => "Sent twice",
             "rate" => "Too many in an hour",
             "link_in_name" => "Link in the name",
+            "bad_name" => "Digits for a name",
+            "bad_phone" => "Not a phone number",
+            "echo" => "Message repeats another field",
+            "mash" => "Keyboard mashing",
             _ => "Refused",
         }
     }
@@ -387,6 +391,14 @@ impl FormGuardCardTpl {
             Some(n) => format!("On — {n} submissions refused in the last 7 days"),
             None => "On, but the log of refusals could not be read".into(),
         }
+    }
+
+    /// Most of what was refused came from people who clicked an ad: say so,
+    /// because no filter fixes a campaign that buys the wrong visitors. Needs
+    /// a handful of refusals before it means anything.
+    fn mostly_ads(&self) -> bool {
+        let ads = self.view.refused_ads_7d;
+        matches!(self.view.refused_7d, Some(n) if n >= 5 && ads * 2 > n)
     }
 
     /// `2026-11-12T02:21:39` → `2026-11-12 02:21 UTC`.
@@ -578,6 +590,7 @@ mod formguard_card_tests {
             is_wordpress: true,
             has_elementor_pro: true,
             refused_7d: Some(0),
+            refused_ads_7d: 0,
             recent: Vec::new(),
         }
     }
@@ -621,6 +634,7 @@ mod formguard_card_tests {
                 form: "<script>alert(1)</script>".into(),
                 email: "a@b.cz".into(),
                 ip: "203.0.113.7".into(),
+                ad: "google".into(),
             }],
             ..on()
         });
@@ -628,5 +642,27 @@ mod formguard_card_tests {
         assert!(html.contains("2026-11-12 02:21 UTC"));
         assert!(html.contains("a@b.cz"));
         assert!(!html.contains("<script>alert"));
+        assert!(html.contains("after an ad click"));
+    }
+
+    #[test]
+    fn junk_that_is_mostly_bought_traffic_points_at_the_campaign() {
+        let note = "Most of these visitors clicked an ad";
+        let mostly = render(FormGuardView {
+            refused_7d: Some(10),
+            refused_ads_7d: 7,
+            ..on()
+        });
+        assert!(mostly.contains(note));
+        assert!(mostly.contains("7 of them after an ad click"));
+        // Half is not most, and two refusals are not a pattern.
+        for (n, ads) in [(10, 5), (2, 2), (10, 0)] {
+            assert!(!render(FormGuardView {
+                refused_7d: Some(n),
+                refused_ads_7d: ads,
+                ..on()
+            })
+            .contains(note));
+        }
     }
 }
