@@ -3658,7 +3658,12 @@ async fn the_bootstrap_reaches_the_detach_against_stubs() {
     };
     stub(
         "curl",
-        r#"out=""; while [ $# -gt 0 ]; do case "$1" in -o) shift; out="$1";; -K) shift;; esac; shift; done
+        // `-K -` is read to the end, as curl does. The script feeds it with
+        // `printf … | curl -K -` under `pipefail`: a stub that exits without
+        // reading leaves printf writing to a closed pipe whenever the stub
+        // wins the race, and the script then dies silently (seen on a busy
+        // CI runner, at the manifest POST).
+        r#"out=""; while [ $# -gt 0 ]; do case "$1" in -o) shift; out="$1";; -K) shift; [ "$1" = "-" ] && cat >/dev/null;; esac; shift; done
 if [ -n "$out" ]; then
   # The "exporter" the runner downloads. It has to be genuinely executable:
   # the runner probes `--help` for --estimate before it will proceed.
