@@ -27,8 +27,10 @@ who clicked an ad and can add two digits; the card says so.
 ## How
 
 - The question cannot be in the page HTML: a cached page would give everybody
-  the same one. A small inline script adds the field when the visitor first
-  touches a form and fetches the sum from `admin-ajax.php`.
+  the same one. A small inline script adds the field as soon as the page is
+  parsed and fetches the sum from `admin-ajax.php` when the form comes within
+  a screen of the viewport (first version: on first touch, which showed the
+  question visibly late). A form nobody scrolls to costs no request.
 - No stored state for a question. The token is `expiry.random.auth.mac`, both
   MACs keyed with `wp_salt('nonce')`; the second covers the answer. Valid for
   one hour. A token is spent (a transient until it expires) by a wrong answer

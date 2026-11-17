@@ -7,8 +7,11 @@
 //! lets the site scan compare ours by digest.
 //!
 //! The question is never in the page. A page cache would hand every visitor
-//! the same one, so a small script adds the field when the visitor first
-//! touches a form and asks `admin-ajax.php` for a sum. Nothing is stored per
+//! the same one, so a small script adds the field as soon as the page is
+//! parsed and asks `admin-ajax.php` for a sum when the form comes within a
+//! screen of the viewport: the question is there before the visitor is, and a
+//! form in the footer of every page costs a request only when somebody scrolls
+//! to it. Nothing is stored per
 //! question: the token carries its expiry and two MACs keyed with the site's
 //! own salt, one of them over the answer. A token is spent by a wrong answer
 //! and by an accepted submission.
@@ -20,7 +23,7 @@ use crate::wpplugin::Module;
 use crate::AdapterError;
 
 /// Bumped whenever [`FORMMATH_TEMPLATE`] changes in a way that matters.
-pub const FORMMATH_VERSION: u32 = 1;
+pub const FORMMATH_VERSION: u32 = 2;
 
 /// The module. Static except for `{{VERSION}}`.
 const FORMMATH_TEMPLATE: &str = r##"<?php
@@ -176,10 +179,10 @@ if (!class_exists('Hyperion_Form_Math', false)) {
 
         public static function js() {
             return <<<'JS'
-var d=document;
+var d=document,io=null;
 function fill(w){
   var l=w.querySelector('label'),a=w.querySelector('[name=hyp_fm_a]'),t=w.querySelector('[name=hyp_fm_t]');
-  a.value='';t.value='';w.removeAttribute('data-at');
+  a.value='';t.value='';w.removeAttribute('data-at');w.setAttribute('data-st','load');
   var lang=(d.documentElement.getAttribute('lang')||'').slice(0,2);
   fetch(c.u,{method:'POST',credentials:'same-origin',
     headers:{'Content-Type':'application/x-www-form-urlencoded'},
@@ -188,9 +191,14 @@ function fill(w){
   .then(function(j){
     if(!j||typeof j.q!=='string'||typeof j.t!=='string'){throw new Error('bad reply');}
     l.textContent=j.q;a.setAttribute('aria-label',j.q);t.value=j.t;
-    w.setAttribute('data-at',String(Date.now()));
+    w.setAttribute('data-at',String(Date.now()));w.setAttribute('data-st','ok');
   })
-  .catch(function(){l.textContent=c.e;});
+  .catch(function(){l.textContent=c.e;w.setAttribute('data-st','fail');});
+}
+function need(w){
+  var at=Number(w.getAttribute('data-at'));
+  if(w.getAttribute('data-st')==='load'){return;}
+  if(!at||Date.now()-at>3000000){fill(w);}
 }
 function add(f){
   var w=f.querySelector('.hyp-fm');
@@ -214,25 +222,41 @@ function add(f){
     window.jQuery(f).on('submit_success',function(){fill(w);})
       .on('error',function(){if(w.classList.contains('elementor-error')){fill(w);}});
   }
-  fill(w);
   return w;
+}
+function scan(){
+  var fs=d.querySelectorAll('form.elementor-form'),i;
+  if(!io&&window.IntersectionObserver){
+    io=new IntersectionObserver(function(es){
+      for(var k=0;k<es.length;k++){
+        if(es[k].isIntersecting){io.unobserve(es[k].target);need(add(es[k].target));}
+      }
+    },{rootMargin:'600px 0px'});
+  }
+  for(i=0;i<fs.length;i++){
+    if(fs[i].querySelector('.hyp-fm')){continue;}
+    var w=add(fs[i]);
+    if(io){io.observe(fs[i]);}else{need(w);}
+  }
 }
 function form(e){
   return e.target&&e.target.closest?e.target.closest('form.elementor-form'):null;
 }
 function touch(e){
   var f=form(e);
-  if(!f){return;}
-  var w=add(f),at=Number(w.getAttribute('data-at'));
-  if(at&&Date.now()-at>3000000){fill(w);}
+  if(f){need(add(f));}
 }
+if(d.readyState==='loading'){d.addEventListener('DOMContentLoaded',scan);}else{scan();}
+window.addEventListener('load',scan);
+if(window.jQuery){window.jQuery(d).on('elementor/popup/show',scan);}
 d.addEventListener('focusin',touch,true);
 d.addEventListener('pointerdown',touch,true);
 d.addEventListener('submit',function(e){
   var f=form(e);
   if(!f){return;}
-  var had=f.querySelector('.hyp-fm'),w=add(f),a=w.querySelector('[name=hyp_fm_a]');
-  if(!had||!a.value){
+  var w=add(f),a=w.querySelector('[name=hyp_fm_a]');
+  need(w);
+  if(!a.value){
     e.preventDefault();e.stopPropagation();
     a.focus();
   }
