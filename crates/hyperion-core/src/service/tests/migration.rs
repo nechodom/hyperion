@@ -279,6 +279,7 @@ fn carried_kv_allow_list() {
         "wp_auto_update",
         "regguard_enabled",
         "formguard_enabled",
+        "formguard_math",
         "gitsync_repo",
         "scan_trust",
     ] {

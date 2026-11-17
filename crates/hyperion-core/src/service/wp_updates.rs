@@ -70,7 +70,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// files every five minutes. Returns how many sites had a plugin file
     /// written (status refreshes do not count).
     pub async fn wp_plugin_tick(&self) -> Result<i64, RpcError> {
-        use hyperion_adapters::{formguard, regguard, wpmail, wpplugin};
+        use hyperion_adapters::{formguard, formmath, regguard, wpmail, wpplugin};
         // hosting id → (status without its timestamp, when last written).
         static WRITTEN: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (String, i64)>>> =
             std::sync::OnceLock::new();
@@ -153,6 +153,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     Ok(w) => wrote |= w,
                     Err(e) => {
                         tracing::warn!(domain = %detail.domain, error = %e, "wp plugin: form guard not written")
+                    }
+                }
+            }
+            // The sum its forms ask is a module of its own.
+            if forms_on
+                && self.formguard_math_wanted(id).await
+                && !formmath::is_installed(&root).await
+            {
+                match formmath::install(&root, &user).await {
+                    Ok(w) => wrote |= w,
+                    Err(e) => {
+                        tracing::warn!(domain = %detail.domain, error = %e, "wp plugin: form question not written")
                     }
                 }
             }

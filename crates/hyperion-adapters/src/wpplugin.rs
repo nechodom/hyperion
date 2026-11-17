@@ -7,6 +7,7 @@
 //! wp-content/mu-plugins/hyperion/mail.php     sender pin + failed-send log
 //! wp-content/mu-plugins/hyperion/regguard.php registration spam guard
 //! wp-content/mu-plugins/hyperion/formguard.php contact form guard
+//! wp-content/mu-plugins/hyperion/formmath.php  a sum to solve on the forms
 //! wp-content/mu-plugins/hyperion/preview.php  preview-host support
 //! wp-content/mu-plugins/hyperion/cron.php     cron run by the node, not visitors
 //! wp-content/mu-plugins/hyperion/status.php   what the agent last saw
@@ -56,7 +57,7 @@ use crate::AdapterError;
 /// Bumped whenever [`LOADER_TEMPLATE`] changes; the file is compared byte for
 /// byte, so any change relands on the next tick anyway — the number is for a
 /// person reading the plugin list.
-pub const LOADER_VERSION: u32 = 3;
+pub const LOADER_VERSION: u32 = 4;
 
 /// `wp-content/mu-plugins/<this>`.
 pub const LOADER_FILE: &str = "hyperion.php";
@@ -73,15 +74,17 @@ pub enum Module {
     Mail,
     RegGuard,
     FormGuard,
+    FormMath,
     Preview,
     Cron,
 }
 
 impl Module {
-    pub const ALL: [Module; 5] = [
+    pub const ALL: [Module; 6] = [
         Module::Mail,
         Module::RegGuard,
         Module::FormGuard,
+        Module::FormMath,
         Module::Preview,
         Module::Cron,
     ];
@@ -92,6 +95,7 @@ impl Module {
             Module::Mail => "mail.php",
             Module::RegGuard => "regguard.php",
             Module::FormGuard => "formguard.php",
+            Module::FormMath => "formmath.php",
             Module::Preview => "preview.php",
             Module::Cron => "cron.php",
         }
@@ -104,6 +108,8 @@ impl Module {
             Module::RegGuard => "hyperion-regguard.php",
             // Never existed as a single file; the name is only ever looked up.
             Module::FormGuard => "hyperion-formguard.php",
+            // Never existed as a single file; the name is only ever looked up.
+            Module::FormMath => "hyperion-formmath.php",
             Module::Preview => "hyperion-preview.php",
             // Never existed as a single file; the name is only ever looked up.
             Module::Cron => "hyperion-cron.php",
@@ -270,6 +276,7 @@ foreach (array(
     'mail'     => 'hyperion-mail.php',
     'regguard' => 'hyperion-regguard.php',
     'formguard' => 'hyperion-formguard.php',
+    'formmath' => 'hyperion-formmath.php',
     'preview'  => 'hyperion-preview.php',
     'cron'     => 'hyperion-cron.php',
 ) as $hyperion_mod => $hyperion_legacy) {
@@ -434,6 +441,13 @@ function hyperion_render_page() {
             $on,
             hyperion_t('Elementor forms sent with no message, sent twice in a row, or sent too often by one sender are refused.', 'Formuláře Elementoru odeslané bez zprávy, dvakrát po sobě nebo příliš často jedním odesílatelem se odmítají.'),
         );
+        if (!empty($mods['formmath'])) {
+            $rows[] = array(
+                hyperion_t('Form question', 'Otázka ve formuláři'),
+                $on,
+                hyperion_t('Elementor forms ask the visitor to solve a small sum before sending.', 'Formuláře Elementoru chtějí před odesláním vyřešit krátký příklad.'),
+            );
+        }
     }
 
     if (!empty($mods['cron'])) {
@@ -545,6 +559,7 @@ pub fn managed_files() -> Vec<ManagedFile> {
             Module::Mail => ManagedContent::PerSite,
             Module::RegGuard => ManagedContent::Fixed(crate::regguard::render_mu_plugin()),
             Module::FormGuard => ManagedContent::Fixed(crate::formguard::render_module()),
+            Module::FormMath => ManagedContent::Fixed(crate::formmath::render_module()),
             Module::Preview => ManagedContent::Fixed(PREVIEW_MODULE.to_string()),
             Module::Cron => ManagedContent::Fixed(CRON_MODULE.to_string()),
         };

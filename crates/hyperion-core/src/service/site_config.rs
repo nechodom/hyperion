@@ -1080,6 +1080,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .flatten()
                 .map(|v| v == "1")
                 .unwrap_or(false);
+        let math = self.formguard_math_wanted(detail.id.as_str()).await;
         let is_wordpress =
             tokio::fs::try_exists(std::path::Path::new(&detail.root_dir).join("wp-content"))
                 .await
@@ -1087,6 +1088,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if !is_wordpress {
             return Ok(hyperion_types::formguard::FormGuardView {
                 enabled,
+                math,
                 ..Default::default()
             });
         }
@@ -1110,24 +1112,61 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             has_elementor_pro: formguard::has_elementor_pro(&detail.root_dir).await,
             refused_7d,
             refused_ads_7d,
+            math,
+            math_installed: hyperion_adapters::formmath::is_installed(&detail.root_dir).await,
             recent,
         })
     }
 
+    /// Does the operator want this hosting's forms to ask a sum?
+    pub(super) async fn formguard_math_wanted(&self, hosting_id: &str) -> bool {
+        matches!(
+            hyperion_state::hosting_kv::get(&self.pool, hosting_id, FORMGUARD_MATH_KV_KEY).await,
+            Ok(Some(v)) if v == "1"
+        )
+    }
+
     /// Turn the contact form guard on or off: install/remove its module on
     /// the owning node and record the operator's intent in `hosting_kv`.
+    ///
+    /// `math` switches the sum the forms ask; `None` leaves it as it is. The
+    /// sum is part of the guard: its module is on disk only while both are on.
     pub async fn formguard_set(
         &self,
         sel: HostingSelector,
         enabled: bool,
+        math: Option<bool>,
     ) -> Result<hyperion_types::formguard::FormGuardView, RpcError> {
+        use hyperion_adapters::formmath;
         let detail = self.get(sel).await?;
+        let math_on = match math {
+            Some(m) => m,
+            None => self.formguard_math_wanted(detail.id.as_str()).await,
+        };
         if enabled {
             hyperion_adapters::formguard::install(&detail.root_dir, &detail.system_user)
                 .await
                 .map_err(|e| RpcError::Internal_with(format!("install form guard: {e}")))?;
         } else {
             hyperion_adapters::formguard::remove(&detail.root_dir).await;
+        }
+        if enabled && math_on {
+            formmath::install(&detail.root_dir, &detail.system_user)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("install form question: {e}")))?;
+        } else {
+            formmath::remove(&detail.root_dir).await;
+        }
+        if let Some(m) = math {
+            hyperion_state::hosting_kv::set(
+                &self.pool,
+                detail.id.as_str(),
+                FORMGUARD_MATH_KV_KEY,
+                if m { "1" } else { "0" },
+                now_secs(),
+            )
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("save form question state: {e}")))?;
         }
         hyperion_state::hosting_kv::set(
             &self.pool,
@@ -1141,7 +1180,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.append_audit(
             "hosting.formguard_set",
             Some(detail.id.as_str()),
-            &serde_json::json!({ "domain": detail.domain, "enabled": enabled }).to_string(),
+            &serde_json::json!({ "domain": detail.domain, "enabled": enabled, "math": math_on })
+                .to_string(),
             "ok",
         )
         .await;

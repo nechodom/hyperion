@@ -306,8 +306,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         &self,
         sel: HostingSelector,
         enabled: bool,
+        math: Option<bool>,
     ) -> Result<hyperion_types::formguard::FormGuardView, RpcError> {
-        self.svc.formguard_set(sel, enabled).await
+        self.svc.formguard_set(sel, enabled, math).await
     }
 
     async fn hosting_rotate_redis_password(

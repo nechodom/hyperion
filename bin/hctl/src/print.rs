@@ -323,6 +323,8 @@ pub fn print_pretty(resp: &Response) {
                 None => println!("  refused_7d       = unknown (log not readable)"),
             }
             println!("  refused_ads_7d   = {}", v.refused_ads_7d);
+            println!("  math             = {}", v.math);
+            println!("  math_installed   = {}", v.math_installed);
             for h in &v.recent {
                 println!(
                     "  {}  {:<12} {}  {}  {}  {}",

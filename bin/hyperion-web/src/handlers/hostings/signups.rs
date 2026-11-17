@@ -363,6 +363,12 @@ pub struct FormGuardToggleForm {
     /// Present + "on" when the operator ticks the box; absent when unticked.
     #[serde(default)]
     pub(super) enabled: Option<String>,
+    /// Sent by the "Ask a sum" switch's own form, so an absent `math` there
+    /// means "off" and an absent `math` on the main switch means "as it is".
+    #[serde(default)]
+    pub(super) math_set: Option<String>,
+    #[serde(default)]
+    pub(super) math: Option<String>,
 }
 
 impl FormGuardCardTpl {
@@ -379,6 +385,7 @@ impl FormGuardCardTpl {
             "bad_phone" => "Not a phone number",
             "echo" => "Message repeats another field",
             "mash" => "Keyboard mashing",
+            "math" => "Sum not answered",
             _ => "Refused",
         }
     }
@@ -399,6 +406,11 @@ impl FormGuardCardTpl {
     fn mostly_ads(&self) -> bool {
         let ads = self.view.refused_ads_7d;
         matches!(self.view.refused_7d, Some(n) if n >= 5 && ads * 2 > n)
+    }
+
+    /// The sum is offered while the guard is on and has forms to hook into.
+    fn offers_sum(&self) -> bool {
+        self.view.is_wordpress && self.view.enabled && self.view.has_elementor_pro
     }
 
     /// `2026-11-12T02:21:39` → `2026-11-12 02:21 UTC`.
@@ -536,11 +548,13 @@ pub async fn post_formguard(
         Err(r) => return Ok(r),
     };
     let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
-    let enabled = matches!(form.enabled.as_deref(), Some("on" | "true" | "1"));
+    let on = |v: &Option<String>| matches!(v.as_deref(), Some("on" | "true" | "1"));
+    let enabled = on(&form.enabled);
+    let math = form.math_set.is_some().then(|| on(&form.math));
     match crate::dispatcher::dispatch_to_node(
         &state,
         owner.as_deref(),
-        Request::FormGuardSet { sel, enabled },
+        Request::FormGuardSet { sel, enabled, math },
     )
     .await
     {
@@ -591,8 +605,56 @@ mod formguard_card_tests {
             has_elementor_pro: true,
             refused_7d: Some(0),
             refused_ads_7d: 0,
+            math: false,
+            math_installed: false,
             recent: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_sum_is_a_switch_of_its_own_while_the_guard_is_on() {
+        let off = render(on());
+        assert!(off.contains("name=\"math_set\"") && off.contains("Ask a sum"));
+        assert!(!off.contains(
+            "name=\"math\" value=\"on\" aria-label=\"Ask visitors to solve a sum\" checked"
+        ));
+        // Its form keeps the guard on, whatever the box says.
+        assert!(off.contains("<input type=\"hidden\" name=\"enabled\" value=\"on\">"));
+        let asked = render(FormGuardView {
+            math: true,
+            math_installed: true,
+            ..on()
+        });
+        assert!(asked.contains("aria-label=\"Ask visitors to solve a sum\" checked"));
+        assert!(asked.contains("forms ask a sum") && asked.contains("chk-dot ok"));
+        // Wanted but not on disk must not look healthy.
+        let missing = render(FormGuardView { math: true, ..on() });
+        assert!(missing.contains("sum is not installed") && missing.contains("chk-dot warn"));
+        // Nothing to switch while the guard is off, or with nothing to hook into.
+        for view in [
+            FormGuardView {
+                enabled: false,
+                math: true,
+                ..on()
+            },
+            FormGuardView {
+                has_elementor_pro: false,
+                ..on()
+            },
+        ] {
+            assert!(!render(view).contains("math_set"));
+        }
+        // A viewer sees the state and cannot change it.
+        let viewer = FormGuardCardTpl {
+            selector: "id:1".into(),
+            view: on(),
+            can_manage: false,
+            csrf_toggle: "t".into(),
+            error: None,
+        }
+        .render()
+        .expect("render");
+        assert!(viewer.contains("aria-label=\"Ask visitors to solve a sum\" disabled"));
     }
 
     #[test]

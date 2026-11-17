@@ -1370,3 +1370,70 @@ async fn a_failed_create_on_a_shared_user_keeps_the_existing_pool() {
         "the pool goes back to a alone: b's tree, listed in it, is gone"
     );
 }
+
+/// The sum the forms ask is part of the guard: its module is on disk only
+/// while both switches are on, the main switch alone leaves the wish as it
+/// was, and the plugin tick puts a lost module back.
+#[tokio::test]
+async fn the_form_question_follows_its_switch_and_the_guard() {
+    use hyperion_adapters::{formguard, formmath};
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), happy_mocks());
+    s.create(req("forms.cz")).await.expect("create");
+    let sel = HostingSelector::Domain(Domain::parse("forms.cz").expect("parse"));
+    let id = s.get(sel.clone()).await.expect("get").id;
+    let site = tempfile::tempdir().expect("dir");
+    let root = site.path().join("htdocs");
+    std::fs::create_dir_all(root.join("wp-content")).expect("docroot");
+    let root = root.to_str().expect("utf8").to_string();
+    sqlx::query("UPDATE hostings SET root_dir = ? WHERE id = ?")
+        .bind(&root)
+        .bind(id.as_str())
+        .execute(&pool)
+        .await
+        .expect("root");
+
+    // The guard alone: no question.
+    let v = s.formguard_set(sel.clone(), true, None).await.expect("on");
+    assert!(v.enabled && v.installed && !v.math && !v.math_installed);
+    assert!(!formmath::is_present(&root).await);
+
+    let v = s
+        .formguard_set(sel.clone(), true, Some(true))
+        .await
+        .expect("ask");
+    assert!(v.math && v.math_installed);
+
+    // An older panel, or the main switch: the wish is not touched.
+    let v = s
+        .formguard_set(sel.clone(), true, None)
+        .await
+        .expect("same");
+    assert!(v.math && v.math_installed);
+
+    // Guard off takes the question with it, and on brings it back.
+    let v = s
+        .formguard_set(sel.clone(), false, None)
+        .await
+        .expect("off");
+    assert!(!v.enabled && v.math && !v.math_installed);
+    assert!(!formmath::is_present(&root).await && !formguard::is_installed(&root).await);
+    let v = s
+        .formguard_set(sel.clone(), true, None)
+        .await
+        .expect("back");
+    assert!(v.math && v.math_installed);
+
+    // Lost with a restore: the tick relands it.
+    formmath::remove(&root).await;
+    s.wp_plugin_tick().await.expect("tick");
+    assert!(formmath::is_installed(&root).await);
+
+    let v = s
+        .formguard_set(sel.clone(), true, Some(false))
+        .await
+        .expect("stop asking");
+    assert!(v.enabled && v.installed && !v.math && !v.math_installed);
+    s.wp_plugin_tick().await.expect("tick");
+    assert!(!formmath::is_present(&root).await);
+}
