@@ -13,7 +13,7 @@ pub struct FormGuardHit {
     #[serde(default)]
     pub at: String,
     /// `empty`, `short`, `duplicate`, `rate`, `link_in_name`, `bad_name`,
-    /// `bad_phone`, `echo` or `mash`.
+    /// `bad_phone`, `echo`, `mash` or `math` (the sum was not answered).
     #[serde(default)]
     pub rule: String,
     /// The form's name in Elementor.
@@ -53,6 +53,13 @@ pub struct FormGuardView {
     /// in the campaign rather than in a filter.
     #[serde(default)]
     pub refused_ads_7d: u32,
+    /// The operator wants every form to ask a sum (`hosting_kv`). Only means
+    /// anything while `enabled`.
+    #[serde(default)]
+    pub math: bool,
+    /// The module that asks it is on disk and current.
+    #[serde(default)]
+    pub math_installed: bool,
     /// The most recent refusals, newest first.
     #[serde(default)]
     pub recent: Vec<FormGuardHit>,

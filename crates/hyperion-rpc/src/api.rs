@@ -136,11 +136,13 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: HostingSelector,
     ) -> Result<hyperion_types::formguard::FormGuardView, RpcError>;
 
-    /// Turn the contact form guard on or off for one hosting.
+    /// Turn the contact form guard on or off for one hosting. `math`
+    /// switches the sum its forms ask; `None` leaves that as it is.
     async fn formguard_set(
         &self,
         sel: HostingSelector,
         enabled: bool,
+        math: Option<bool>,
     ) -> Result<hyperion_types::formguard::FormGuardView, RpcError>;
 
     /// Rotate the Redis password for an already-enabled hosting.

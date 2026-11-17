@@ -2072,6 +2072,7 @@ pub(super) fn carried_kv_scope(key: &str) -> Option<CarryScope> {
         // The module travels with the files; without the switch the next
         // plugin tick would leave it in place and the panel would say off.
         FORMGUARD_KV_KEY,
+        FORMGUARD_MATH_KV_KEY,
         "wp_auto_update",
         "wp_update_skips",
         // = HostingService::LETTER_LANG_KV_KEY (checked in a test).

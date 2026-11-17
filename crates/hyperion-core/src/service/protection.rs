@@ -1015,6 +1015,9 @@ pub(super) const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
 
 /// `hosting_kv` key: "1" while the contact form guard is switched on.
 pub(super) const FORMGUARD_KV_KEY: &str = "formguard_enabled";
+/// `hosting_kv` key: "1" while the guard's forms should ask a sum. Kept when
+/// the guard is switched off, so switching it back on brings the sum back.
+pub(super) const FORMGUARD_MATH_KV_KEY: &str = "formguard_math";
 /// Per-hosting WAF auto-ban switch (`hosting_kv`). Absent ⇒ on; "off" opts
 /// the site out. Hits are still recorded either way.
 pub(super) const WAF_AUTOBAN_KV_KEY: &str = "waf_autoban_enabled";

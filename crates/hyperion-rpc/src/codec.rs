@@ -247,6 +247,10 @@ pub enum Request {
     FormGuardSet {
         sel: HostingSelector,
         enabled: bool,
+        /// Switch the sum the site's forms ask. Absent leaves it as it is; a
+        /// node older than the field ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        math: Option<bool>,
     },
     HostingRotateRedisPassword {
         sel: HostingSelector,

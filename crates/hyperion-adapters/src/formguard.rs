@@ -31,7 +31,7 @@ use crate::wpplugin::Module;
 use crate::AdapterError;
 
 /// Bumped whenever [`FORMGUARD_TEMPLATE`] changes in a way that matters.
-pub const FORMGUARD_VERSION: u32 = 2;
+pub const FORMGUARD_VERSION: u32 = 3;
 
 /// `<site dir>/logs/<this>`. The module derives the same path from
 /// `WP_CONTENT_DIR`; the two must agree.
@@ -364,6 +364,11 @@ if (!class_exists('Hyperion_Form_Guard', false)) {
             if ($email !== '') { self::bump('hyp_fg_e_' . md5($email)); }
         }
 
+        /** A refusal decided by another module (the form question), for the same log. */
+        public static function note($rule, $record) {
+            self::log($rule, self::form_name($record), self::email_of(self::rows($record)), self::ip(), self::ad_source());
+        }
+
         /** Beside the docroot, so it is not downloadable: it names senders. */
         public static function log_path() {
             if (!defined('WP_CONTENT_DIR')) { return ''; }
@@ -478,6 +483,7 @@ fn parse_line(line: &str) -> Option<FormGuardHit> {
             | "bad_phone"
             | "echo"
             | "mash"
+            | "math"
     ) {
         return None;
     }
@@ -665,7 +671,7 @@ mod tests {
         assert_eq!(parse_line(&line("\tgoogle")).unwrap().ad, "google");
         assert_eq!(parse_line(&line("\tmicrosoft")).unwrap().ad, "microsoft");
         assert_eq!(parse_line(&line("\t<b>google</b>")).unwrap().ad, "");
-        for rule in ["bad_name", "bad_phone", "echo", "mash"] {
+        for rule in ["bad_name", "bad_phone", "echo", "mash", "math"] {
             assert!(parse_line(&format!("2026-11-12T02:21:39\t{rule}")).is_some());
         }
     }

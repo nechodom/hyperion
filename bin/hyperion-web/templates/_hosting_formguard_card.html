@@ -3,11 +3,12 @@
    Hyperion must-use plugin on the OWNING node that refuses Elementor Pro form
    submissions nobody can act on: no message, the same one twice, too many
    from one sender. What it refused is listed here, because a guard that
-   quietly eats a real enquiry is worse than the junk. #}
+   quietly eats a real enquiry is worse than the junk. While it is on, a
+   second switch makes every form ask a small sum (its own module). #}
 <div class="chk-row" id="formguard-panel">
   <div class="chk-head">
     {% if !view.is_wordpress %}<span class="chk-dot"></span>
-    {% else if view.enabled && (!view.installed || !view.has_elementor_pro || view.refused_7d.is_none()) %}<span class="chk-dot warn"></span>
+    {% else if view.enabled && (!view.installed || !view.has_elementor_pro || view.refused_7d.is_none() || (view.math && !view.math_installed)) %}<span class="chk-dot warn"></span>
     {% else if view.enabled %}<span class="chk-dot ok"></span>
     {% else %}<span class="chk-dot"></span>{% endif %}
     <h3 class="chk-name">Contact form guard</h3>
@@ -16,7 +17,7 @@
       {% else if view.enabled && !view.installed %}On, but the plugin file is missing — re-installs on the next toggle
       {% else if view.enabled && !view.has_elementor_pro %}On, but this site has no Elementor Pro — other form plugins are not covered
       {% else if view.enabled %}
-        {{ self.refused_summary() }}{% if view.refused_ads_7d > 0 %}, {{ view.refused_ads_7d }} of them after an ad click{% endif %}
+        {{ self.refused_summary() }}{% if view.refused_ads_7d > 0 %}, {{ view.refused_ads_7d }} of them after an ad click{% endif %}{% if view.math && view.math_installed %} · forms ask a sum{% else if view.math %} · the sum is not installed, switch it off and on{% endif %}
       {% else if !view.has_elementor_pro %}Off — covers Elementor Pro forms, which this site does not have
       {% else %}Off — empty and repeated form submissions are not filtered{% endif %}
     </span>
@@ -32,9 +33,26 @@
     </div>
     {% endif %}
   </div>
-  {% if error.is_some() || !view.recent.is_empty() || self.mostly_ads() %}
+  {% if error.is_some() || !view.recent.is_empty() || self.mostly_ads() || self.offers_sum() %}
   <div class="chk-body">
     {% if let Some(e) = error %}<p class="chk-note tone-warn">{{ e }}</p>{% endif %}
+    {% if self.offers_sum() %}
+    <form class="chk-opt" hx-post="/hostings/formguard" hx-target="#formguard-panel" hx-swap="outerHTML" hx-trigger="change">
+      <input type="hidden" name="_csrf" value="{{ csrf_toggle }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <input type="hidden" name="enabled" value="on">
+      <input type="hidden" name="math_set" value="1">
+      <label class="chk-switch">
+        <input type="checkbox" class="switch" name="math" value="on" aria-label="Ask visitors to solve a sum"{% if view.math %} checked{% endif %}{% if !can_manage %} disabled{% endif %}>
+      </label>
+      <span class="chk-note">
+        <strong>Ask a sum</strong> — every Elementor Pro form on the site gets
+        one more field ("What is 3 + 4?") and is refused without the right
+        answer. Stops simple bots and adds a moment of friction; a person who
+        clicked an ad can still add two digits.
+      </span>
+    </form>
+    {% endif %}
     {% if self.mostly_ads() %}
     <p class="chk-note tone-warn">
       Most of these visitors clicked an ad before they sent the form. They are

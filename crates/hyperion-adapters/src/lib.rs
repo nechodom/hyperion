@@ -22,6 +22,7 @@ pub mod docker;
 pub mod docker_registry;
 pub mod email;
 pub mod formguard;
+pub mod formmath;
 pub mod fs;
 pub mod ftp;
 pub mod geoip;

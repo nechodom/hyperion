@@ -1094,6 +1094,8 @@ details.howto ul { padding-left: 1.2rem; }
 }
 .chk-sub { margin: 0.9rem 0 0.2rem; font-size: 0.82rem; font-weight: 600; }
 .chk-switch { display: inline-flex; margin: 0; cursor: pointer; }
+.chk-opt { display: flex; align-items: flex-start; gap: 0.6rem; margin: 0; }
+.chk-opt > .chk-switch { flex: none; margin-top: 0.1rem; }
 @media (max-width: 640px) {
   .chk-head { flex-wrap: wrap; }
   .chk-head .chk-name { width: auto; }
