@@ -642,10 +642,11 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/hostings/:selector/files/upload",
             post(handlers::files::post_upload)
-                // 100 MB cap matches the file manager's MAX_WRITE_BYTES
-                // at the adapter (64 MB) plus headroom for the multipart
-                // envelope. Default 2 MB would 400 every real upload.
-                .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)),
+                // Several files in one request, each capped at 64 MiB by
+                // the handler. Default 2 MB would 400 every real upload.
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    handlers::files::UPLOAD_BODY_LIMIT,
+                )),
         )
         .route(
             "/hostings/:selector/files/download",
@@ -653,6 +654,10 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/hostings/files/delete", post(handlers::files::post_delete))
         .route("/hostings/files/mkdir", post(handlers::files::post_mkdir))
+        .route(
+            "/hostings/files/new-file",
+            post(handlers::files::post_new_file),
+        )
         .route("/hostings/files/rename", post(handlers::files::post_rename))
         .route(
             "/hostings/files/edit-save",

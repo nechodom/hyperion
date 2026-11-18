@@ -52,6 +52,25 @@ pub fn tenant_text<T: std::fmt::Display>(s: T) -> askama::Result<String> {
         .collect())
 }
 
+/// A value as one component of a query string (`?path={{ p|urlq }}`).
+///
+/// Askama's own escaping is for HTML: it turns `&` into `&amp;`, which the
+/// browser turns straight back into `&` before following the link — so a file
+/// called `a&b.txt` or `50%.csv` produced a link to something else. Paths in
+/// URLs need this instead; the HTML escaping still happens on top.
+pub fn urlq<T: std::fmt::Display>(s: T) -> askama::Result<String> {
+    Ok(url::form_urlencoded::byte_serialize(s.to_string().as_bytes()).collect())
+}
+
+/// Permission bits as `chmod` writes them (`644`). 0 = the node did not say.
+pub fn mode(m: &u32) -> askama::Result<String> {
+    Ok(if *m == 0 {
+        "—".to_string()
+    } else {
+        format!("{:03o}", m & 0o7777)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

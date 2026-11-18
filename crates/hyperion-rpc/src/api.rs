@@ -1304,12 +1304,15 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: crate::wire::HostingSelector,
         rel_path: String,
         bytes_b64: String,
+        expect_version: Option<String>,
+        create_only: bool,
     ) -> Result<(), RpcError>;
-    /// Delete one file OR one empty directory.
+    /// Delete one file, symlink or directory (empty unless `recursive`).
     async fn hosting_file_delete(
         &self,
         sel: crate::wire::HostingSelector,
         rel_path: String,
+        recursive: bool,
     ) -> Result<(), RpcError>;
     /// Create one new empty directory.
     async fn hosting_file_mkdir(

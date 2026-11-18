@@ -1331,6 +1331,9 @@ pub struct HostingFileEntry {
     /// has a text MIME we recognise. UI uses this to decide whether
     /// to show "View" or "Download" only.
     pub inline_viewable: bool,
+    /// Permission bits (`0o644`). 0 from a node that predates the field.
+    #[serde(default)]
+    pub mode: u32,
 }
 
 /// Body of one viewed file. Returned by `HostingFileRead`. Capped
@@ -1342,6 +1345,18 @@ pub struct HostingFileContent {
     pub size: u64,
     pub content: String,
     pub truncated: bool,
+    /// What the file looked like when read; handed back with a save so an
+    /// edit made elsewhere in between is refused. Empty from an older node.
+    #[serde(default)]
+    pub version: String,
+    /// The bytes were not valid UTF-8 and `content` is an approximation:
+    /// fine to read, never to save back.
+    #[serde(default)]
+    pub lossy: bool,
+    /// The file uses CRLF line endings. A browser submits CRLF whatever the
+    /// file had, so the save needs to be told which to write.
+    #[serde(default)]
+    pub crlf: bool,
 }
 
 /// Per-hosting monitor config — read back to the operator's settings

@@ -1492,16 +1492,23 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
             sel,
             rel_path,
             bytes_b64,
-        } => match api.hosting_file_write(sel, rel_path, bytes_b64).await {
+            expect_version,
+            create_only,
+        } => match api
+            .hosting_file_write(sel, rel_path, bytes_b64, expect_version, create_only)
+            .await
+        {
             Ok(()) => Response::HostingFileWrite,
             Err(e) => Response::Error(e),
         },
-        Request::HostingFileDelete { sel, rel_path } => {
-            match api.hosting_file_delete(sel, rel_path).await {
-                Ok(()) => Response::HostingFileDelete,
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::HostingFileDelete {
+            sel,
+            rel_path,
+            recursive,
+        } => match api.hosting_file_delete(sel, rel_path, recursive).await {
+            Ok(()) => Response::HostingFileDelete,
+            Err(e) => Response::Error(e),
+        },
         Request::HostingFileMkdir { sel, rel_path } => {
             match api.hosting_file_mkdir(sel, rel_path).await {
                 Ok(()) => Response::HostingFileMkdir,
@@ -3754,6 +3761,9 @@ mod tests {
                 size: 0,
                 content: String::new(),
                 truncated: false,
+                version: String::new(),
+                lossy: false,
+                crlf: false,
             })
         }
         async fn hosting_file_download(
@@ -3768,10 +3778,17 @@ mod tests {
             _: HostingSelector,
             _: String,
             _: String,
+            _: Option<String>,
+            _: bool,
         ) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn hosting_file_delete(&self, _: HostingSelector, _: String) -> Result<(), RpcError> {
+        async fn hosting_file_delete(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: bool,
+        ) -> Result<(), RpcError> {
             Ok(())
         }
         async fn hosting_file_mkdir(&self, _: HostingSelector, _: String) -> Result<(), RpcError> {

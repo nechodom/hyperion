@@ -132,6 +132,8 @@ pub async fn post_set_php_ini(
             sel: HostingSelector::Id(detail.id.clone()),
             rel_path: ".user.ini".into(),
             bytes_b64,
+            expect_version: None,
+            create_only: false,
         },
     )
     .await;
