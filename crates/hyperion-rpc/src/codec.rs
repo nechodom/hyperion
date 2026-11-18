@@ -1488,11 +1488,21 @@ pub enum Request {
         sel: HostingSelector,
         rel_path: String,
         bytes_b64: String,
+        /// Refuse unless the file still has this `HostingFileContent::version`.
+        #[serde(default)]
+        expect_version: Option<String>,
+        /// Refuse when the name is taken. A node that predates the field
+        /// ignores it and overwrites, so the caller checks the listing too.
+        #[serde(default)]
+        create_only: bool,
     },
-    /// Delete one file OR one empty directory.
+    /// Delete one file, one symlink, or one directory — empty unless
+    /// `recursive`.
     HostingFileDelete {
         sel: HostingSelector,
         rel_path: String,
+        #[serde(default)]
+        recursive: bool,
     },
     /// Create one new empty directory.
     HostingFileMkdir {
@@ -3280,6 +3290,76 @@ where
 mod tests {
     use super::*;
     use tokio::io::duplex;
+
+    /// A master on the old release still talks to this node, and this
+    /// master to a node on the old one: the file manager's new fields must be
+    /// optional in both directions.
+    #[test]
+    fn file_manager_requests_from_an_older_peer_still_parse() {
+        // What an older peer sends: today's request minus the new keys.
+        fn without(req: &Request, keys: &[&str]) -> String {
+            let mut v = serde_json::to_value(req).expect("ser");
+            fn strip(v: &mut serde_json::Value, keys: &[&str]) {
+                if let serde_json::Value::Object(m) = v {
+                    for k in keys {
+                        m.remove(*k);
+                    }
+                    for (_, child) in m.iter_mut() {
+                        strip(child, keys);
+                    }
+                }
+            }
+            strip(&mut v, keys);
+            v.to_string()
+        }
+        let sel = HostingSelector::Domain(hyperion_validate::Domain::parse("ex.cz").expect("d"));
+        let old_write = without(
+            &Request::HostingFileWrite {
+                sel: sel.clone(),
+                rel_path: "a".into(),
+                bytes_b64: String::new(),
+                expect_version: Some("1-1".into()),
+                create_only: true,
+            },
+            &["expect_version", "create_only"],
+        );
+        assert!(!old_write.contains("create_only"));
+        let w: Request = serde_json::from_str(&old_write).expect("old write");
+        assert!(matches!(
+            w,
+            Request::HostingFileWrite {
+                expect_version: None,
+                create_only: false,
+                ..
+            }
+        ));
+        let old_delete = without(
+            &Request::HostingFileDelete {
+                sel,
+                rel_path: "a".into(),
+                recursive: true,
+            },
+            &["recursive"],
+        );
+        let d: Request = serde_json::from_str(&old_delete).expect("old delete");
+        assert!(matches!(
+            d,
+            Request::HostingFileDelete {
+                recursive: false,
+                ..
+            }
+        ));
+        let e: hyperion_types::HostingFileEntry = serde_json::from_str(
+            r#"{"name":"a","rel_path":"a","kind":"file","size":1,"modified_at":0,"mime":"","inline_viewable":true}"#,
+        )
+        .expect("old entry");
+        assert_eq!(e.mode, 0);
+        let c: hyperion_types::HostingFileContent = serde_json::from_str(
+            r#"{"rel_path":"a","mime":"","size":1,"content":"x","truncated":false}"#,
+        )
+        .expect("old content");
+        assert!(c.version.is_empty() && !c.lossy && !c.crlf);
+    }
 
     #[test]
     fn acme_dns_config_rpcs_round_trip() {

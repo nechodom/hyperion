@@ -54,9 +54,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             } else {
                 String::new()
             };
+            // Offered for anything that is not a known binary type: the
+            // extension says nothing about `.htaccess`, `.env` or a
+            // `Makefile`, and those are the files an operator comes here
+            // for. The read looks at the bytes and refuses real binaries.
             let inline_viewable = kind == "file"
                 && md.len() <= hyperion_adapters::files::MAX_INLINE_BYTES
-                && hyperion_adapters::files::is_inline_text(&mime);
+                && !hyperion_adapters::files::is_known_binary(&mime);
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                md.permissions().mode() & 0o7777
+            };
             let rel = if rel_path.is_empty() || rel_path == "/" {
                 name.clone()
             } else {
@@ -76,14 +84,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 modified_at,
                 mime,
                 inline_viewable,
+                mode,
             });
         }
-        // Directories first, then alphabetical.
-        entries.sort_by(|a, b| match (a.kind.as_str(), b.kind.as_str()) {
-            ("dir", "dir") | ("file", "file") => a.name.cmp(&b.name),
-            ("dir", _) => std::cmp::Ordering::Less,
-            (_, "dir") => std::cmp::Ordering::Greater,
-            _ => a.name.cmp(&b.name),
+        // Directories first, then by name the way a person reads it:
+        // `README` does not sort ahead of `index.php` for being uppercase.
+        entries.sort_by(|a, b| {
+            (a.kind != "dir")
+                .cmp(&(b.kind != "dir"))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| a.name.cmp(&b.name))
         });
         Ok((rel_path, entries))
     }
@@ -111,6 +121,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         sel: HostingSelector,
         rel_path: String,
         bytes_b64: String,
+        expect_version: Option<String>,
+        create_only: bool,
     ) -> Result<(), RpcError> {
         use base64::Engine;
         let detail = self.get(sel).await?;
@@ -120,7 +132,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Validation {
                 message: format!("base64 decode: {e}"),
             })?;
-        hyperion_adapters::files::write_file_in_jail(&jail, &rel_path, &bytes)
+        let opts = hyperion_adapters::files::WriteOpts {
+            // An empty version is "the reader could not tell" (an older
+            // master), not a version to compare against.
+            expect_version: expect_version.filter(|v| !v.is_empty()),
+            create_only,
+        };
+        hyperion_adapters::files::write_file_in_jail(&jail, &rel_path, &bytes, &opts)
             .await
             .map_err(|e| RpcError::Validation {
                 message: e.to_string(),
@@ -149,10 +167,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         sel: HostingSelector,
         rel_path: String,
+        recursive: bool,
     ) -> Result<(), RpcError> {
         let detail = self.get(sel).await?;
         let jail = std::path::PathBuf::from(&detail.root_dir);
-        hyperion_adapters::files::delete_in_jail(&jail, &rel_path)
+        hyperion_adapters::files::delete_in_jail(&jail, &rel_path, recursive)
             .await
             .map_err(|e| RpcError::Validation {
                 message: e.to_string(),
@@ -163,6 +182,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &serde_json::json!({
                 "domain": detail.domain,
                 "rel_path": rel_path,
+                "recursive": recursive,
             })
             .to_string(),
             "ok",
@@ -241,7 +261,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Validation {
                 message: e.to_string(),
             })?;
-        let md = tokio::fs::metadata(&abs)
+        let md = tokio::fs::symlink_metadata(&abs)
             .await
             .map_err(|e| RpcError::Validation {
                 message: format!("stat: {e}"),
@@ -255,11 +275,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             abs.file_name().and_then(|n| n.to_str()).unwrap_or(""),
         )
         .to_string();
-        if !hyperion_adapters::files::is_inline_text(&mime) {
-            return Err(RpcError::Validation {
-                message: format!("binary file (mime={mime}) — download separately"),
-            });
-        }
+        let version = hyperion_adapters::files::file_version(&md);
         if md.len() > hyperion_adapters::files::MAX_INLINE_BYTES {
             return Ok(hyperion_types::HostingFileContent {
                 rel_path,
@@ -267,18 +283,40 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 size: md.len(),
                 content: String::new(),
                 truncated: true,
+                version,
+                lossy: false,
+                crlf: false,
             });
         }
         let bytes = tokio::fs::read(&abs)
             .await
             .map_err(|e| RpcError::Internal_with(format!("read: {e}")))?;
-        let content = String::from_utf8_lossy(&bytes).to_string();
+        // By content, not by extension: the names that matter most on a web
+        // host (`.htaccess`, `.env`, `.htpasswd`) have none.
+        if hyperion_adapters::files::is_known_binary(&mime)
+            || hyperion_adapters::files::looks_binary(&bytes)
+        {
+            return Err(RpcError::Validation {
+                message: "this is a binary file — download it instead".into(),
+            });
+        }
+        // Text in a legacy encoding (Windows-1250 is common on old Czech
+        // sites) is shown as best we can and flagged: saving the
+        // approximation back would destroy every accented letter.
+        let (content, lossy) = match String::from_utf8(bytes) {
+            Ok(s) => (s, false),
+            Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), true),
+        };
+        let crlf = content.contains("\r\n");
         Ok(hyperion_types::HostingFileContent {
             rel_path,
             mime,
             size: md.len(),
             content,
             truncated: false,
+            version,
+            lossy,
+            crlf,
         })
     }
 

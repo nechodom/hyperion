@@ -1722,15 +1722,20 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         sel: HostingSelector,
         rel_path: String,
         bytes_b64: String,
+        expect_version: Option<String>,
+        create_only: bool,
     ) -> Result<(), RpcError> {
-        self.svc.hosting_file_write(sel, rel_path, bytes_b64).await
+        self.svc
+            .hosting_file_write(sel, rel_path, bytes_b64, expect_version, create_only)
+            .await
     }
     async fn hosting_file_delete(
         &self,
         sel: HostingSelector,
         rel_path: String,
+        recursive: bool,
     ) -> Result<(), RpcError> {
-        self.svc.hosting_file_delete(sel, rel_path).await
+        self.svc.hosting_file_delete(sel, rel_path, recursive).await
     }
     async fn hosting_file_mkdir(
         &self,

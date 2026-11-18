@@ -1,4 +1,20 @@
 {% extends "base.html" %}
+{#- The path, as links. Shared by the listing and the viewer so "where am I"
+    reads the same on both. Every path that goes into a URL is `|urlq`: a
+    tenant's file can be called `a&b #1.txt`, and HTML-escaping alone sends
+    such a link somewhere else. -#}
+{% macro crumbs(link_last) %}
+  <nav class="fm-path" aria-label="Folder">
+    {% for c in breadcrumbs %}
+      {% if loop.last && !link_last %}
+        <span class="fm-crumb is-here">{{ c.0|tenant_text }}</span>
+      {% else %}
+        <a class="fm-crumb" href="/hostings/{{ selector }}/files?path={{ c.1|urlq }}">{{ c.0|tenant_text }}</a>
+        <span class="fm-sep">/</span>
+      {% endif %}
+    {% endfor %}
+  </nav>
+{% endmacro %}
 {% block title %}Files · {{ domain }} · Hyperion{% endblock %}
 {% block main %}
 <div class="breadcrumbs">
@@ -11,171 +27,238 @@
 
 <div class="page-header">
   <div>
-    <h1>Files · {{ domain }}</h1>
+    <h1>Files</h1>
     <div class="subtitle">
-      This browser is scoped to <code>htdocs/</code>. The agent refuses
-      path traversal and symlinks.
-      {% if !can_write %}<span class="text-soft">(Read-only role — viewing only)</span>{% endif %}
+      The web root of <a href="/hostings/{{ selector }}">{{ domain }}</a>.
+      {% if !can_write %}You can look, but not change anything here.{% endif %}
     </div>
   </div>
 </div>
 
 {% if let Some(e) = error %}
-  <div class="flash error">
+  <div class="flash error" role="alert">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
     <div class="flash-body">{{ e }}</div>
   </div>
 {% endif %}
-{% if let Some(m) = flash %}
-  <div class="flash success">
+{% if let Some(m) = ok %}
+  <div class="flash success" role="status">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
     <div class="flash-body">{{ m }}</div>
   </div>
 {% endif %}
 
-{% if can_write %}
-<div class="card" style="margin-bottom:1rem;padding:0.9rem 1rem;display:flex;gap:0.7rem;flex-wrap:wrap;align-items:center">
-  <form method="post" action="/hostings/files/mkdir" class="m-wrap" style="display:flex;gap:0.4rem;align-items:center;margin:0">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="selector" value="{{ selector }}">
-    <input type="hidden" name="dir" value="{{ rel_path }}">
-    <input type="text" name="name" placeholder="New folder name" pattern="[^/\\\\\0]+" required style="width:14rem;max-width:100%;font-size:0.85rem">
-    <button class="btn small" type="submit">Create folder</button>
-  </form>
-  <form method="post" action="/hostings/{{ selector }}/files/upload?_csrf={{ csrf_token }}"
-        enctype="multipart/form-data" class="m-wrap" style="display:flex;gap:0.4rem;align-items:center;margin:0">
-    <input type="hidden" name="dir" value="{{ rel_path }}">
-    <input type="file" name="file" required style="font-size:0.85rem">
-    <button class="btn small primary" type="submit">Upload file</button>
-  </form>
-  <span class="text-soft small">Up to 64 MiB. A file with the same name is overwritten.</span>
-</div>
-{% endif %}
-
-<div class="card" style="margin-bottom:1rem;padding:0.7rem 1rem">
-  <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;font-size:0.92rem">
-    <strong>Path:</strong>
-    {% for c in breadcrumbs %}
-      {% if loop.last %}
-        <span><code>{{ c.0 }}</code></span>
-      {% else %}
-        <a href="/hostings/{{ selector }}/files?path={{ c.1|e }}"><code>{{ c.0 }}</code></a>
-        <span class="text-soft">/</span>
+{% if let Some(v) = viewer %}
+{# ───────────── One file: viewer or editor, full width ───────────── #}
+<div class="group fm-view">
+  <div class="ghead">
+    {% call crumbs(true) %}
+    <span class="fm-crumb is-here">{{ viewer_name|tenant_text }}</span>
+    <div class="ghead-tools">
+      <span class="fm-meta">
+        {% if !v.mime.is_empty() %}{{ v.mime }} · {% endif %}{{ crate::handlers::files::fmt_size_u64(v.size) }}
+      </span>
+      <a class="btn small" href="/hostings/{{ selector }}/files/download?path={{ v.rel_path|urlq }}">Download</a>
+      {% if !edit_mode && can_write && !v.lossy && !v.truncated %}
+        <a class="btn small primary" href="/hostings/{{ selector }}/files?file={{ v.rel_path|urlq }}&edit=1">Edit</a>
       {% endif %}
-    {% endfor %}
+    </div>
   </div>
+
+  {% if v.truncated %}
+    <div class="fm-note">
+      This file is larger than 1 MiB, too large to show here. Download it to read it.
+    </div>
+  {% else %}
+    {% if v.lossy %}
+      <div class="fm-note">
+        This file is not UTF-8 (an older encoding such as Windows-1250), so some
+        characters are shown as �. It can be read here but not edited: saving
+        would damage those characters. Download it to change it.
+      </div>
+    {% endif %}
+    {% if edit_mode %}
+      <form method="post" action="/hostings/files/edit-save" class="fm-editor" id="fm-editor"{% if error.is_some() %} data-unsaved="1"{% endif %}>
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <input type="hidden" name="rel_path" value="{{ v.rel_path }}">
+        <input type="hidden" name="version" value="{{ v.version }}">
+        <input type="hidden" name="crlf" value="{% if v.crlf %}1{% endif %}">
+        <div class="fm-code is-edit">
+          <pre class="fm-gutter" aria-hidden="true">{{ gutter }}</pre>
+          {#- The line break after the opening tag is on purpose: HTML drops
+              one leading newline inside a textarea, so without it a file
+              that starts with a blank line loses that line on every save. -#}
+          <textarea name="content" class="fm-text" wrap="off" spellcheck="false"
+                    autocapitalize="off" autocomplete="off" aria-label="Contents of {{ viewer_name }}">
+{{ v.content }}</textarea>
+        </div>
+        <div class="fm-foot">
+          <span class="fm-meta">
+            <span id="fm-lines">{{ line_count }}</span> lines ·
+            {% if v.crlf %}CRLF{% else %}LF{% endif %} line endings
+            <span id="fm-dirty" hidden> · unsaved changes</span>
+          </span>
+          <span class="fm-foot-actions">
+            <a class="btn" href="/hostings/{{ selector }}/files?file={{ v.rel_path|urlq }}">Close</a>
+            <button class="btn primary" type="submit" title="Ctrl+S / ⌘S">Save</button>
+          </span>
+        </div>
+      </form>
+    {% else %}
+      <div class="fm-code">
+        <pre class="fm-gutter" aria-hidden="true">{{ gutter }}</pre>
+        <pre class="fm-text"><code>{{ v.content }}</code></pre>
+      </div>
+      <div class="fm-foot">
+        <span class="fm-meta">
+          {{ line_count }} lines · {% if v.crlf %}CRLF{% else %}LF{% endif %} line endings
+        </span>
+        <span class="fm-foot-actions">
+          <a class="btn" href="/hostings/{{ selector }}/files?path={{ rel_path|urlq }}">Back to folder</a>
+        </span>
+      </div>
+    {% endif %}
+  {% endif %}
 </div>
 
-<div style="display:grid;grid-template-columns:minmax(0,1fr){% if viewer.is_some() %} minmax(0,2fr){% endif %};gap:1rem;align-items:start">
-
-<div class="card no-pad-table">
-  {% if !entries.is_empty() %}
-  <div class="row" style="justify-content:flex-end;padding:0.55rem 0.9rem 0;gap:0.4rem">
-    <label for="show-hidden" class="text-soft small"
-           style="display:inline-flex;align-items:center;gap:0.4rem;cursor:pointer;user-select:none">
-      <input type="checkbox" id="show-hidden" checked>
-      Show hidden files
-      <span class="text-soft" id="hidden-count"></span>
-    </label>
+{% else %}
+{# ───────────── A folder ───────────── #}
+<div class="group fm-list" id="fm-list"{% if can_write %} data-fm-drop{% endif %}>
+  <div class="ghead">
+    {% call crumbs(false) %}
+    <div class="ghead-tools">
+      {% if hidden_count > 0 %}
+        <label class="fm-toggle" for="show-hidden">
+          <input type="checkbox" id="show-hidden" checked>
+          Hidden files ({{ hidden_count }})
+        </label>
+      {% endif %}
+      {% if can_write %}
+        <button type="button" class="btn small" data-fm-name="mkdir">New folder</button>
+        <button type="button" class="btn small" data-fm-name="new-file">New file</button>
+        <form method="post" action="/hostings/{{ selector }}/files/upload?_csrf={{ csrf_token }}"
+              enctype="multipart/form-data" id="fm-upload">
+          <input type="hidden" name="dir" value="{{ rel_path }}">
+          <input type="file" name="file" id="fm-upload-input" multiple hidden>
+          <button type="button" class="btn small primary" id="fm-upload-btn"
+                  title="Up to {{ max_file_label }} per file. A file with the same name is replaced.">Upload</button>
+        </form>
+      {% endif %}
+    </div>
   </div>
-  {% endif %}
-  {% if entries.is_empty() %}
+
+  {% if entries.is_empty() && parent_path.is_none() %}
     <div class="empty">
       <div class="empty-illustration">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
       </div>
-      <h3>This folder is empty</h3>
-      <p>Upload a file above, or add files to <code>{{ domain }}/htdocs</code> over FTP, SCP, or wp-cli to see them here.</p>
+      <h3>Nothing here yet</h3>
+      <p>{% if can_write %}Upload files with the button above or drop them onto this panel. {% endif %}Files added over FTP or SFTP show up here too.</p>
     </div>
   {% else %}
     <div class="table-wrap">
-      <table>
+      <table class="fm-table">
         <thead>
           <tr>
             <th>Name</th>
             <th class="right">Size</th>
-            <th>Modified</th>
-            <th></th>
+            <th class="fm-col-mode" title="Permissions, as chmod writes them">Mode</th>
+            <th class="fm-col-mod">Modified</th>
+            <th><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
-        <tbody>
-          {% if !rel_path.is_empty() %}
-            <tr>
-              <td colspan="4">
-                <a href="/hostings/{{ selector }}/files?path={{ crate::handlers::files::parent_path_for_template(rel_path)|e }}" style="display:inline-flex;align-items:center;gap:0.4rem">
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
-                  Up one level
+        <tbody id="fm-rows">
+          {% if let Some(up) = parent_path %}
+            <tr class="fm-up">
+              <td colspan="5">
+                <a class="fm-name" href="/hostings/{{ selector }}/files?path={{ up|urlq }}">
+                  <svg class="fm-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>
+                  <span>Up one level</span>
                 </a>
               </td>
             </tr>
           {% endif %}
+          {% if entries.is_empty() %}
+            <tr class="fm-none"><td colspan="5">This folder is empty.</td></tr>
+          {% endif %}
           {% for e in entries %}
             {#- A dot-prefixed name is "hidden" by Unix convention. Marked
-                rather than dropped: the server has always listed them and
-                they are the ones that matter on a web host (.htaccess,
-                .user.ini, .env), so the default stays "shown" and the
-                toggle below only lets an operator quiet the noise
-                (.DS_Store, .git, .cache) while they work. -#}
+                rather than dropped: they are the ones that matter on a web
+                host (.htaccess, .user.ini, .env), so the default stays
+                "shown" and the toggle only quiets the noise. -#}
             <tr{% if e.name.starts_with('.') %} data-dotfile="1"{% endif %}>
               <td>
                 {% if e.kind == "dir" %}
-                  <a href="/hostings/{{ selector }}/files?path={{ e.rel_path|e }}" style="display:inline-flex;gap:0.4rem;align-items:center">
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                    <strong>{{ e.name }}</strong>
+                  <a class="fm-name is-dir" href="/hostings/{{ selector }}/files?path={{ e.rel_path|urlq }}">
+                    <svg class="fm-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    <span>{{ e.name|tenant_text }}</span>
+                  </a>
+                {% else if e.kind == "file" && e.inline_viewable %}
+                  <a class="fm-name" href="/hostings/{{ selector }}/files?file={{ e.rel_path|urlq }}" title="{{ e.mime }}">
+                    <svg class="fm-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    <span>{{ e.name|tenant_text }}</span>
+                  </a>
+                {% else if e.kind == "file" %}
+                  <a class="fm-name" href="/hostings/{{ selector }}/files/download?path={{ e.rel_path|urlq }}" title="{{ e.mime }} — download">
+                    <svg class="fm-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    <span>{{ e.name|tenant_text }}</span>
                   </a>
                 {% else %}
-                  {% if e.inline_viewable %}
-                    <a href="/hostings/{{ selector }}/files?path={{ rel_path|e }}&file={{ e.rel_path|e }}" style="display:inline-flex;gap:0.4rem;align-items:center">
-                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                      {{ e.name }}
-                    </a>
-                  {% else %}
-                    <span style="display:inline-flex;gap:0.4rem;align-items:center">
-                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                      <span class="text-soft">{{ e.name }}</span>
-                    </span>
-                  {% endif %}
+                  <span class="fm-name is-inert">
+                    <svg class="fm-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                    <span>{{ e.name|tenant_text }}</span>
+                    <span class="fm-tag">{% if e.kind == "symlink" %}link{% else %}special{% endif %}</span>
+                  </span>
                 {% endif %}
-                <div class="text-soft small">{{ e.mime }}</div>
               </td>
-              <td class="right text-soft small">
-                {% if e.kind == "dir" %}—{% else %}{{ crate::handlers::files::fmt_size_u64(e.size) }}{% endif %}
+              <td class="right numeric fm-dim">
+                {% if e.kind == "file" %}{{ crate::handlers::files::fmt_size_u64(e.size) }}{% else %}—{% endif %}
               </td>
-              <td class="text-soft small">{{ crate::handlers::stats::fmt_ago(e.modified_at) }}</td>
+              <td class="fm-col-mode fm-dim fm-mono">{% if e.kind == "file" || e.kind == "dir" %}{{ e.mode|mode }}{% else %}—{% endif %}</td>
+              <td class="fm-col-mod fm-dim" title="{{ e.modified_at|datetime }} UTC">{{ crate::handlers::stats::fmt_ago(e.modified_at) }}</td>
               <td class="right">
-                <div class="row-menu" style="display:inline-flex;gap:0.3rem;align-items:center;position:relative">
+                <div class="fm-acts">
                   {% if e.kind == "file" && e.inline_viewable && can_write %}
-                    <a class="btn small" href="/hostings/{{ selector }}/files?path={{ rel_path|e }}&file={{ e.rel_path|e }}&edit=1" title="Edit">✎</a>
+                    <a class="fm-act" href="/hostings/{{ selector }}/files?file={{ e.rel_path|urlq }}&edit=1" title="Edit" aria-label="Edit {{ e.name }}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+                    </a>
                   {% endif %}
                   {% if e.kind == "file" %}
-                    <a class="btn small" href="/hostings/{{ selector }}/files/download?path={{ e.rel_path|e }}" title="Download">↓</a>
+                    <a class="fm-act" href="/hostings/{{ selector }}/files/download?path={{ e.rel_path|urlq }}" title="Download" aria-label="Download {{ e.name }}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    </a>
                   {% endif %}
                   {% if can_write %}
-                    <button type="button" class="btn small row-menu-toggle" title="More actions" aria-haspopup="true">⋯</button>
-                    <div class="row-menu-pop" hidden>
-                      <button type="button" class="row-menu-item" data-rename
-                              data-current="{{ e.name }}"
-                              data-from="{{ e.rel_path }}">Rename…</button>
-                      <form method="post" action="/hostings/files/delete" style="margin:0"
-                            data-confirm-title="Delete {{ e.name }}"
-                            data-confirm-body="This {{ e.kind }} will be removed permanently. There is no undo, and folders must be empty before they can be deleted."
-                            data-confirm-confirm-label="Delete permanently"
-                            data-confirm-variant="danger"
-                            data-confirm-require="{{ e.name }}">
-                        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                        <input type="hidden" name="selector" value="{{ selector }}">
-                        <input type="hidden" name="rel_path" value="{{ e.rel_path }}">
-                        <input type="hidden" name="dir" value="{{ rel_path }}">
-                        <button class="row-menu-item row-menu-danger" type="submit">Delete</button>
-                      </form>
-                    </div>
-                    {# Hidden form posted by the JS rename prompt below. #}
-                    <form method="post" action="/hostings/files/rename" class="row-rename-form" style="display:none;margin:0">
+                    <button type="button" class="fm-act" data-fm-name="rename"
+                            data-from="{{ e.rel_path }}" data-current="{{ e.name }}"
+                            title="Rename" aria-label="Rename {{ e.name }}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5h16v2"/><line x1="12" y1="5" x2="12" y2="19"/><line x1="9" y1="19" x2="15" y2="19"/></svg>
+                    </button>
+                    {#- A folder goes with everything in it, so its name has
+                        to be typed. A file or a link asks once. -#}
+                    <form method="post" action="/hostings/files/delete"
+                          {% if e.kind == "dir" %}
+                          data-confirm-title="Delete the folder {{ e.name }}?"
+                          data-confirm-body="The folder and everything inside it will be removed permanently. There is no undo."
+                          data-confirm-require="{{ e.name }}"
+                          {% else if e.kind == "symlink" %}
+                          data-confirm-title="Delete the link {{ e.name }}?"
+                          data-confirm-body="Only the link is removed. Whatever it points to stays where it is."
+                          {% else %}
+                          data-confirm-title="Delete {{ e.name }}?"
+                          data-confirm-body="This file will be removed permanently. There is no undo."
+                          {% endif %}
+                          data-confirm-confirm-label="Delete"
+                          data-confirm-variant="danger">
                       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                       <input type="hidden" name="selector" value="{{ selector }}">
+                      <input type="hidden" name="rel_path" value="{{ e.rel_path }}">
                       <input type="hidden" name="dir" value="{{ rel_path }}">
-                      <input type="hidden" name="from" value="{{ e.rel_path }}">
-                      <input type="hidden" name="to_name" value="">
+                      {% if e.kind == "dir" %}<input type="hidden" name="recursive" value="1">{% endif %}
+                      <button class="fm-act is-danger" type="submit" title="Delete" aria-label="Delete {{ e.name }}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+                      </button>
                     </form>
                   {% endif %}
                 </div>
@@ -186,157 +269,211 @@
       </table>
     </div>
   {% endif %}
+  {% if can_write %}
+    <div class="fm-drop-hint" aria-hidden="true">Drop files to upload them here</div>
+  {% endif %}
 </div>
 
-{% if let Some(v) = viewer %}
-<div class="card">
-  <div class="spread" style="margin-bottom:0.6rem">
-    <h3 style="margin:0;font-size:0.95rem">
-      {% if edit_mode %}<span class="pill" style="background:var(--warn);color:white;margin-right:0.4rem">EDITING</span>{% endif %}
-      {{ v.rel_path }}
-    </h3>
-    <span class="text-soft small">{{ v.mime }} · {{ crate::handlers::files::fmt_size_u64(v.size) }}</span>
-  </div>
-  {% if v.truncated %}
-    <div class="flash warn">
-      <div class="flash-body">This file is larger than the 1 MiB inline limit, so only the start is shown. Use scp or sftp to get the full contents.</div>
+{% if can_write %}
+{#- One dialog for the three things that need a name. The trigger says which
+    (`data-fm-name`); the script points the form at the matching route. -#}
+<dialog class="fm-dialog" id="fm-name-dialog" aria-labelledby="fm-name-title">
+  <form method="post" action="/hostings/files/mkdir" id="fm-name-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ selector }}">
+    <input type="hidden" name="dir" value="{{ rel_path }}">
+    <input type="hidden" name="from" value="">
+    <h2 id="fm-name-title">New folder</h2>
+    <label for="fm-name-input" id="fm-name-label">Name</label>
+    <input type="text" name="name" id="fm-name-input" class="mono-input" required
+           autocomplete="off" autocapitalize="off" spellcheck="false">
+    <p class="fm-dialog-err" id="fm-name-err" hidden>A name cannot contain a slash.</p>
+    <div class="fm-dialog-actions">
+      <button type="button" class="btn ghost" id="fm-name-cancel">Cancel</button>
+      <button type="submit" class="btn primary" id="fm-name-submit">Create</button>
     </div>
-  {% endif %}
-  {% if edit_mode %}
-    {# Edit mode: editable textarea + Save / Cancel buttons. CSRF
-       ride-along _csrf in the form body (urlencoded → middleware
-       buffers + validates). #}
-    <form method="post" action="/hostings/files/edit-save" style="margin:0">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="selector" value="{{ selector }}">
-      <input type="hidden" name="rel_path" value="{{ v.rel_path }}">
-      <textarea name="content"
-                spellcheck="false"
-                style="width:100%;box-sizing:border-box;margin:0;padding:0.85rem;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);min-height:60vh;max-height:75vh;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.82rem;line-height:1.5;resize:vertical">{{ v.content }}</textarea>
-      <div style="display:flex;gap:0.5rem;margin-top:0.6rem;justify-content:flex-end">
-        <a class="btn" href="/hostings/{{ selector }}/files?path={{ rel_path|e }}&file={{ v.rel_path|e }}">Cancel</a>
-        <button class="btn primary" type="submit">Save changes</button>
-      </div>
-    </form>
-  {% else %}
-    <pre style="margin:0;padding:0.85rem;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);overflow:auto;max-height:70vh;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.82rem;line-height:1.5"><code>{{ v.content }}</code></pre>
-    {% if can_write %}
-    <div style="margin-top:0.6rem;text-align:right">
-      <a class="btn primary" href="/hostings/{{ selector }}/files?path={{ rel_path|e }}&file={{ v.rel_path|e }}&edit=1">Edit</a>
-    </div>
-    {% endif %}
-  {% endif %}
-</div>
+  </form>
+</dialog>
 {% endif %}
-
-</div>
-
-<style>
-/* Per-row 3-dot dropdown menu — replaces the always-visible
-   rename input which was visually noisy. */
-.row-menu-toggle { padding-inline: 0.45rem; }
-.row-menu-pop {
-  position: absolute;
-  right: 0;
-  top: 100%;
-  margin-top: 4px;
-  min-width: 9rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 12px 32px rgba(0,0,0,0.35);
-  z-index: 50;
-  padding: 0.25rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-}
-/* `display: flex` above overrides the user-agent's implicit
-   `[hidden] { display: none }` rule, which is why EVERY row's
-   menu was visible at once. Force `display: none` when the
-   attribute is set so the JS toggle actually hides them. */
-.row-menu-pop[hidden] { display: none !important; }
-.row-menu-item {
-  background: transparent;
-  border: 0;
-  text-align: left;
-  padding: 0.45rem 0.7rem;
-  font-size: 0.85rem;
-  border-radius: var(--radius-xs);
-  cursor: pointer;
-  color: var(--text);
-  width: 100%;
-}
-.row-menu-item:hover { background: var(--surface-2); }
-.row-menu-item.row-menu-danger { color: var(--danger); }
-</style>
+{% endif %}
 
 <script>
 (function () {
   'use strict';
-  // Toggle 3-dot menus + close on outside click / Esc.
-  document.addEventListener('click', (ev) => {
-    const tog = ev.target.closest('.row-menu-toggle');
-    document.querySelectorAll('.row-menu-pop').forEach((p) => {
-      if (tog && p.parentElement.contains(tog)) {
-        const open = !p.hidden;
-        p.hidden = open;
-      } else {
-        p.hidden = true;
-      }
-    });
-  });
-  document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape') {
-      document.querySelectorAll('.row-menu-pop').forEach((p) => { p.hidden = true; });
-    }
-  });
-  // Rename — prompt for new name, fill the hidden form, submit.
-  document.addEventListener('click', (ev) => {
-    const t = ev.target.closest('[data-rename]');
-    if (!t) return;
-    ev.preventDefault();
-    const current = t.dataset.current || '';
-    const next = prompt('New name (single component, no slashes):', current);
-    if (!next || next === current) return;
-    if (next.indexOf('/') >= 0 || next.indexOf('\\') >= 0 || next.indexOf('\0') >= 0) {
-      alert('Name cannot contain / \\ or NUL.');
-      return;
-    }
-    const wrap = t.closest('.row-menu');
-    const f = wrap && wrap.querySelector('.row-rename-form');
-    if (!f) return;
-    f.querySelector('input[name="to_name"]').value = next;
-    f.submit();
-  });
-})();
-</script>
 
-{#- Client-side on purpose: the listing is already in the page, so hiding is
-    instant and costs no round-trip, and the choice is a per-viewer
-    preference rather than anything the server should hold. Remembered in
-    localStorage, which is per-artifact-origin and per-browser; a browser
-    that refuses it simply gets the default. -#}
-<script>
-  (function () {
-    var box = document.getElementById('show-hidden');
-    var count = document.getElementById('hidden-count');
-    if (!box) return;
-    var rows = document.querySelectorAll('tr[data-dotfile="1"]');
-    if (count && rows.length) { count.textContent = '(' + rows.length + ')'; }
+  // The outcome banner came in on the URL; take it back off, so a reload or
+  // a shared link does not announce "Deleted x" again.
+  try {
+    var u = new URL(window.location.href);
+    if (u.searchParams.has('ok') || u.searchParams.has('error')) {
+      u.searchParams.delete('ok');
+      u.searchParams.delete('error');
+      window.history.replaceState(null, '', u.pathname + u.search + u.hash);
+    }
+  } catch (e) { /* old browser: the banner just stays in the URL */ }
+
+  // ── Hidden files ──────────────────────────────────────────────────────
+  // Client-side on purpose: the rows are already here, and the choice is a
+  // per-browser preference, not something the server should hold.
+  var box = document.getElementById('show-hidden');
+  var rows = document.getElementById('fm-rows');
+  if (box && rows) {
     var KEY = 'hyperion.files.showHidden';
     try {
       var saved = window.localStorage.getItem(KEY);
       if (saved !== null) { box.checked = saved === '1'; }
-    } catch (e) { /* private mode, blocked site data — keep the default */ }
-    function apply() {
-      for (var i = 0; i < rows.length; i++) {
-        rows[i].style.display = box.checked ? '' : 'none';
-      }
+    } catch (e) { /* private mode — keep the default */ }
+    var applyHidden = function () {
+      rows.classList.toggle('fm-hide-dot', !box.checked);
       try { window.localStorage.setItem(KEY, box.checked ? '1' : '0'); } catch (e) {}
+    };
+    box.addEventListener('change', applyHidden);
+    applyHidden();
+  }
+
+  // ── Name dialog: new folder, new file, rename ─────────────────────────
+  var dlg = document.getElementById('fm-name-dialog');
+  if (dlg && typeof dlg.showModal === 'function') {
+    var form = document.getElementById('fm-name-form');
+    var input = document.getElementById('fm-name-input');
+    var err = document.getElementById('fm-name-err');
+    var KINDS = {
+      'mkdir':    { action: '/hostings/files/mkdir',    title: 'New folder', label: 'Folder name', go: 'Create' },
+      'new-file': { action: '/hostings/files/new-file', title: 'New file',   label: 'File name',   go: 'Create and edit' },
+      'rename':   { action: '/hostings/files/rename',   title: 'Rename',     label: 'New name',    go: 'Rename' }
+    };
+    document.addEventListener('click', function (ev) {
+      var t = ev.target.closest('[data-fm-name]');
+      if (!t) return;
+      var k = KINDS[t.dataset.fmName];
+      if (!k) return;
+      form.action = k.action;
+      form.elements.from.value = t.dataset.from || '';
+      document.getElementById('fm-name-title').textContent =
+        t.dataset.current ? 'Rename ' + t.dataset.current : k.title;
+      document.getElementById('fm-name-label').textContent = k.label;
+      document.getElementById('fm-name-submit').textContent = k.go;
+      input.value = t.dataset.current || '';
+      err.hidden = true;
+      dlg.showModal();
+      input.focus();
+      // Renaming usually keeps the extension: select the part before it.
+      var dot = input.value.lastIndexOf('.');
+      input.setSelectionRange(0, dot > 0 ? dot : input.value.length);
+    });
+    document.getElementById('fm-name-cancel').addEventListener('click', function () { dlg.close(); });
+    dlg.addEventListener('click', function (ev) { if (ev.target === dlg) dlg.close(); });
+    input.addEventListener('input', function () { err.hidden = true; });
+    form.addEventListener('submit', function (ev) {
+      var v = input.value.trim();
+      if (!v || v === '.' || v === '..' || /[\/\\]/.test(v)) {
+        ev.preventDefault();
+        err.hidden = false;
+        input.focus();
+      }
+    });
+  }
+
+  // ── Upload: the button, and a drop on the panel ───────────────────────
+  var up = document.getElementById('fm-upload');
+  var upInput = document.getElementById('fm-upload-input');
+  var upBtn = document.getElementById('fm-upload-btn');
+  if (up && upInput && upBtn) {
+    var send = function () {
+      if (!upInput.files || !upInput.files.length) return;
+      upBtn.disabled = true;
+      upBtn.textContent = upInput.files.length === 1
+        ? 'Uploading…' : 'Uploading ' + upInput.files.length + ' files…';
+      up.submit();
+    };
+    upBtn.addEventListener('click', function () { upInput.click(); });
+    upInput.addEventListener('change', send);
+
+    var panel = document.querySelector('[data-fm-drop]');
+    if (panel) {
+      var depth = 0;
+      var hasFiles = function (ev) {
+        var t = ev.dataTransfer && ev.dataTransfer.types;
+        return !!t && Array.prototype.indexOf.call(t, 'Files') >= 0;
+      };
+      panel.addEventListener('dragenter', function (ev) {
+        if (!hasFiles(ev)) return;
+        ev.preventDefault(); depth++; panel.classList.add('is-drop');
+      });
+      panel.addEventListener('dragover', function (ev) {
+        if (hasFiles(ev)) ev.preventDefault();
+      });
+      panel.addEventListener('dragleave', function (ev) {
+        if (!hasFiles(ev)) return;
+        depth = Math.max(0, depth - 1);
+        if (!depth) panel.classList.remove('is-drop');
+      });
+      panel.addEventListener('drop', function (ev) {
+        if (!hasFiles(ev)) return;
+        ev.preventDefault(); depth = 0; panel.classList.remove('is-drop');
+        try { upInput.files = ev.dataTransfer.files; } catch (e) { return; }
+        send();
+      });
     }
-    box.addEventListener('change', apply);
-    apply();
-  })();
+  }
+
+  // ── Editor ────────────────────────────────────────────────────────────
+  var ed = document.getElementById('fm-editor');
+  if (ed) {
+    var ta = ed.querySelector('textarea');
+    var gutter = ed.querySelector('.fm-gutter');
+    var linesOut = document.getElementById('fm-lines');
+    var dirtyOut = document.getElementById('fm-dirty');
+    var original = ta.value;
+    // Rendered after a refused save: what is in the box is not on disk.
+    var dirty = ed.dataset.unsaved === '1';
+    if (dirty && dirtyOut) dirtyOut.hidden = false;
+    var shown = 0;
+    var renumber = function () {
+      var n = 1, v = ta.value;
+      for (var i = 0; i < v.length; i++) { if (v.charCodeAt(i) === 10) n++; }
+      // A final newline ends the last line; it does not start another.
+      var counted = (v.length && v.charCodeAt(v.length - 1) === 10) ? n - 1 : n;
+      if (n !== shown) {
+        var out = new Array(n);
+        for (var j = 0; j < n; j++) out[j] = j + 1;
+        gutter.textContent = out.join('\n');
+        shown = n;
+      }
+      if (linesOut) linesOut.textContent = String(Math.max(1, counted));
+    };
+    ta.addEventListener('input', function () {
+      dirty = ed.dataset.unsaved === '1' || ta.value !== original;
+      if (dirtyOut) dirtyOut.hidden = !dirty;
+      renumber();
+    });
+    ta.addEventListener('scroll', function () { gutter.scrollTop = ta.scrollTop; });
+    ta.addEventListener('keydown', function (ev) {
+      // Tab indents. Escape first lets a keyboard user tab out of the box.
+      if (ev.key === 'Escape') { ta.dataset.tabOut = '1'; return; }
+      if (ev.key === 'Tab' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        if (ta.dataset.tabOut === '1') { delete ta.dataset.tabOut; return; }
+        ev.preventDefault();
+        var s = ta.selectionStart, e2 = ta.selectionEnd;
+        ta.setRangeText('\t', s, e2, 'end');
+        ta.dispatchEvent(new Event('input'));
+      } else {
+        delete ta.dataset.tabOut;
+      }
+    });
+    document.addEventListener('keydown', function (ev) {
+      if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && (ev.key === 's' || ev.key === 'S')) {
+        ev.preventDefault();
+        if (ed.requestSubmit) ed.requestSubmit(); else ed.submit();
+      }
+    });
+    var leaving = false;
+    ed.addEventListener('submit', function () { leaving = true; });
+    window.addEventListener('beforeunload', function (ev) {
+      if (dirty && !leaving) { ev.preventDefault(); ev.returnValue = ''; }
+    });
+    renumber();
+  }
+})();
 </script>
 {% endblock %}

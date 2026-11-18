@@ -507,7 +507,16 @@ async fn start_agent_with_service() -> (PathBuf, tempfile::TempDir, Arc<StubServ
         pool,
         adapters: Arc::new(StubAdapters::new()),
         secrets,
-        paths: hyperion_core::HostingPaths::default(),
+        // `DEVSERVER_FILES=1`: sites live under the scratch dir, so the file
+        // manager has a real tree to list, edit and delete in.
+        paths: if std::env::var_os("DEVSERVER_FILES").is_some() {
+            hyperion_core::HostingPaths {
+                home_root: dir.path().join("home").display().to_string(),
+                ..Default::default()
+            }
+        } else {
+            hyperion_core::HostingPaths::default()
+        },
         permissions_autoheal: true,
         snapshots_enabled: false,
         fpm_own_masters: false,
@@ -620,6 +629,64 @@ fn build_app_with_signer(
     // No MockConnectInfo here: a real listener supplies the peer address.
     let router = hyperion_web::build_router(state);
     (router, signer)
+}
+
+/// `DEVSERVER_DEMO=1 DEVSERVER_FILES=1`: give the first demo site a web root
+/// worth browsing — the awkward cases on purpose: names a URL has to encode,
+/// dotfiles, a CRLF file, text that is not UTF-8, a private mode, a binary,
+/// a symlink, a file over the inline cap and a folder with contents.
+async fn seed_demo_files(svc: &Arc<StubService>) {
+    use hyperion_rpc::wire::HostingSelector;
+    use hyperion_validate::Domain;
+    use std::os::unix::fs::PermissionsExt;
+
+    let sel = HostingSelector::Domain(Domain::parse("studio-lumen.cz").expect("domain"));
+    let root = std::path::PathBuf::from(svc.get(sel).await.expect("demo site").root_dir);
+    let put = |rel: &str, body: &[u8]| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&p, body).expect("write");
+        p
+    };
+    std::fs::create_dir_all(&root).expect("htdocs");
+    put(".htaccess", b"# BEGIN WordPress\nRewriteEngine On\nRewriteBase /\nRewriteRule ^index\\.php$ - [L]\n# END WordPress\n");
+    put(
+        ".user.ini",
+        b"memory_limit = 256M\nupload_max_filesize = 64M\n",
+    );
+    put(".env", b"APP_ENV=production\n");
+    put("index.php", b"<?php\n/**\n * Front to the WordPress application.\n */\ndefine( 'WP_USE_THEMES', true );\n\nrequire __DIR__ . '/wp-blog-header.php';\n");
+    let cfg = put("wp-config.php", b"<?php\ndefine( 'DB_NAME', 'lumen' );\ndefine( 'WP_DEBUG', false );\n\t$table_prefix = 'wp_';\n");
+    std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o640)).expect("chmod");
+    put("README", b"Deployed by hand.\n");
+    put("windows-notes.txt", b"line one\r\nline two\r\n");
+    // "příloha" in Windows-1250.
+    put(
+        "stary-web.txt",
+        &[0x70, 0xF8, 0xED, 0x6C, 0x6F, 0x68, 0x61, b'\n'],
+    );
+    put("a&b #1 +50%.txt", b"a name every link has to encode\n");
+    put("p\u{159}\u{ed}loha.pdf", b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+    put("favicon.ico", &[0, 0, 1, 0, 1, 0, 16, 16]);
+    put("blob", &[1, 2, 0, 3]);
+    put(
+        "big.log",
+        "one line of a long log\n".repeat(60_000).as_bytes(),
+    );
+    put("starts-blank.txt", b"\nthe first line is blank\n");
+    put(
+        "wp-content/themes/lumen/style.css",
+        b"/* Theme Name: Lumen */\nbody { margin: 0; }\n",
+    );
+    put("wp-content/themes/lumen/functions.php", b"<?php\n");
+    put(
+        "wp-content/uploads/2026/11/logo.png",
+        &[0x89, b'P', b'N', b'G', 0, 0],
+    );
+    put("wp-content/cache/page/index.html", b"<!doctype html>\n");
+    std::fs::create_dir_all(root.join("Assets")).expect("mkdir");
+    std::fs::create_dir_all(root.join("empty-folder")).expect("mkdir");
+    let _ = std::os::unix::fs::symlink(root.join("index.php"), root.join("current"));
 }
 
 /// `DEVSERVER_DEMO=1`: fill the empty database with a handful of sites and a
@@ -2253,6 +2320,10 @@ async fn devserver() {
     let (sock, _dir, svc) = start_agent_with_service().await;
     if std::env::var_os("DEVSERVER_DEMO").is_some() {
         seed_demo(&svc).await;
+    }
+    if std::env::var_os("DEVSERVER_DEMO").is_some() && std::env::var_os("DEVSERVER_FILES").is_some()
+    {
+        seed_demo_files(&svc).await;
     }
     if std::env::var_os("DEVSERVER_DEMO_NODES").is_some() {
         seed_demo_nodes(&svc).await;

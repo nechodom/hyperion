@@ -6403,3 +6403,154 @@ form[aria-busy="true"] * { pointer-events: none; }
 @media (max-width: 600px) {
   .dl-row { flex-wrap: wrap; gap: 0.1rem 0.5rem; }
 }
+
+
+/* ── File manager (/hostings/<id>/files) ─────────────────────────────────
+   One `.group`: the path and the actions in the head, the listing or one
+   file's text below. Monochrome like the rest; colour only for danger. */
+.group > .ghead .fm-path {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 0.15rem 0.3rem;
+  min-width: 0;
+  font: 500 0.82rem/1.4 var(--font-mono);
+  text-transform: none; letter-spacing: 0;
+}
+.group > .ghead .fm-crumb {
+  color: var(--text-dim); text-transform: none; letter-spacing: 0;
+  font: 500 0.82rem/1.4 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.group > .ghead a.fm-crumb:hover { color: var(--text); text-decoration: underline; }
+.group > .ghead .fm-crumb.is-here { color: var(--text); font-weight: 600; }
+.fm-sep { color: var(--text-soft); }
+.fm-view > .ghead, .fm-list > .ghead { flex-wrap: wrap; row-gap: 0.5rem; }
+.fm-meta { color: var(--text-soft); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.fm-toggle {
+  display: inline-flex; align-items: center; gap: 0.4rem; margin-right: 0.35rem;
+  color: var(--text-dim); font-size: 0.78rem; cursor: pointer; user-select: none;
+  white-space: nowrap;
+}
+.fm-toggle input { width: auto; margin: 0; }
+
+/* Listing */
+.fm-table th:first-child, .fm-table td:first-child { padding-left: 1.25rem; }
+.fm-table th:last-child,  .fm-table td:last-child  { padding-right: 0.9rem; }
+.fm-table td { padding-top: 0.42rem; padding-bottom: 0.42rem; }
+.fm-table th { white-space: nowrap; }
+.fm-table .fm-dim { color: var(--text-soft); font-size: 0.8rem; white-space: nowrap; }
+.fm-table .fm-mono { font-family: var(--font-mono); font-size: 0.76rem; }
+.fm-hide-dot tr[data-dotfile] { display: none; }
+.fm-table td.fm-none, .fm-none td { color: var(--text-soft); padding: 1.1rem 1.25rem; }
+.fm-name {
+  display: inline-flex; align-items: center; gap: 0.55rem;
+  max-width: 100%; min-width: 0;
+  color: var(--text); overflow-wrap: anywhere;
+}
+td a.fm-name:not(.btn) { color: var(--text); }
+td a.fm-name:not(.btn):hover { color: var(--text); text-decoration: underline; }
+.fm-name.is-dir { font-weight: 600; }
+.fm-name.is-inert { color: var(--text-dim); }
+.fm-up .fm-name, td .fm-up a.fm-name:not(.btn) { color: var(--text-dim); }
+.fm-icon { flex: none; width: 15px; height: 15px; color: var(--text-soft); }
+.fm-name.is-dir .fm-icon { color: var(--text-dim); }
+.fm-tag {
+  flex: none; padding: 0.05rem 0.4rem; border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-soft); font-size: 0.68rem; letter-spacing: 0.02em;
+}
+
+/* Row actions: always there, quiet until the row or the button has focus. */
+.fm-acts { display: inline-flex; align-items: center; gap: 0.1rem; justify-content: flex-end; }
+.fm-acts form { margin: 0; display: inline-flex; }
+.fm-act {
+  display: inline-grid; place-items: center;
+  width: 1.9rem; height: 1.9rem; padding: 0;
+  background: transparent; border: 0; border-radius: var(--radius-xs);
+  color: var(--text-soft); cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.fm-act svg { width: 15px; height: 15px; }
+tr:hover .fm-act { color: var(--text-dim); }
+.fm-act:hover, .fm-act:focus-visible { background: var(--surface-3); color: var(--text); }
+.fm-act.is-danger:hover, .fm-act.is-danger:focus-visible {
+  background: var(--danger-soft); color: var(--danger);
+}
+
+/* Drop target */
+.fm-list { position: relative; }
+.fm-drop-hint {
+  display: none; position: absolute; inset: 0; z-index: 5;
+  place-items: center; text-align: center; padding: 1rem;
+  background: color-mix(in oklab, var(--surface) 88%, transparent);
+  border: 2px dashed var(--border-strong); border-radius: var(--radius-md);
+  color: var(--text); font-weight: 600; pointer-events: none;
+}
+.fm-list.is-drop .fm-drop-hint { display: grid; }
+
+/* One file */
+.fm-note {
+  padding: 0.7rem 1.25rem; border-bottom: 1px solid var(--border);
+  background: var(--warn-soft); color: var(--text); font-size: 0.85rem; line-height: 1.55;
+}
+.fm-editor { margin: 0; }
+.fm-code {
+  display: flex; align-items: flex-start;
+  max-height: 72vh; overflow: auto;
+  background: var(--bg-2);
+  font: 12.5px/1.6 var(--font-mono);
+  tab-size: 4;
+}
+.fm-code > pre, .fm-code > textarea {
+  margin: 0; border: 0; border-radius: 0; background: transparent;
+  font: inherit; tab-size: inherit;
+  padding: 0.85rem 1rem;
+}
+.fm-code .fm-gutter {
+  flex: none; position: sticky; left: 0; z-index: 1;
+  min-width: 3.2rem; padding-left: 0.75rem; padding-right: 0.75rem;
+  text-align: right; user-select: none;
+  color: var(--text-soft); background: var(--bg-2);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+.fm-code .fm-text { flex: 1; min-width: 0; color: var(--text); white-space: pre; overflow: visible; }
+.fm-code .fm-text code { font: inherit; background: none; border: 0; padding: 0; color: inherit; white-space: pre; }
+/* Editing: the textarea scrolls, the gutter follows it from script. */
+.fm-code.is-edit { align-items: stretch; height: 68vh; min-height: 16rem; max-height: none; overflow: hidden; }
+.fm-code.is-edit .fm-gutter { position: static; height: 100%; }
+.fm-code.is-edit textarea.fm-text {
+  display: block; width: auto; height: 100%; resize: none; overflow: auto;
+  outline: none; box-shadow: none;
+}
+.fm-code.is-edit:focus-within { box-shadow: inset 0 0 0 1px var(--border-strong); }
+.fm-foot {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.6rem;
+  padding: 0.7rem 1.25rem; border-top: 1px solid var(--border);
+}
+.fm-foot-actions { display: inline-flex; gap: 0.5rem; margin-left: auto; }
+#fm-dirty { color: var(--warn); }
+
+/* Name dialog — same chrome as the confirm modal in base.html. */
+.fm-dialog {
+  width: min(28rem, calc(100vw - 2rem)); padding: 0;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.55);
+}
+.fm-dialog::backdrop { background: rgba(8,10,14,0.62); backdrop-filter: blur(2px); }
+.fm-dialog form { margin: 0; padding: 1.1rem 1.3rem 1.1rem; }
+.fm-dialog h2 { margin: 0 0 0.9rem; font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
+.fm-dialog label { display: block; margin: 0 0 0.35rem; font-size: 0.82rem; color: var(--text-soft); }
+.fm-dialog input[type="text"] { width: 100%; }
+.fm-dialog-err { margin: 0.5rem 0 0; color: var(--danger); font-size: 0.82rem; }
+.fm-dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1.1rem; }
+
+@media (max-width: 700px) {
+  .fm-col-mode, .fm-col-mod { display: none; }
+  .fm-table th:first-child, .fm-table td:first-child { padding-left: 1rem; }
+  .fm-list > .ghead .ghead-tools, .fm-view > .ghead .ghead-tools { margin-left: 0; flex-wrap: wrap; }
+  .fm-act { width: 2.4rem; height: 2.4rem; }
+  .fm-code.is-edit { height: 60vh; }
+}
+@media (hover: hover) and (min-width: 701px) {
+  .fm-table tr:not(:hover):not(:focus-within) .fm-act { opacity: 0.7; }
+}

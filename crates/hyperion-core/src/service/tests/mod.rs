@@ -1212,6 +1212,7 @@ mod cluster;
 mod config;
 mod dashboard;
 mod docker;
+mod files;
 mod firewall;
 mod fs_health;
 mod fs_util;
