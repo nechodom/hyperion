@@ -1210,6 +1210,7 @@ mod care_report;
 mod certs;
 mod cluster;
 mod config;
+mod content_scan;
 mod dashboard;
 mod docker;
 mod files;

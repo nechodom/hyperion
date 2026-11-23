@@ -30,6 +30,9 @@ pub(super) struct IntegrityCardTpl {
     pub(super) quarantine: hyperion_types::QuarantineList,
     /// Why the list above can't be trusted to be whole.
     pub(super) quarantine_note: Option<String>,
+    /// What the content monitor last found. `None` when it has never run here,
+    /// or the node is from before it.
+    pub(super) content: Option<hyperion_types::content::ContentScanResult>,
 }
 
 /// What the card shows besides the scan: what this user may do, and what the
@@ -40,6 +43,71 @@ struct CardExtras {
     can_trust: bool,
     quarantine: hyperion_types::QuarantineList,
     quarantine_note: Option<String>,
+    content: Option<hyperion_types::content::ContentScanResult>,
+}
+
+/// The content result's verdict, as one word for the card's markup and tests.
+pub(crate) fn content_verdict(c: &hyperion_types::content::ContentScanResult) -> &'static str {
+    if !c.findings.is_empty() {
+        "findings"
+    } else if !c.review.is_empty() {
+        "review"
+    } else if c.is_partial() {
+        "partial"
+    } else {
+        "nothing-new"
+    }
+}
+
+/// What the content scan read, in a sentence or two. A layer that didn't run in
+/// full is named with its reason: it is never left to read as a pass.
+pub(crate) fn content_coverage(c: &hyperion_types::content::ContentScanResult) -> String {
+    use hyperion_types::content::ContentLayer;
+    let db = match &c.db {
+        ContentLayer::Complete => "Database content read.".to_string(),
+        ContentLayer::Partial(why) => format!("Database content partly read: {why}."),
+        ContentLayer::Failed(why) => format!("Database content couldn't be checked: {why}."),
+        ContentLayer::NotApplicable => "No WordPress database here, so pages only.".to_string(),
+    };
+    let pages = match &c.pages {
+        ContentLayer::Complete => format!("{} page(s) fetched.", c.pages_fetched),
+        ContentLayer::Partial(why) => {
+            format!(
+                "{} page(s) fetched, partly checked: {why}.",
+                c.pages_fetched
+            )
+        }
+        ContentLayer::Failed(why) => format!("Pages couldn't be checked: {why}."),
+        ContentLayer::NotApplicable => "This site serves no pages of its own.".to_string(),
+    };
+    let crawler = match &c.crawler_note {
+        Some(note) => format!(" Not compared with what a crawler is served: {note}."),
+        None if c.pages.ran() => {
+            " The homepage was also read as served to a search engine's user agent.".to_string()
+        }
+        None => String::new(),
+    };
+    format!("{db} {pages}{crawler}")
+}
+
+/// The stored content result from the owning node. Anything but an answer is
+/// "nothing to show": a node from before the content monitor rejects the request
+/// by name, and the card then stays exactly as it was.
+async fn content_stored_on_node(
+    state: &SharedState,
+    owner_node: Option<&str>,
+    sel: HostingSelector,
+) -> Option<hyperion_types::content::ContentScanResult> {
+    match crate::dispatcher::dispatch_to_node(
+        state,
+        owner_node,
+        Request::ContentScanStored { hosting: sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::ContentScan(r)) => r,
+        _ => None,
+    }
 }
 
 /// How long one page keeps polling for a scan it saw queued. The node says when
@@ -160,6 +228,7 @@ async fn card_extras(
     let allowed = |cap| require_hosting_access(state, ctx, hosting_id, true, cap);
     let can_manage = allowed(Capability::WpManage).await.is_ok();
     let can_trust = allowed(Capability::WpScanTrust).await.is_ok();
+    let content = content_stored_on_node(state, owner_node, sel.clone()).await;
     let (quarantine, quarantine_note) =
         match crate::dispatcher::dispatch_to_node(state, owner_node, quarantine_list_request(sel))
             .await
@@ -179,6 +248,7 @@ async fn card_extras(
         can_trust,
         quarantine,
         quarantine_note,
+        content,
     }
 }
 
@@ -255,6 +325,7 @@ impl From<CardExtras> for IntegrityCardTpl {
             can_trust: e.can_trust,
             quarantine: e.quarantine,
             quarantine_note: e.quarantine_note,
+            content: e.content,
             ..Default::default()
         }
     }
@@ -456,6 +527,104 @@ pub async fn post_integrity_trust_all(
         Capability::WpScanTrust,
         "Trusted as they stand. Any of them whose content changes is flagged again.".into(),
         |hosting, actor| Request::ScanTrustAllReview { hosting, actor },
+    )
+    .await
+}
+
+/// A Trust from the card's content block: the capability, then the node, which
+/// checks that the item is one it reported. The answer is the card again, with
+/// what the node now holds.
+async fn integrity_content_action(
+    state: SharedState,
+    ctx: AuthCtx,
+    selector: String,
+    done: &str,
+    request: impl FnOnce(HostingSelector, String) -> Request,
+) -> Result<Response, AppError> {
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &selector, Capability::WpScanTrust).await {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
+    let csrf_token = crate::handlers::session_csrf_token(&state, &ctx);
+    let (detail, owner_node) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(found) => found,
+        Err(e) => {
+            return render_card(IntegrityCardTpl {
+                scan: integrity_not_checked(e.to_string()),
+                selector,
+                csrf_token,
+                ..Default::default()
+            })
+        }
+    };
+    let owner = owner_node.as_deref();
+    let req = request(sel.clone(), ctx.username.clone());
+    let action_notice = match crate::dispatcher::dispatch_to_node(&state, owner, req).await {
+        Ok(RpcResponse::ContentScan(_)) => (true, done.to_string()),
+        Ok(RpcResponse::Error(e)) => (false, action_error_text(&e.to_string())),
+        Ok(_) => (false, "unexpected response from the node".to_string()),
+        Err(e) => (false, action_error_text(&e.to_string())),
+    };
+    let scan = integrity_stored_on_node(&state, owner, sel.clone()).await;
+    let extras = card_extras(&state, &ctx, detail.id.as_str(), owner, sel).await;
+    render_card(IntegrityCardTpl {
+        scan,
+        selector,
+        csrf_token,
+        queued_since: now_secs_web(),
+        action_notice: Some(action_notice),
+        ..extras.into()
+    })
+}
+
+#[derive(Deserialize)]
+pub struct ContentTrustForm {
+    pub selector: String,
+    pub kind: String,
+    pub key: String,
+}
+
+/// POST /hostings/integrity/content-trust — accept one item the content monitor
+/// reported. Same capability as trusting a file.
+pub async fn post_integrity_content_trust(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ContentTrustForm>,
+) -> Result<Response, AppError> {
+    let ContentTrustForm {
+        selector,
+        kind,
+        key,
+    } = form;
+    integrity_content_action(
+        state,
+        ctx,
+        selector,
+        "Trusted. It's no longer flagged on this site.",
+        move |hosting, actor| Request::ContentTrust {
+            hosting,
+            kind,
+            key,
+            actor,
+        },
+    )
+    .await
+}
+
+/// POST /hostings/integrity/content-trust-all — accept every host waiting for
+/// review. Never a finding.
+pub async fn post_integrity_content_trust_all(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<IntegrityScanForm>,
+) -> Result<Response, AppError> {
+    integrity_content_action(
+        state,
+        ctx,
+        form.selector,
+        "Trusted. They're no longer flagged on this site.",
+        |hosting, actor| Request::ContentTrustAllReview { hosting, actor },
     )
     .await
 }

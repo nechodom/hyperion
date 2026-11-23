@@ -327,6 +327,144 @@ fn render_integrity(scan: hyperion_types::WpIntegrityScanResult) -> String {
     .expect("integrity card renders")
 }
 
+fn content_item(
+    kind: hyperion_types::content::ContentKind,
+    key: &str,
+) -> hyperion_types::content::ContentItem {
+    hyperion_types::content::ContentItem {
+        kind,
+        key: key.into(),
+        count: 3,
+        places: vec!["posts:41".into()],
+        snippet: r#"<a href="https://pills.spam.test/" style="display:none">"#.into(),
+        first_seen: 1_700_000_000,
+        at_first_scan: false,
+        notified: false,
+        in_db: true,
+        on_page: false,
+    }
+}
+
+fn render_content(
+    content: Option<hyperion_types::content::ContentScanResult>,
+    can_trust: bool,
+) -> String {
+    IntegrityCardTpl {
+        scan: Default::default(),
+        selector: "example.com".into(),
+        csrf_token: "t".into(),
+        can_trust,
+        content,
+        ..Default::default()
+    }
+    .render()
+    .expect("integrity card renders")
+}
+
+fn content_read() -> hyperion_types::content::ContentScanResult {
+    use hyperion_types::content::ContentLayer;
+    hyperion_types::content::ContentScanResult {
+        scanned_at: 1_700_000_000,
+        watching_since: 1_700_000_000,
+        db: ContentLayer::Complete,
+        pages: ContentLayer::Complete,
+        pages_fetched: 5,
+        ..Default::default()
+    }
+}
+
+/// A node from before the content monitor sends nothing, and the card must say
+/// what it always said.
+#[test]
+fn without_a_content_result_the_card_still_says_the_database_is_not_scanned() {
+    let html = render_content(None, true);
+    assert!(html.contains("The database is not scanned"));
+    assert!(!html.contains("data-content-verdict"));
+    assert!(!html.contains("content-trust"));
+}
+
+#[test]
+fn the_content_block_lists_findings_with_host_place_and_escaped_snippet() {
+    use hyperion_types::content::ContentKind;
+    let mut c = content_read();
+    c.report_only = true;
+    c.findings = vec![content_item(ContentKind::HiddenLink, "pills.spam.test")];
+    c.review = vec![hyperion_types::content::ContentItem {
+        at_first_scan: true,
+        snippet: String::new(),
+        ..content_item(ContentKind::ScriptHost, "tags.example.net")
+    }];
+    let html = render_content(Some(c), true);
+    assert!(html.contains(r#"data-content-verdict="findings""#));
+    assert!(!html.contains("The database is not scanned"));
+    assert!(html.contains("Stored content and pages are checked separately"));
+    assert!(html.contains("<code>pills.spam.test</code>"));
+    assert!(html.contains("Hidden link"));
+    assert!(html.contains("<code>posts:41</code>"));
+    // The site's markup is shown as text, never as markup.
+    assert!(!html.contains(r#"<a href="https://pills.spam.test/""#));
+    assert!(html.contains("&lt;a href="));
+    assert!(html.contains("already here when watching began"));
+    assert!(html.contains("Database content read. 5 page(s) fetched."));
+    assert!(html.contains("scripts are not run"));
+    assert!(html.contains("Pilot: these results are shown here only"));
+    // Trust: one form per item and one for the hosts to review, each with its
+    // confirm text on the form itself.
+    assert_eq!(
+        html.matches(r#"hx-post="/hostings/integrity/content-trust""#)
+            .count(),
+        2
+    );
+    assert_eq!(
+        html.matches(r#"hx-post="/hostings/integrity/content-trust-all""#)
+            .count(),
+        1
+    );
+    assert!(html.contains(r#"name="kind" value="hidden_link""#));
+    assert!(html.contains(r#"name="key" value="pills.spam.test""#));
+    for form in html
+        .split("<form")
+        .skip(1)
+        .filter(|f| f.contains("content-trust"))
+    {
+        let open = form.split('>').next().expect("tag");
+        assert!(open.contains("data-confirm-title="), "{open}");
+    }
+}
+
+#[test]
+fn without_the_trust_capability_the_content_block_offers_nothing_to_press() {
+    use hyperion_types::content::ContentKind;
+    let mut c = content_read();
+    c.review = vec![content_item(ContentKind::FrameHost, "video.example.net")];
+    let html = render_content(Some(c), false);
+    assert!(html.contains(r#"data-content-verdict="review""#));
+    assert!(!html.contains("content-trust"));
+    assert!(html.contains("waiting for your provider to check"));
+}
+
+/// A layer that couldn't be read is named, and the block never says "nothing
+/// new" over it.
+#[test]
+fn a_content_layer_that_could_not_be_read_is_never_nothing_new() {
+    use hyperion_types::content::ContentLayer;
+    let mut c = content_read();
+    c.db = ContentLayer::Failed("wp-config.php names a database this hosting doesn't own".into());
+    c.crawler_note =
+        Some("the page as served to a crawler couldn't be compared (status 403)".into());
+    let html = render_content(Some(c), true);
+    assert!(html.contains(r#"data-content-verdict="partial""#));
+    // The apostrophe is escaped on the way out, like everything in that line.
+    assert!(html.contains("Database content couldn"));
+    assert!(html.contains("be checked: wp-config.php names a database"));
+    assert!(html.contains("Not compared with what a crawler is served"));
+    assert!(!html.contains("Nothing new in the site"));
+
+    let clean = render_content(Some(content_read()), true);
+    assert!(clean.contains(r#"data-content-verdict="nothing-new""#));
+    assert!(clean.contains("Nothing new in the site"));
+}
+
 /// The failure mode this whole card exists to prevent: a scan that
 /// could not run must not produce a word an operator could forward to
 /// a paying customer as "your site is fine".

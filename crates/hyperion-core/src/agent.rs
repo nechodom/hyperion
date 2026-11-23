@@ -1029,6 +1029,31 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .await
     }
 
+    async fn content_scan_stored(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+    ) -> Result<Option<hyperion_types::content::ContentScanResult>, RpcError> {
+        self.svc.content_scan_stored(hosting).await
+    }
+
+    async fn content_trust(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+        kind: String,
+        key: String,
+        actor: String,
+    ) -> Result<hyperion_types::content::ContentScanResult, RpcError> {
+        self.svc.content_trust(hosting, kind, key, actor).await
+    }
+
+    async fn content_trust_all_review(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+        actor: String,
+    ) -> Result<hyperion_types::content::ContentScanResult, RpcError> {
+        self.svc.content_trust_all_review(hosting, actor).await
+    }
+
     async fn scan_quarantine_list(
         &self,
         hosting: hyperion_rpc::HostingSelector,

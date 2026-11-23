@@ -2121,6 +2121,7 @@ pub fn print_pretty(resp: &Response) {
             println!("{} file(s) in quarantine", l.total);
         }
         Response::WpIntegrityScan(r) => print!("{}", integrity_scan_text(r)),
+        Response::ContentScan(r) => print!("{}", content_scan_text(r.as_ref())),
         Response::AntivirusOverview(o) => {
             let s = &o.settings;
             println!(
@@ -2516,6 +2517,96 @@ pub fn print_pretty(resp: &Response) {
 /// name or a message must not move the cursor, recolour the terminal or start a
 /// line of its own, and a format or bidi character must not reorder or hide
 /// what is printed around it.
+/// The content monitor's stored result, as the panel's card words it. Hosts,
+/// places and snippets are the site's text: printed with control characters
+/// escaped.
+fn content_scan_text(r: Option<&hyperion_types::content::ContentScanResult>) -> String {
+    use hyperion_types::content::ContentLayer;
+    let mut out = String::new();
+    let mut line = |s: String| {
+        out.push_str(&s);
+        out.push('\n');
+    };
+    let Some(r) = r else {
+        line(
+            "content: never scanned (a new site is scanned within minutes; the rest nightly)"
+                .into(),
+        );
+        return out;
+    };
+    let verdict = if !r.findings.is_empty() {
+        "findings"
+    } else if !r.review.is_empty() {
+        "review"
+    } else if r.is_partial() {
+        "partial"
+    } else {
+        "nothing new"
+    };
+    line(format!("content: {verdict}"));
+    let layer = |l: &ContentLayer, done: String, na: &str| match l {
+        ContentLayer::Complete => done,
+        ContentLayer::Partial(why) => format!("partly read ({})", plain(why)),
+        ContentLayer::Failed(why) => format!("couldn't check ({})", plain(why)),
+        ContentLayer::NotApplicable => na.to_string(),
+    };
+    line(format!(
+        "  database   : {}",
+        layer(
+            &r.db,
+            "read".into(),
+            "not applicable (no WordPress database)"
+        )
+    ));
+    line(format!(
+        "  pages      : {}",
+        layer(
+            &r.pages,
+            format!("{} fetched", r.pages_fetched),
+            "not applicable"
+        )
+    ));
+    if let Some(note) = &r.crawler_note {
+        line(format!("  crawler    : {}", plain(note)));
+    }
+    line(format!(
+        "  known      : {} script/frame host(s), {} outbound link host(s); scripts are not run",
+        r.known_hosts, r.link_hosts
+    ));
+    for (title, items) in [("findings", &r.findings), ("to review", &r.review)] {
+        if items.is_empty() {
+            continue;
+        }
+        line(format!("  {title}:"));
+        for i in items {
+            line(format!(
+                "    {} {} (x{}){}",
+                i.kind.label(),
+                plain(&i.key),
+                i.count,
+                if i.at_first_scan {
+                    " [already here when watching began]"
+                } else {
+                    ""
+                }
+            ));
+            for p in &i.places {
+                line(format!("      at {}", plain(p)));
+            }
+            if !i.snippet.is_empty() {
+                line(format!("      {}", plain(&i.snippet)));
+            }
+        }
+    }
+    if r.more > 0 {
+        line(format!("  not listed: {} more item(s)", r.more));
+    }
+    if r.report_only {
+        line("  pilot: results are shown here and in the panel only; no alerts".into());
+    }
+    out
+}
+
 fn plain(s: &str) -> String {
     s.chars()
         .flat_map(|c| {
@@ -2605,7 +2696,7 @@ fn integrity_scan_text(r: &hyperion_types::WpIntegrityScanResult) -> String {
                     .into(),
             );
         }
-        line("               the database is not scanned".into());
+        line("               the database is not scanned here: see `hctl wp content-scan`".into());
     }
     // "Couldn't check" is printed as loudly as a finding — a
     // missing signal must never read as a pass.
@@ -2820,7 +2911,7 @@ mod tests {
         assert!(clean.contains("verdict    : clean"), "{clean}");
         assert!(clean.contains("1234 file(s) watched"), "{clean}");
         assert!(clean.contains("3 of 4 plugins"), "{clean}");
-        assert!(clean.contains("database is not scanned"), "{clean}");
+        assert!(clean.contains("database is not scanned here"), "{clean}");
 
         let mut r = native();
         r.coverage.upstream_ran = false;
@@ -2865,5 +2956,43 @@ mod tests {
         let mut partial = native();
         partial.coverage.partial_reasons = vec!["stopped early".into()];
         assert!(integrity_scan_text(&partial).contains("verdict    : partial"));
+    }
+    #[test]
+    fn content_scan_text_names_what_was_read_and_escapes_the_sites_text() {
+        use hyperion_types::content::{ContentItem, ContentKind, ContentLayer, ContentScanResult};
+        assert!(content_scan_text(None).contains("never scanned"));
+        let r = ContentScanResult {
+            scanned_at: 1,
+            report_only: true,
+            db: ContentLayer::Failed("no login".into()),
+            pages: ContentLayer::Complete,
+            pages_fetched: 5,
+            findings: vec![ContentItem {
+                kind: ContentKind::HiddenLink,
+                key: "pills.spam.test".into(),
+                count: 2,
+                places: vec!["posts:41".into()],
+                snippet: "<a\u{1b}[31m href>".into(),
+                first_seen: 1,
+                at_first_scan: false,
+                notified: false,
+                in_db: true,
+                on_page: false,
+            }],
+            ..Default::default()
+        };
+        let text = content_scan_text(Some(&r));
+        assert!(text.starts_with("content: findings\n"), "{text}");
+        assert!(text.contains("couldn't check (no login)"));
+        assert!(text.contains("5 fetched"));
+        assert!(text.contains("Hidden link pills.spam.test (x2)"));
+        assert!(text.contains("at posts:41"));
+        assert!(!text.contains('\u{1b}'));
+        assert!(text.contains("pilot:"));
+        let quiet = ContentScanResult {
+            db: ContentLayer::Failed("down".into()),
+            ..Default::default()
+        };
+        assert!(content_scan_text(Some(&quiet)).starts_with("content: partial\n"));
     }
 }

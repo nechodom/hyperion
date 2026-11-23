@@ -53,6 +53,33 @@
 </div>
 {% endif %}
 {% endmacro %}
+{# One thing the content monitor reported. The key is a host or a rule id, the
+   places and the snippet are the site's own text. #}
+{% macro content_row(i) %}
+<li><span class="chk-dot {% if i.kind.is_finding() %}err{% else %}warn{% endif %}"></span><code>{{ i.key|tenant_text }}</code><span class="chk-detail">
+  {{ i.kind.label() }}
+  {% if i.kind.as_str() == "link_burst" %} · {{ i.count }} new domain(s) in one night{% else %} · seen {{ i.count }} time(s){% endif %}
+  {% if i.at_first_scan %} · already here when watching began{% endif %}
+  {% if !i.places.is_empty() %} · {% if i.kind.as_str() == "link_burst" %}among them{% else %}in{% endif %} {% for p in i.places %}{% if loop.index0 < 5 %}<code>{{ p|tenant_text }}</code> {% endif %}{% endfor %}{% if i.places.len() > 5 %}and {{ i.places.len() - 5 }} more{% endif %}{% endif %}
+  {% if !i.snippet.is_empty() %} · <code>{{ i.snippet|tenant_text }}</code>{% endif %}
+</span>
+{% if can_trust %}
+<div class="file-act">
+  <form hx-post="/hostings/integrity/content-trust" hx-target="#integrity-card" hx-swap="outerHTML"
+        hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
+        data-confirm-title="Trust {{ i.key|tenant_text }}"
+        data-confirm-body="{% if i.kind.is_finding() %}This looks injected. Only trust it if you know who put it there and why: it will no longer be flagged on this site, wherever it appears.{% else %}Accepts this as part of the site, so it's no longer flagged, wherever it appears.{% endif %} Nothing on the site is changed."
+        data-confirm-confirm-label="Trust">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ selector }}">
+    <input type="hidden" name="kind" value="{{ i.kind.as_str() }}">
+    <input type="hidden" name="key" value="{{ i.key }}">
+    <button class="btn ghost small" type="submit">Trust</button>
+  </form>
+</div>
+{% endif %}
+</li>
+{% endmacro %}
 {% macro finding_row(f) %}
 <li><span class="chk-dot {% if f.severity == "high" %}err{% else %}warn{% endif %}"></span><code>{{ f.rel|tenant_text }}</code><span class="chk-detail">
   {% if f.rel == "." %}most of WordPress core no longer matches the release
@@ -196,7 +223,7 @@
       {% else %}<span class="tone-warn">not scanned</span> — ClamAV isn't installed on this node. It is optional: once added on the <a href="/services">Services page</a> it reads every file of the site but media and files over 64 MiB, on the schedule under Settings → Antivirus{% endif %}
       {% if scan.wp_cli_ok || scan.coverage.no_upstream %}{% if let Some(e) = scan.error %}· {{ e|tenant_text }}{% endif %}{% endif %}.
       {% endif %}
-      The database is not scanned.
+      {% if content.is_some() %}Stored content and pages are checked separately, below.{% else %}The database is not scanned.{% endif %}
     </p>
 
     {# Where a vendor reference came from names other hostings, so it's for who may
@@ -457,6 +484,55 @@
     {% endif %}
     {% if let Some(n) = quarantine_note %}
     <p class="chk-note">Quarantined files can't be listed: {{ n|tenant_text }}.</p>
+    {% endif %}
+
+    {# ── Content monitor: what the site's database holds and its pages serve.
+       Its own result, from its own nightly read; "Scan now" asks for both. A
+       node from before it sends nothing, and the card stays as it was. ──── #}
+    {% if let Some(c) = content %}
+    <h4 class="chk-sub" data-content-verdict="{{ crate::handlers::hostings::content_verdict(c) }}">Content: database and pages</h4>
+    {% if !c.findings.is_empty() %}
+    <p class="chk-note"><span class="tone-err">{{ c.findings.len() }} item(s) look injected.</span> No file has to change for this: it sits in the site's database or is printed into its pages.</p>
+    <ul class="chk-list chk-files file-acts">
+      {% for i in c.findings %}{% call content_row(i) %}{% endfor %}
+    </ul>
+    {% endif %}
+    {% if !c.review.is_empty() %}
+    <p class="chk-note">{{ c.review.len() }} host(s) to review: scripts, frames or redirects {% if c.findings.is_empty() %}the site{% else %}it{% endif %} loads from elsewhere. A new tag or an embedded video looks like this; so does a loader someone slipped in.</p>
+    <ul class="chk-list chk-files file-acts">
+      {% for i in c.review %}{% call content_row(i) %}{% endfor %}
+    </ul>
+    {% if !can_trust %}
+    <p class="chk-note">These are waiting for your provider to check.</p>
+    {% else %}
+    <div class="chk-fixes">
+      <form hx-post="/hostings/integrity/content-trust-all" hx-target="#integrity-card" hx-swap="outerHTML"
+            hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
+            data-confirm-title="Trust all hosts to review"
+            data-confirm-body="Accepts {{ c.review.len() }} host(s) as part of the site, so they're no longer flagged. Items that look injected aren't included: each of those is trusted by itself or not at all."
+            data-confirm-confirm-label="Trust {{ c.review.len() }} host(s)">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <button class="btn ghost small" type="submit">Trust all hosts to review</button>
+      </form>
+    </div>
+    {% endif %}
+    {% endif %}
+    {% if c.more > 0 %}
+    <p class="chk-note">{{ c.more }} more item(s) were found but aren't kept on this card; they show up once the listed ones are dealt with.</p>
+    {% endif %}
+    {% if c.nothing_new() %}
+    <p class="chk-note">Nothing new in the site's stored content or on its pages.</p>
+    {% endif %}
+    <p class="chk-note">
+      {{ crate::handlers::hostings::content_coverage(c)|tenant_text }}
+      {% if c.scanned_at != 0 %}Checked {{ crate::handlers::stats::fmt_ago(c.scanned_at) }}{% if c.watching_since != 0 %}, watching since {{ c.watching_since|date }}; what was there before can't be judged{% endif %}.{% endif %}
+      {{ c.known_hosts }} script or frame host(s) and {{ c.link_hosts }} outbound link domain(s) are known for this site.
+      Pages are read as served; scripts are not run.
+    </p>
+    {% if c.report_only %}
+    <p class="chk-note">Pilot: these results are shown here only. No alerts are sent for them yet, and reports are unchanged.</p>
+    {% endif %}
     {% endif %}
 
     {# ── Plugins with no published checksums. Deliberately last, collapsed,

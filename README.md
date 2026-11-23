@@ -196,7 +196,7 @@ install to sites that are running and backed up:
   other file is read for known malware patterns and watched for changes. Results
   say what was and was not covered, and changes it cannot judge wait as "to
   review" until someone trusts or quarantines them. Sites without WordPress are
-  scanned too. The database is not scanned. ClamAV is optional: one bounded
+  scanned too. ClamAV is optional: one bounded
   pass per node on a schedule you set (Settings → Antivirus; weekly, overnight
   and with 2 GiB of memory free by default), with its detections and a "Run
   now" on the Antivirus page. Findings alert
@@ -205,6 +205,15 @@ install to sites that are running and backed up:
   as a silent pilot until `[integrity] new_layers_live` is switched on. That
   flag is per node: set it in each node's own `agent.toml` (the settings sync
   doesn't carry `[integrity]`).
+- Content monitor for what no file check can see: a nightly read-only pass over
+  a WordPress site's stored content (posts, options, page-builder data) and a
+  handful of its pages, looking for links hidden by inline styles, scripts that
+  decode and run text, hosts shown only to search engines, and script or frame
+  hosts the site did not have before. Only what is new is reported, against a
+  baseline per site, and items can be trusted from the integrity card. It reads
+  with `SELECT` as the site's own database login and runs no site code. Pilot
+  first: results show on the card and in `hctl wp content-scan`, and alerts stay
+  off until `[integrity] content_live` is set in a node's `agent.toml`.
 - Staging copy with push to production (production is backed up first), Redis
   object cache, a `WP_DEBUG` switch, admin password reset, a sign-up spam
   guard, and a mail self-repair that sends WordPress mail through the local

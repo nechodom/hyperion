@@ -123,14 +123,29 @@ impl Fetched {
 /// `resolve_to` pins the hostname to an address so the request cannot leave
 /// this machine; `keep_body` decides whether the response is returned or
 /// discarded (a link check wants the status, not a megabyte of HTML).
-fn fetch_config(url: &str, host: &str, resolve_to: &str, keep_body: bool) -> String {
+fn fetch_config(
+    url: &str,
+    host: &str,
+    resolve_to: &str,
+    keep_body: bool,
+    identity: &Identity<'_>,
+) -> String {
     let mut cfg = String::new();
     cfg.push_str(&format!("url = \"{}\"\n", cmd::curl_config_quote(url)));
-    for port in [443, 80] {
-        cfg.push_str(&format!(
-            "resolve = \"{}\"\n",
-            cmd::curl_config_quote(&format!("{host}:{port}:{resolve_to}"))
-        ));
+    // Both spellings: `resolve_url` treats `www.<host>` and `<host>` as one site,
+    // so both must be pinned, or a redirect or sitemap entry to the other one
+    // would be looked up in DNS, which the tenant controls, and leave the machine.
+    let other = match host.strip_prefix("www.") {
+        Some(bare) => bare.to_string(),
+        None => format!("www.{host}"),
+    };
+    for name in [host, other.as_str()] {
+        for port in [443, 80] {
+            cfg.push_str(&format!(
+                "resolve = \"{}\"\n",
+                cmd::curl_config_quote(&format!("{name}:{port}:{resolve_to}"))
+            ));
+        }
     }
     // The connection cannot leave the machine (see the module docs), and a
     // site on its bootstrap certificate still has to be checkable.
@@ -157,8 +172,14 @@ fn fetch_config(url: &str, host: &str, resolve_to: &str, keep_body: bool) -> Str
     cfg.push_str(&format!("max-filesize = {MAX_BYTES}\n"));
     cfg.push_str(&format!(
         "user-agent = \"{}\"\n",
-        cmd::curl_config_quote(USER_AGENT)
+        cmd::curl_config_quote(identity.user_agent)
     ));
+    if let Some(referer) = identity.referer {
+        cfg.push_str(&format!(
+            "referer = \"{}\"\n",
+            cmd::curl_config_quote(referer)
+        ));
+    }
     if !keep_body {
         // Status and timing only. `--head` would be wrong: plenty of sites
         // answer HEAD with 405 while serving GET perfectly, and reporting
@@ -288,10 +309,41 @@ pub async fn fetch(
     resolve_to: &str,
     keep_body: bool,
 ) -> Result<Fetched, AdapterError> {
+    fetch_as(url, host, resolve_to, keep_body, &Identity::default()).await
+}
+
+/// Who a request says it is. The site check is always itself; the content
+/// monitor also looks once as a crawler would, because some spam is served to
+/// crawlers only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity<'a> {
+    pub user_agent: &'a str,
+    pub referer: Option<&'a str>,
+}
+
+impl Default for Identity<'_> {
+    fn default() -> Self {
+        Identity {
+            user_agent: USER_AGENT,
+            referer: None,
+        }
+    }
+}
+
+/// [`fetch`], announcing itself as `identity`. Everything else is the same: the
+/// loopback pin, the limits, and redirects followed only while they stay on the
+/// site.
+pub async fn fetch_as(
+    url: &str,
+    host: &str,
+    resolve_to: &str,
+    keep_body: bool,
+    identity: &Identity<'_>,
+) -> Result<Fetched, AdapterError> {
     let mut current = url.to_string();
     let mut last: Option<Fetched> = None;
     for _ in 0..=MAX_HOPS {
-        let cfg = fetch_config(&current, host, resolve_to, keep_body);
+        let cfg = fetch_config(&current, host, resolve_to, keep_body, identity);
         // Non-zero exit is an ANSWER here (a timeout, a refused connection),
         // not a transport bug: the report says which page failed and why.
         let (stdout, _stderr, _code) = cmd::curl_with_config_capture(&cfg).await?;
@@ -732,7 +784,13 @@ mod tests {
 
     #[test]
     fn the_request_cannot_leave_the_machine() {
-        let cfg = fetch_config("https://example.cz/a", "example.cz", "127.0.0.1", true);
+        let cfg = fetch_config(
+            "https://example.cz/a",
+            "example.cz",
+            "127.0.0.1",
+            true,
+            &Identity::default(),
+        );
         assert!(cfg.contains("resolve = \"example.cz:443:127.0.0.1\""));
         assert!(cfg.contains("resolve = \"example.cz:80:127.0.0.1\""));
         // A site on its bootstrap certificate still has to be checkable, and
@@ -750,9 +808,62 @@ mod tests {
             "x",
             "127.0.0.1",
             true,
+            &Identity::default(),
         );
         assert!(!cfg.contains("\noutput = \"/etc/passwd"));
         assert!(cfg.contains("\\\"\\noutput"));
+    }
+
+    /// `resolve_url` lets `www.` and the bare name stand for each other, so a
+    /// request to either must stay on this machine.
+    #[test]
+    fn both_spellings_of_the_host_are_pinned() {
+        for host in ["example.cz", "www.example.cz"] {
+            let cfg = fetch_config(
+                "https://example.cz/",
+                host,
+                "127.0.0.1",
+                true,
+                &Identity::default(),
+            );
+            for name in ["example.cz", "www.example.cz"] {
+                for port in [443, 80] {
+                    assert!(
+                        cfg.contains(&format!("resolve = \"{name}:{port}:127.0.0.1\"\n")),
+                        "{host}: {name}:{port} not pinned"
+                    );
+                }
+            }
+            assert_eq!(cfg.matches("resolve = ").count(), 4);
+        }
+    }
+
+    #[test]
+    fn a_request_says_who_it_was_told_to_be() {
+        let own = fetch_config(
+            "https://example.cz/",
+            "example.cz",
+            "127.0.0.1",
+            true,
+            &Identity::default(),
+        );
+        assert!(own.contains(&format!("user-agent = \"{USER_AGENT}\"\n")));
+        assert!(!own.contains("referer"));
+        let crawler = Identity {
+            user_agent: "Crawler/1 \"x\"\noutput = \"/etc/passwd",
+            referer: Some("https://search.example/"),
+        };
+        let cfg = fetch_config(
+            "https://example.cz/",
+            "example.cz",
+            "127.0.0.1",
+            true,
+            &crawler,
+        );
+        assert!(cfg.contains("user-agent = \"Crawler/1 "));
+        assert!(cfg.contains("referer = \"https://search.example/\"\n"));
+        assert!(!cfg.contains("\noutput = \"/etc/passwd"));
+        assert!(cfg.contains("max-redirs = 0\n"));
     }
 
     #[test]
@@ -881,7 +992,13 @@ mod header_tests {
 
     #[test]
     fn compression_is_requested_the_way_a_browser_does() {
-        let cfg = fetch_config("https://example.cz/", "example.cz", "127.0.0.1", true);
+        let cfg = fetch_config(
+            "https://example.cz/",
+            "example.cz",
+            "127.0.0.1",
+            true,
+            &Identity::default(),
+        );
         assert!(cfg.contains("compressed\n"));
         assert!(cfg.contains("%header{content-encoding}"));
         assert!(cfg.contains("%header{cache-control}"));
@@ -1086,7 +1203,13 @@ mod ssrf_tests {
     /// The hop is taken by `fetch`, which re-runs the same-site test.
     #[test]
     fn curl_is_told_not_to_follow_redirects_or_odd_schemes() {
-        let cfg = fetch_config("https://example.cz/", "example.cz", "127.0.0.1", true);
+        let cfg = fetch_config(
+            "https://example.cz/",
+            "example.cz",
+            "127.0.0.1",
+            true,
+            &Identity::default(),
+        );
         assert!(cfg.contains("max-redirs = 0"));
         assert!(
             !cfg.contains("\nlocation\n"),

@@ -60,6 +60,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_wp_base_theme(svc);
     spawn_wp_system_cron(svc);
     spawn_site_scan(svc);
+    spawn_content_scan(svc);
     spawn_clamav_sweep(svc);
     spawn_vendor_sweep(svc);
     spawn_billing_sweep(svc);
@@ -628,6 +629,31 @@ fn spawn_site_scan(svc: &Svc) {
                 Ok(n) if n > 0 => tracing::warn!(flagged = n, "site scan tick"),
                 Ok(_) => tracing::debug!("site scan tick: no new findings"),
                 Err(e) => tracing::warn!(error=%e, "site scan tick failed"),
+            }
+        }
+    });
+}
+
+/// Content monitor: what each site's database holds and its pages serve, against
+/// the site's baseline. `content_scan_tick` decides from each site's stored
+/// result and a node stamp what is due (a site never scanned at once, the rest
+/// once a night), so a restart starts nothing by itself. Its own task: reading
+/// a large site's content takes minutes and must not sit in front of a file
+/// scan. Every 10 minutes, or as soon as someone presses "Scan now".
+fn spawn_content_scan(svc: &Svc) {
+    let svc = svc.clone();
+    tokio::spawn(async move {
+        let mut wait = Duration::from_secs(7 * MIN);
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep(wait) => {}
+                () = svc.content_scan_wait_for_request() => {}
+            }
+            wait = Duration::from_secs(10 * MIN);
+            match svc.content_scan_tick().await {
+                Ok(n) if n > 0 => tracing::warn!(flagged = n, "content scan tick"),
+                Ok(_) => tracing::debug!("content scan tick: nothing new"),
+                Err(e) => tracing::warn!(error=%e, "content scan tick failed"),
             }
         }
     });

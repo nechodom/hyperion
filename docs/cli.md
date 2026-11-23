@@ -759,12 +759,47 @@ Prints the verdict the panel shows (`clean`, `findings`, `review`, `partial`,
   still downloading, stopped for lack of memory and resting for a week), the line
   says so, and that is never a failed scan. A pass that was cut short keeps the
   hits it found and says it was partial.
-- **The database is not scanned.**
+- **The database is not part of this scan.** Stored content and rendered pages are
+  the content monitor's: see `hctl wp content-scan`.
 
 While the new scan is in its pilot (`[integrity] new_layers_live` off in
 `agent.toml`), its results show here and in the panel only: no alerts, and care
 reports keep their earlier meaning. File names and messages from the site are
 printed with control characters escaped.
+
+### hctl wp content-scan
+
+Show what the content monitor last found in the database and on pages.
+
+**Options:** `SELECTOR`
+
+```bash
+hctl wp content-scan example.com
+```
+
+Prints the stored result and starts nothing. The content monitor looks at what a
+site says rather than what its files are:
+
+- **Database:** posts, options (widgets, header and footer scripts) and page-builder
+  data of a WordPress site, read with `SELECT` only as the site's own database
+  login. Nothing is written and no site code runs.
+- **Pages:** the homepage and up to four pages from the sitemap, fetched from this
+  node, plus the homepage once more as a search engine's crawler announces itself.
+  Pages are read as served; scripts are not run.
+- **Findings:** an external link hidden by an inline style, a script that decodes
+  and runs text, and a host shown only to the crawler.
+- **To review:** a script, frame or redirect host the site did not have before. On
+  the first scan, the ones already there are listed once and marked as such.
+- Visible outbound links are counted, not listed; ten or more new ones in one night
+  are one item to review.
+- A layer that could not be read, or was read in part, is said so and is never
+  "nothing new".
+
+A site never scanned is scanned within minutes; after that once a night, and when
+"Scan now" is pressed in the panel. While `[integrity] content_live` is off in
+`agent.toml` (the default), results show here and in the panel only and no alert
+is sent. Hosts, places and snippets from the site are printed with control
+characters escaped.
 
 ### hctl wp vendor-forget
 

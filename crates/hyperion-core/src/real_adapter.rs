@@ -342,6 +342,40 @@ impl AdapterPort for RealAdapter {
         .flatten()
     }
 
+    async fn content_db_read(
+        &self,
+        db: &str,
+        prefix: &str,
+        user: &str,
+        password: &str,
+        cursor: hyperion_adapters::contentscan::db::Cursor,
+        site_hosts: Vec<String>,
+    ) -> Result<hyperion_adapters::contentscan::db::DbObserved, AdapterError> {
+        let login = hyperion_adapters::backup::DbLogin { user, password };
+        hyperion_adapters::mariadb::read_content(db, prefix, &login, &cursor, &site_hosts).await
+    }
+
+    async fn content_page(
+        &self,
+        url: &str,
+        host: &str,
+        crawler: bool,
+    ) -> Result<hyperion_adapters::sitecheck::Fetched, AdapterError> {
+        use hyperion_adapters::{contentscan, sitecheck};
+        let identity = if crawler {
+            sitecheck::Identity {
+                user_agent: contentscan::CRAWLER_USER_AGENT,
+                referer: Some(contentscan::CRAWLER_REFERER),
+            }
+        } else {
+            sitecheck::Identity {
+                user_agent: contentscan::USER_AGENT,
+                referer: None,
+            }
+        };
+        sitecheck::fetch_as(url, host, "127.0.0.1", true, &identity).await
+    }
+
     async fn site_scan_read_option(
         &self,
         db: &str,

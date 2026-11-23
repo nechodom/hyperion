@@ -18,6 +18,7 @@ pub mod antivirus;
 pub mod care_check;
 pub mod cert;
 pub mod clock;
+pub mod content;
 pub mod crs;
 pub mod db;
 pub mod dkim;

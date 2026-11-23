@@ -493,6 +493,26 @@ pub trait AgentApi: Send + Sync + 'static {
         template_id: String,
     ) -> Result<(bool, String, String), RpcError>;
 
+    /// What the content monitor last found for a hosting, without scanning.
+    async fn content_scan_stored(
+        &self,
+        hosting: HostingSelector,
+    ) -> Result<Option<hyperion_types::content::ContentScanResult>, RpcError>;
+    /// Vouch for one item the content scan reported.
+    async fn content_trust(
+        &self,
+        hosting: HostingSelector,
+        kind: String,
+        key: String,
+        actor: String,
+    ) -> Result<hyperion_types::content::ContentScanResult, RpcError>;
+    /// Vouch for every content change waiting for review.
+    async fn content_trust_all_review(
+        &self,
+        hosting: HostingSelector,
+        actor: String,
+    ) -> Result<hyperion_types::content::ContentScanResult, RpcError>;
+
     /// Restart a whitelisted systemd unit.
     async fn service_restart(&self, name: String) -> Result<(), RpcError>;
     /// start / stop / enable / disable a whitelisted unit.
