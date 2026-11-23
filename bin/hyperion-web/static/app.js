@@ -925,6 +925,57 @@ function isShortcutContext(ev) {
   }, true);
 })();
 
+// Anchors a footer dropdown (notifications, what's new) to its button.
+// Call it AFTER unhiding the dropdown, so its height is real.
+function placeDropdown(btn, dropdown) {
+  // Horizontal anchor: right-aligned to the viewport edge.
+  // On narrow viewports we ignore the bell position and pin the
+  // dropdown to both edges with margin — otherwise on phones
+  // (where the sidebar is collapsed to a top bar and the bell
+  // sits near right edge), the dropdown would render off-screen.
+  const r = btn.getBoundingClientRect();
+  if (window.innerWidth <= 520) {
+    // Full-width-ish on phones — overrides CSS that already
+    // does the same at 480px, but covers the 481–520 range.
+    dropdown.style.left = '8px';
+    dropdown.style.right = '8px';
+    dropdown.style.width = 'auto';
+  } else {
+    // Left-anchor to the bell, then CLAMP so the whole dropdown
+    // stays on-screen. The bell lives in the LEFT sidebar, so the
+    // old right-anchor (right = innerWidth - bell.right) pushed a
+    // 22rem-wide dropdown off the LEFT edge — its left half was
+    // clipped by the viewport. Align the dropdown's left with the
+    // bell and slide it right only as far as needed to fit.
+    dropdown.style.right = '';
+    dropdown.style.width = '';
+    const width = dropdown.offsetWidth || 352;
+    let left = Math.min(r.left, window.innerWidth - width - 8);
+    left = Math.max(8, left);
+    dropdown.style.left = left + 'px';
+  }
+  // Vertical anchor: the bell lives in the sidebar FOOTER, so on
+  // desktop it sits near the bottom of the viewport — a downward
+  // dropdown spills off-screen and the operator sees nothing
+  // (the reported bug). Open UPWARD when there isn't enough room
+  // below and there is room above; otherwise fall back to down
+  // (e.g. the mobile top-bar layout where the bell is up high).
+  // Must run AFTER the dropdown is visible so offsetHeight is real
+  // — the caller unhides first.
+  const gap = 8;
+  const h = dropdown.offsetHeight || 0;
+  const roomBelow = window.innerHeight - r.bottom;
+  const roomAbove = r.top;
+  if (roomBelow < h + gap && roomAbove > roomBelow) {
+    // Flip up: pin the dropdown's bottom just above the bell.
+    dropdown.style.top = '';
+    dropdown.style.bottom = (window.innerHeight - r.top + gap) + 'px';
+  } else {
+    dropdown.style.bottom = '';
+    dropdown.style.top = (r.bottom + gap) + 'px';
+  }
+}
+
 (function () {
   'use strict';
   const btn = document.getElementById('bell-btn');
@@ -934,54 +985,7 @@ function isShortcutContext(ev) {
   const markAllBtn = document.getElementById('bell-mark-all');
   if (!btn || !dropdown || !list) return;
 
-  function position() {
-    // Horizontal anchor: right-aligned to the viewport edge.
-    // On narrow viewports we ignore the bell position and pin the
-    // dropdown to both edges with margin — otherwise on phones
-    // (where the sidebar is collapsed to a top bar and the bell
-    // sits near right edge), the dropdown would render off-screen.
-    const r = btn.getBoundingClientRect();
-    if (window.innerWidth <= 520) {
-      // Full-width-ish on phones — overrides CSS that already
-      // does the same at 480px, but covers the 481–520 range.
-      dropdown.style.left = '8px';
-      dropdown.style.right = '8px';
-      dropdown.style.width = 'auto';
-    } else {
-      // Left-anchor to the bell, then CLAMP so the whole dropdown
-      // stays on-screen. The bell lives in the LEFT sidebar, so the
-      // old right-anchor (right = innerWidth - bell.right) pushed a
-      // 22rem-wide dropdown off the LEFT edge — its left half was
-      // clipped by the viewport. Align the dropdown's left with the
-      // bell and slide it right only as far as needed to fit.
-      dropdown.style.right = '';
-      dropdown.style.width = '';
-      const width = dropdown.offsetWidth || 352;
-      let left = Math.min(r.left, window.innerWidth - width - 8);
-      left = Math.max(8, left);
-      dropdown.style.left = left + 'px';
-    }
-    // Vertical anchor: the bell lives in the sidebar FOOTER, so on
-    // desktop it sits near the bottom of the viewport — a downward
-    // dropdown spills off-screen and the operator sees nothing
-    // (the reported bug). Open UPWARD when there isn't enough room
-    // below and there is room above; otherwise fall back to down
-    // (e.g. the mobile top-bar layout where the bell is up high).
-    // Must run AFTER the dropdown is visible so offsetHeight is real
-    // — the caller unhides first.
-    const gap = 8;
-    const h = dropdown.offsetHeight || 0;
-    const roomBelow = window.innerHeight - r.bottom;
-    const roomAbove = r.top;
-    if (roomBelow < h + gap && roomAbove > roomBelow) {
-      // Flip up: pin the dropdown's bottom just above the bell.
-      dropdown.style.top = '';
-      dropdown.style.bottom = (window.innerHeight - r.top + gap) + 'px';
-    } else {
-      dropdown.style.bottom = '';
-      dropdown.style.top = (r.bottom + gap) + 'px';
-    }
-  }
+  function position() { placeDropdown(btn, dropdown); }
 
   function csrfToken() {
     // The session_csrf token is available via a cookie set by axum.
@@ -1073,6 +1077,7 @@ function isShortcutContext(ev) {
       // Unhide BEFORE position() so it can measure the real
       // offsetHeight and decide whether to open up or down.
       dropdown.hidden = false;
+      document.dispatchEvent(new CustomEvent('hyperion:footer-panel', { detail: 'bell' }));
       position();
       btn.setAttribute('aria-expanded', 'true');
       refresh(true);
@@ -1085,6 +1090,12 @@ function isShortcutContext(ev) {
     btn.setAttribute('aria-expanded', 'false');
   });
   window.addEventListener('resize', () => { if (!dropdown.hidden) position(); });
+  // One footer panel at a time.
+  document.addEventListener('hyperion:footer-panel', (ev) => {
+    if (ev.detail === 'bell' || dropdown.hidden) return;
+    dropdown.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+  });
 
   function escape(s) {
     return String(s).replace(/[&<>"']/g, c => ({
@@ -1107,6 +1118,136 @@ function isShortcutContext(ev) {
   refresh(true);
   setInterval(() => { if (!document.hidden) refresh(true); }, 60_000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(true); });
+})();
+
+// ============================================================
+// What's new — the list of added features next to the bell.
+// Entries come from /api/whatsnew (compiled into the panel). What
+// this browser has already shown is one number in localStorage: the
+// highest entry id. Nothing is stored on the server, so a second
+// device shows the dot again.
+// ============================================================
+(function () {
+  'use strict';
+  const btn = document.getElementById('whatsnew-btn');
+  const dot = document.getElementById('whatsnew-dot');
+  const dropdown = document.getElementById('whatsnew-dropdown');
+  const list = document.getElementById('whatsnew-list');
+  if (!btn || !dot || !dropdown || !list) return;
+
+  const KEY = 'hyperion.whatsnew.seen';
+  const FRESH_DAYS = 30;
+  let entries = null;      // null = not loaded (or failed)
+  let seen = readSeen();   // 0 = nothing stored
+
+  // Private windows and blocked site data make localStorage throw or
+  // come back empty; a junk value counts as nothing stored.
+  function readSeen() {
+    try {
+      const raw = localStorage.getItem(KEY);
+      return /^[1-9]\d*$/.test(raw || '') ? Number(raw) : 0;
+    } catch (_) { return 0; }
+  }
+  function writeSeen(id) {
+    try { localStorage.setItem(KEY, String(id)); } catch (_) { /* dot returns next load */ }
+  }
+  // With nothing stored only recent entries count, so a new colleague
+  // (or a new browser) is not greeted by a list that is all highlights.
+  function isNew(e) {
+    if (seen > 0) return e.id > seen;
+    const t = Date.parse(e.date + 'T00:00:00Z');
+    return Number.isFinite(t) && Date.now() - t <= FRESH_DAYS * 86400000;
+  }
+
+  function setMessage(text) {
+    list.textContent = '';
+    const li = document.createElement('li');
+    li.className = 'bell-empty';
+    li.textContent = text;
+    list.appendChild(li);
+  }
+
+  function render() {
+    if (entries === null) { setMessage('Could not load.'); return; }
+    if (entries.length === 0) { setMessage('Nothing new yet.'); return; }
+    list.textContent = '';
+    for (const e of entries) {
+      const li = document.createElement('li');
+      li.className = 'bell-item' + (isNew(e) ? ' unread' : '');
+      const a = document.createElement('a');
+      a.className = 'bell-link';
+      // Panel paths only — never a scheme or another host.
+      a.href = /^\/(?!\/)/.test(e.link) ? e.link : '/';
+      const mark = document.createElement('span');
+      mark.className = 'bell-dot';
+      const text = document.createElement('span');
+      text.className = 'bell-text';
+      const title = document.createElement('strong');
+      title.textContent = e.title;
+      const body = document.createElement('span');
+      body.className = 'bell-body';
+      body.textContent = e.body;
+      const meta = document.createElement('span');
+      meta.className = 'bell-meta';
+      const when = document.createElement('span');
+      when.textContent = e.date;
+      const go = document.createElement('span');
+      go.className = 'whatsnew-go';
+      go.textContent = e.link_label + ' \u2192';
+      meta.append(when, go);
+      text.append(title, body, meta);
+      a.append(mark, text);
+      li.appendChild(a);
+      list.appendChild(li);
+    }
+  }
+
+  function close() {
+    if (dropdown.hidden) return;
+    dropdown.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+  }
+
+  function open() {
+    // Render with the OLD mark so what is new stays highlighted while
+    // the panel is open, then remember that it has been shown.
+    render();
+    dropdown.hidden = false;
+    document.dispatchEvent(new CustomEvent('hyperion:footer-panel', { detail: 'whatsnew' }));
+    placeDropdown(btn, dropdown);
+    btn.setAttribute('aria-expanded', 'true');
+    if (entries && entries.length) {
+      const top = Math.max(...entries.map(e => e.id));
+      if (top > seen) { seen = top; writeSeen(top); }
+    }
+    dot.hidden = true;
+  }
+
+  btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    if (dropdown.hidden) open(); else close();
+  });
+  document.addEventListener('click', (ev) => {
+    if (dropdown.hidden) return;
+    if (dropdown.contains(ev.target) || btn.contains(ev.target)) return;
+    close();
+  });
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); });
+  document.addEventListener('hyperion:footer-panel', (ev) => {
+    if (ev.detail !== 'whatsnew') close();
+  });
+  window.addEventListener('resize', () => { if (!dropdown.hidden) placeDropdown(btn, dropdown); });
+
+  // Once per page load: the list only changes with a release.
+  fetch('/api/whatsnew', { credentials: 'same-origin', headers: { accept: 'application/json' } })
+    .then(r => (r.ok ? r.json() : null))
+    .then(j => {
+      if (!j || !Array.isArray(j.entries)) return;
+      entries = j.entries;
+      dot.hidden = !entries.some(isNew);
+      if (!dropdown.hidden) { render(); placeDropdown(btn, dropdown); }
+    })
+    .catch(() => { /* panel says "Could not load." */ });
 })();
 
 // ============================================================

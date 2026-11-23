@@ -4634,6 +4634,22 @@ body.role-customer .header-action-new { display: none !important; }
   box-sizing: content-box;
 }
 
+/* What's new: a plain dot, in the accent colour — news, not an alert. */
+.bell-badge.whatsnew-dot {
+  min-width: 0;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  top: 0.2rem;
+  right: 0.2rem;
+  background: var(--primary);
+}
+.bell-meta .whatsnew-go {
+  float: right;
+  color: var(--primary-h);
+  font-weight: 600;
+}
+
 .bell-dropdown {
   position: fixed;
   width: 22rem;
