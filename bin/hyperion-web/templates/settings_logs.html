@@ -1,0 +1,73 @@
+{% extends "settings_base.html" %}
+{% block section %}
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Logs{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+  <div class="item" id="log-retention">
+    <h3 style="margin:0">How long logs are kept</h3>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      Every log below records IP addresses, and some record e-mail addresses
+      or what a visitor asked for. Under the GDPR's data minimisation rule
+      they should be kept only as long as they are needed, so each one
+      defaults to 30 days and none is kept forever.
+    </p>
+    {% if let Some(rows) = rows %}
+    <form method="post" action="/settings/config" autocomplete="off" style="margin-top:0.9rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="log_retention">
+      <input type="hidden" name="_return_tab" value="log-retention">
+      {% for r in rows %}
+      <div class="field">
+        <label for="lr_{{ r.class.key }}">{{ r.class.label }} <span class="hint">days · {{ min_days }}–{{ max_days }}</span></label>
+        <input id="lr_{{ r.class.key }}" name="{{ r.class.key }}" type="number" min="{{ min_days }}" max="{{ max_days }}" value="{{ r.days }}" style="max-width:12rem">
+        <span class="help">{{ r.class.what }}</span>
+      </div>
+      {% endfor %}
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+
+    <details class="howto">
+      <summary>How it is applied</summary>
+      <p>
+        Each node runs a retention pass every hour. It rotates every site's
+        <code>access.log</code> and <code>error.log</code> once a day (the
+        newest copy stays plain as <code>.1</code>, older ones are gzipped)
+        and deletes copies older than the window. The firewall and PHP
+        slow-request logs are rotated by logrotate with the same number of
+        days, and the system journal by a journald drop-in
+        (<code>MaxRetentionSec</code>).
+      </p>
+      <p>
+        Rows in the panel's database go on the same pass: the Protection
+        page's refused-request samples, ended bans (a ban still in force is
+        kept), the email log and the addresses of old panel sign-ins. The audit
+        log and the notifications are purged on the five-minute scheduler
+        tick; the audit chain is re-anchored at the oldest entry kept, so it
+        still verifies. <a href="/audit?export=csv">Export the audit log as CSV</a>
+        first if you need an older copy.
+      </p>
+      <p>
+        The audit log and the ban history can stay longer than set here. A
+        care report counts a period's plugin updates from the audit log and
+        its blocked attacks from the ban history, so nothing from a period
+        that has not been reported yet is removed: a site on a quarterly
+        report keeps about three months, and one whose report could not be
+        sent keeps everything back to the start of that period. A one-off
+        report over a range you pick yourself is not protected this way.
+      </p>
+      <p>
+        A shorter ban history means a returning address is less likely to be
+        recognised as a repeat offender. Debian keeps the panel's own nginx
+        log in <code>/var/log/nginx</code> for 14 days, and
+        <code>/var/log/auth.log</code> (when rsyslog is installed) for four
+        weeks; those rules belong to their packages and are left alone.
+      </p>
+    </details>
+    {% else %}
+    <div class="alert alert-warn" role="status" style="margin:0.9rem 0 0">
+      <code>agent.toml</code> can't be shown: {{ error }}. Nodes keep every
+      log for 30 days.
+    </div>
+    {% endif %}
+  </div>
+</fieldset>
+{% endblock %}

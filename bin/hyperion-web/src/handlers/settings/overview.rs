@@ -80,6 +80,8 @@ pub struct Facts {
     pub fail2ban_on: Option<bool>,
     /// `[antivirus]` as agent.toml holds it; `None` when the file is unreadable.
     pub antivirus: Option<hyperion_types::antivirus::AntivirusSettings>,
+    /// `[log_retention]` as agent.toml holds it; `None` when unreadable.
+    pub log_retention: Option<hyperion_types::log_retention::LogRetention>,
     pub geoip_installed: bool,
     pub letter_lang: String,
     /// Catalogue sentences rewritten, not counting the Letters editor's own
@@ -189,6 +191,7 @@ async fn gather(state: &SharedState, nodes: &[hyperion_types::NodeSummary]) -> F
     if let Ok(raw) = toml_res {
         f.fail2ban_on = super::parse_fail2ban_section(&raw).map(|v| v.cfg.enabled);
         f.antivirus = super::page_antivirus::parse_antivirus_section(&raw);
+        f.log_retention = super::page_logs::parse_log_retention_section(&raw);
         let cat = hyperion_core::service::letter_catalog_from_toml(&raw);
         f.letter_lang = cat.lang.as_str().to_string();
         let editor = super::page_letters::EDITOR_IDS;
@@ -577,11 +580,6 @@ fn state_of(slug: &str, f: &Facts, has_nodes: bool) -> String {
             } else {
                 "2FA optional".into()
             });
-            parts.push(if c.cluster.audit_retention_days <= 0 {
-                "audit log kept forever".into()
-            } else {
-                format!("audit log kept {} days", c.cluster.audit_retention_days)
-            });
         }
         "bans" => {
             parts.push(match f.fail2ban_on {
@@ -595,6 +593,13 @@ fn state_of(slug: &str, f: &Facts, has_nodes: bool) -> String {
                 "no GeoIP database".into()
             });
         }
+        "logs" => parts.push(match f.log_retention {
+            Some(r) => match r.span() {
+                (a, b) if a == b => format!("Every log kept {a} days"),
+                (a, b) => format!("Logs kept {a} to {b} days"),
+            },
+            None => "Retention unreadable".into(),
+        }),
         "antivirus" => parts.push(match f.antivirus {
             Some(s) if s.enabled => {
                 format!("ClamAV pass {}, {}", s.every_text(), s.window_text())

@@ -240,21 +240,11 @@ fn render_http_include() -> String {
     )
 }
 
-fn render_logrotate() -> String {
+pub(crate) fn render_logrotate() -> String {
     // copytruncate: libmodsecurity keeps the file open across reloads, so a
     // renamed log would go on receiving every entry until nginx restarts.
-    format!(
-        "# Auto-managed by Hyperion.\n\
-         {AUDIT_LOG} {{\n\
-         \x20   daily\n\
-         \x20   rotate 7\n\
-         \x20   missingok\n\
-         \x20   notifempty\n\
-         \x20   compress\n\
-         \x20   delaycompress\n\
-         \x20   copytruncate\n\
-         }}\n"
-    )
+    // Days: `[log_retention] firewall_days`.
+    crate::log_retention::render_rule(AUDIT_LOG, crate::log_retention::firewall_days(), &[])
 }
 
 /// One site's rules, rendered into its server block inside

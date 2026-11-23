@@ -151,6 +151,21 @@ pub async fn reap_expired(pool: &SqlitePool, now: i64) -> Result<Vec<String>, St
     Ok(ips.into_iter().map(|(ip,)| ip).collect())
 }
 
+/// Forget bans that ENDED before `cutoff`: `[log_retention] bans_days`.
+/// A ban still in force is never touched, whatever its age. Rows from
+/// before `ended_at` existed are dated by when they lapsed, or (a permanent
+/// ban lifted then) by when they began.
+pub async fn prune_ended_before(pool: &SqlitePool, cutoff: i64) -> Result<u64, StateError> {
+    Ok(sqlx::query(
+        "DELETE FROM ip_bans WHERE active = 0 \
+         AND COALESCE(ended_at, NULLIF(expires_at, 0), banned_at) < ?",
+    )
+    .bind(cutoff)
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
 /// True when the IP currently has an active, unexpired ban.
 pub async fn is_active(pool: &SqlitePool, ip: &str, now: i64) -> Result<bool, StateError> {
     let row: Option<(i64,)> = sqlx::query_as(
@@ -342,5 +357,28 @@ mod tests {
         assert_eq!(old.end_reason, None);
         assert_eq!(h[0].banned_at, 300, "newest first");
         assert_eq!(list_since(&pool, 50, 2).await.expect("cap").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_bans_in_force_and_recent_history() {
+        let pool = open_memory().await.expect("open");
+        // Ended long ago.
+        add_or_refresh(&pool, "1.1.1.1", None, "auto", "auto", 100, 200)
+            .await
+            .unwrap();
+        reap_expired(&pool, 300).await.unwrap();
+        // Ended recently.
+        add_or_refresh(&pool, "2.2.2.2", None, "auto", "auto", 100, 5_000)
+            .await
+            .unwrap();
+        deactivate(&pool, "2.2.2.2", 4_000).await.unwrap();
+        // Permanent and still in force, banned long ago.
+        add_or_refresh(&pool, "3.3.3.3", None, "manual", "manual", 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(prune_ended_before(&pool, 1_000).await.unwrap(), 1);
+        assert!(is_active(&pool, "3.3.3.3", 10_000).await.unwrap());
+        assert!(was_banned_since(&pool, "2.2.2.2", 0).await.unwrap());
+        assert!(!was_banned_since(&pool, "1.1.1.1", 0).await.unwrap());
     }
 }

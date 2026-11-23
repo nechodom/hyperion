@@ -18,6 +18,7 @@ mod page_bans;
 mod page_cluster;
 mod page_https;
 mod page_letters;
+mod page_logs;
 mod page_mail;
 pub mod page_orphans;
 mod page_panel;
@@ -32,6 +33,7 @@ pub use page_bans::get_bans;
 pub use page_cluster::{get_cluster, post_cluster_sync};
 pub use page_https::{get_https, get_preview_dns};
 pub use page_letters::{get_letters, post_adopt_legacy};
+pub use page_logs::get_logs;
 pub use page_mail::{get_mail, get_mail_health};
 pub use page_panel::get_panel;
 
@@ -1303,6 +1305,7 @@ fn section_label(section: &str) -> &'static str {
         "letters" => "Sentences",
         "fail2ban" => "Brute-force scanner",
         "antivirus" => "Antivirus schedule",
+        "log_retention" => "Log retention",
         "update" => "Updates",
         "acme" => "Let's Encrypt contact",
         "slack" => "Slack",
@@ -1324,7 +1327,6 @@ fn card_label(anchor: &str) -> Option<&'static str> {
         "test-nodes" => Some("Test nodes"),
         "preview-address" => Some("Preview address"),
         "trash" => Some("Trash"),
-        "audit-retention" => Some("Audit log retention"),
         "alert-templates" => Some("Alert wording"),
         "alert-language" => Some("Alert language"),
         "alert-recipients" => Some("Recipients"),
@@ -1668,6 +1670,7 @@ fn section_to_tab(section: &str) -> &'static str {
         "snapshots" => "snapshot-retention",
         "fail2ban" => "bruteforce-scanner",
         "antivirus" => "antivirus-schedule",
+        "log_retention" => "log-retention",
         // [cluster] is written from five pages and every form says which
         // card it is; the fallback is a card every install has.
         "cluster" => "panel-domain",
@@ -3427,6 +3430,7 @@ from_address = "ops@example.cz"
         "snapshots",
         "fail2ban",
         "antivirus",
+        "log_retention",
         "cluster",
         "",
         "no-such-section",
@@ -3489,7 +3493,6 @@ from_address = "ops@example.cz"
             "test-nodes",
             "preview-address",
             "trash",
-            "audit-retention",
             "alert-templates",
             "alert-language",
             "alert-recipients",

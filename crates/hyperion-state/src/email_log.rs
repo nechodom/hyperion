@@ -157,6 +157,16 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
+/// Delete rows sent before `cutoff`: `[log_retention] email_days`. Every
+/// row names a recipient address.
+pub async fn prune_before(pool: &SqlitePool, cutoff: i64) -> Result<u64, StateError> {
+    Ok(sqlx::query("DELETE FROM email_log WHERE sent_at < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +263,19 @@ mod tests {
         // Asking for 0 is clamped to 1.
         let rows = list(&pool, None, 0).await.expect("list zero");
         assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prune_before_drops_only_older_rows() {
+        let pool = open_memory().await.expect("open");
+        for (subj, at) in [("old", 100), ("new", 900)] {
+            append(&pool, None, "to@x", subj, "b", "test", "ok", None, None, at)
+                .await
+                .expect("append");
+        }
+        assert_eq!(prune_before(&pool, 500).await.expect("prune"), 1);
+        let rows = list(&pool, None, 10).await.expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].subject, "new");
     }
 }

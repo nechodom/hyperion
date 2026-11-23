@@ -1104,8 +1104,6 @@ pub(super) fn docker_outbound_text(subject: &str, body: &str) -> String {
     }
 }
 
-/// How long the bell's archive (and a worker's outbox) keeps a row.
-pub(super) const NOTIFICATION_RETENTION_SECS: i64 = 90 * 86_400;
 /// Archive page size when the caller does not ask for one.
 pub(super) const NOTIFICATION_PAGE: i64 = 100;
 

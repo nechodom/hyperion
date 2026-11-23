@@ -179,6 +179,24 @@ pub async fn gc_older_than(pool: &SqlitePool, cutoff: i64) -> Result<u64, StateE
     Ok(n)
 }
 
+/// Erase the IP address and user agent of sessions last seen before
+/// `cutoff`: `[log_retention] sessions_days`.
+///
+/// Erased, not deleted. A sid with no row is accepted as a pre-migration
+/// cookie (see [`touch_if_live`]), so deleting the row of a cookie that has
+/// not expired yet — the panel's session lifetime is set in the web's own
+/// config, which the agent cannot see — would make it impossible to revoke.
+pub async fn scrub_before(pool: &SqlitePool, cutoff: i64) -> Result<u64, StateError> {
+    Ok(sqlx::query(
+        "UPDATE web_sessions SET ip = NULL, user_agent = NULL \
+         WHERE last_seen_at < ? AND (ip IS NOT NULL OR user_agent IS NOT NULL)",
+    )
+    .bind(cutoff)
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +265,31 @@ mod tests {
         assert!(!touch_if_live(&p, "live-1", 1100).await.expect("t1"));
         assert!(!touch_if_live(&p, "live-2", 1100).await.expect("t2"));
         assert!(!touch_if_live(&p, "dead-1", 1100).await.expect("t3"));
+    }
+
+    #[tokio::test]
+    async fn scrub_erases_where_from_but_keeps_the_session() {
+        let p = fresh().await;
+        insert(&p, "old", 1, Some("1.2.3.4"), Some("curl/8"), 100)
+            .await
+            .unwrap();
+        insert(&p, "new", 1, Some("5.6.7.8"), Some("curl/8"), 900)
+            .await
+            .unwrap();
+        revoke(&p, "old", 1, 150).await.unwrap();
+        assert_eq!(scrub_before(&p, 500).await.unwrap(), 1);
+        assert_eq!(
+            scrub_before(&p, 500).await.unwrap(),
+            0,
+            "nothing left to erase"
+        );
+        let rows = list_for_user(&p, 1, 10).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        let old = rows.iter().find(|r| r.sid == "old").unwrap();
+        assert_eq!((old.ip.as_deref(), old.user_agent.as_deref()), (None, None));
+        // Still revoked: the cookie stays refused.
+        assert!(!touch_if_live(&p, "old", 1_000).await.unwrap());
+        let new = rows.iter().find(|r| r.sid == "new").unwrap();
+        assert_eq!(new.ip.as_deref(), Some("5.6.7.8"));
     }
 }

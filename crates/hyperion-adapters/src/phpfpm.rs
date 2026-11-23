@@ -138,19 +138,17 @@ pub const SLOWLOG_SECS: u32 = 5;
 
 /// Rotation for the slow logs. `copytruncate` because FPM keeps the file
 /// open and only reopens it on USR1, which nothing here sends.
-const SLOWLOG_LOGROTATE: &str = "/etc/logrotate.d/hyperion-php-slow";
-const SLOWLOG_LOGROTATE_BODY: &str = r#"# Auto-managed by Hyperion.
-/var/log/hyperion/php-slow/*.log {
-    daily
-    rotate 7
-    maxsize 20M
-    compress
-    delaycompress
-    missingok
-    notifempty
-    copytruncate
+pub(crate) const SLOWLOG_LOGROTATE: &str = "/etc/logrotate.d/hyperion-php-slow";
+
+/// The slow logs' rule. Days: `[log_retention] web_days` — a slow-request
+/// trace names the URL a visitor asked for.
+pub(crate) fn render_slowlog_logrotate() -> String {
+    crate::log_retention::render_rule(
+        &format!("{SLOWLOG_DIR}/*.log"),
+        crate::log_retention::web_days(),
+        &["maxsize 20M"],
+    )
 }
-"#;
 
 /// The slow-request log of one pool.
 pub fn slowlog_path(system_user: &str) -> PathBuf {
@@ -204,13 +202,14 @@ async fn ensure_slowlog_dir() -> Result<(), AdapterError> {
     let dir = std::path::Path::new(SLOWLOG_DIR);
     tokio::fs::create_dir_all(dir).await?;
     tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750)).await?;
+    let body = render_slowlog_logrotate();
     let current = tokio::fs::read_to_string(SLOWLOG_LOGROTATE).await.ok();
-    if current.as_deref() != Some(SLOWLOG_LOGROTATE_BODY) {
+    if current.as_deref() != Some(body.as_str()) {
         // Best effort: a box without logrotate still gets its slow log,
         // just unrotated.
         if let Err(e) = atomic_write(
             std::path::Path::new(SLOWLOG_LOGROTATE),
-            SLOWLOG_LOGROTATE_BODY.as_bytes(),
+            body.as_bytes(),
             0o644,
         )
         .await
@@ -1108,7 +1107,7 @@ mod tests {
         assert!(out.contains("slowlog = /var/log/hyperion/php-slow/alice_cz.log\n"));
         assert!(out.contains("request_slowlog_timeout = 5s\n"));
         assert!(!out.contains("slowlog = /home/"));
-        assert!(SLOWLOG_LOGROTATE_BODY.contains("    copytruncate\n"));
+        assert!(render_slowlog_logrotate().contains("    copytruncate\n"));
     }
 
     #[test]

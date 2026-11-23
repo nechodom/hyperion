@@ -95,47 +95,50 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if let Err(e) = self.trash_gc_tick().await {
             tracing::warn!(error=%e, "trash GC failed");
         }
-        // Audit retention: purge audit_log entries older than the
-        // configured window. No-op when audit_retention_days = 0
-        // (the default — keep forever). Updates the chain anchor
-        // so verify_chain keeps working on the truncated chain.
+        // Audit retention: purge audit_log entries older than
+        // `[log_retention] audit_days` (30 unless set). Updates the chain
+        // anchor so verify_chain keeps working on the truncated chain.
         if let Err(e) = self.audit_retention_tick().await {
             tracing::warn!(error=%e, "audit retention failed");
         }
-        // The bell's archive (and a worker's outbox) keep 90 days. This
-        // existed from the start but was never called, so the table grew
-        // for as long as the box ran.
-        if let Err(e) = hyperion_state::notifications::gc_older_than(
-            &self.pool,
-            NOTIFICATION_RETENTION_SECS,
-            now_secs(),
-        )
-        .await
+        // The bell's archive (and a worker's outbox): `[log_retention]
+        // notifications_days`. Alerts name banned addresses and customers.
+        let notification_secs = i64::from(self.log_retention().notifications_days) * 86_400;
+        if let Err(e) =
+            hyperion_state::notifications::gc_older_than(&self.pool, notification_secs, now_secs())
+                .await
         {
             tracing::warn!(error=%e, "notification retention failed");
         }
         Ok(processed)
     }
 
-    /// Purge audit_log entries older than `cluster.audit_retention_days`.
-    /// No-op when the setting is 0. Logs an info line each time entries
-    /// are actually purged so operators see "I lost N audit rows on
-    /// 2026-06-09" in journald — important context if anyone ever
-    /// challenges the chain.
+    /// Purge audit_log entries older than `[log_retention] audit_days`
+    /// (falling back to a positive `[cluster] audit_retention_days` someone
+    /// chose before that section existed; 30 days otherwise) — but never
+    /// rows of a care-report period not reported yet
+    /// ([`Self::care_report_open_floor`]). Logs an info
+    /// line each time entries are actually purged so operators see "I lost
+    /// N audit rows on 2026-06-09" in journald — important context if
+    /// anyone ever challenges the chain.
     pub(crate) async fn audit_retention_tick(&self) -> Result<(), RpcError> {
-        let cluster_cfg = read_cluster_section(self.agent_config_path.as_deref());
-        if cluster_cfg.audit_retention_days <= 0 {
-            return Ok(());
-        }
-        let cutoff = now_secs() - cluster_cfg.audit_retention_days * 86_400;
+        let days = i64::from(self.log_retention().audit_days);
+        let now = now_secs();
+        // Never into a care-report period not reported yet: the report
+        // counts that period's updates from this table (a day's margin for
+        // a report rendered across midnight).
+        let cutoff = match self.care_report_open_floor(now).await {
+            Some(floor) => (now - days * 86_400).min(floor - 86_400),
+            None => now - days * 86_400,
+        };
         let (deleted, new_anchor) =
-            hyperion_state::audit::purge_older_than(&self.pool, cutoff, now_secs())
+            hyperion_state::audit::purge_older_than(&self.pool, cutoff, now)
                 .await
                 .map_err(|e| RpcError::Internal_with(format!("audit purge: {e}")))?;
         if deleted > 0 {
             tracing::info!(
                 deleted,
-                retention_days = cluster_cfg.audit_retention_days,
+                retention_days = days,
                 anchor_set = new_anchor.is_some(),
                 "audit retention purge"
             );

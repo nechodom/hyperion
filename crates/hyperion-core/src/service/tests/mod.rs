@@ -1221,6 +1221,7 @@ mod jobs;
 mod kv_expiry;
 mod letters;
 mod limits;
+mod log_retention;
 mod login_lock;
 mod mail;
 mod migration;
