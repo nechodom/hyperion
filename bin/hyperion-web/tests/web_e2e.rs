@@ -806,6 +806,63 @@ async fn authenticated_dashboard_renders() {
 }
 
 #[tokio::test]
+async fn whatsnew_feed_lists_entries_newest_first() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(b"username=kevin&password=good-pw&next=/".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/whatsnew")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let body = body_string(resp).await;
+    assert!(!body.contains("needs"), "capability names stay server-side");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let entries = v["entries"].as_array().expect("entries");
+    let newest = hyperion_web::whatsnew::ENTRIES.last().unwrap();
+    assert_eq!(entries[0]["id"], newest.id);
+    assert_eq!(entries[0]["title"], newest.title);
+    for e in entries {
+        assert!(e["link"].as_str().unwrap().starts_with('/'));
+        assert!(!e["link_label"].as_str().unwrap().is_empty());
+        assert_eq!(e["date"].as_str().unwrap().len(), 10);
+    }
+}
+
+#[tokio::test]
+async fn whatsnew_feed_needs_a_session() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let (status, body) = get_body(app, "/api/whatsnew").await;
+    assert_ne!(status, StatusCode::OK);
+    assert!(!body.contains("entries"));
+}
+
+#[tokio::test]
 async fn static_css_is_served() {
     let admin = admin_user::create("kevin", "good-pw").expect("create");
     let (sock, _d) = start_agent().await;

@@ -46,6 +46,7 @@ pub mod stats;
 pub mod trash;
 pub mod users;
 pub mod vulns;
+pub mod whatsnew;
 
 /// The DNS-01 records a "validate now" form carries back, one
 /// `name value` pair per comma (hostnames and base64url values hold
