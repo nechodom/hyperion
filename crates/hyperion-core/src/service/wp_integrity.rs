@@ -132,6 +132,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
         .map_err(|e| RpcError::Internal_with(format!("scan request: {e}")))?;
         self.site_scan.wake.notify_one();
+        // "Scan now" means the content too. Best-effort: the file scan was asked
+        // for either way.
+        self.content_scan_request(detail.id.as_str(), now).await;
         self.wp_integrity_stored(sel).await
     }
 
@@ -491,6 +494,21 @@ pub(super) fn read_new_layers_live(cfg_path: Option<&std::path::Path>) -> bool {
         .and_then(|doc| {
             doc.get("integrity")
                 .and_then(|s| s.get("new_layers_live"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+/// Whether the content monitor tells anyone what it finds, from
+/// `[integrity] content_live`. Off until the owner has seen pilot results: the
+/// scans run and the card shows them, and no one is notified.
+pub(super) fn read_content_live(cfg_path: Option<&std::path::Path>) -> bool {
+    cfg_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| raw.parse::<toml_edit::DocumentMut>().ok())
+        .and_then(|doc| {
+            doc.get("integrity")
+                .and_then(|s| s.get("content_live"))
                 .and_then(|v| v.as_bool())
         })
         .unwrap_or(false)

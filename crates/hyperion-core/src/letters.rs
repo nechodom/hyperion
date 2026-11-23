@@ -1544,6 +1544,42 @@ pub static STRINGS: &[LetterString] = &[
              prověřte.",
     },
     LetterString {
+        id: "ops.content.title",
+        group: "Operator alerts — WordPress",
+        note: "The content monitor found hidden links, a suspicious script or content shown only to search engines.",
+        en: "Site content check: injected content",
+        cs: "Kontrola obsahu webu: vložený obsah",
+    },
+    LetterString {
+        id: "ops.content.body",
+        group: "Operator alerts — WordPress",
+        note: "One message per site per sweep. Tokens: {domain} {findings} {new}.",
+        en: "{domain} — {findings} item(s) in the site's database or on its pages look injected \
+             (hidden links, an encoded script, or content shown only to search engines), {new} \
+             new since the last check. No file needs to have changed for this.",
+        cs: "{domain} — v databázi webu nebo na jeho stránkách je {findings} položek, které \
+             vypadají jako vložené (skryté odkazy, zakódovaný skript nebo obsah zobrazený jen \
+             vyhledávačům), z toho nových od poslední kontroly: {new}. Žádný soubor se kvůli \
+             tomu změnit nemusel.",
+    },
+    LetterString {
+        id: "ops.content_review.title",
+        group: "Operator alerts — WordPress",
+        note: "The content monitor saw a script, frame or redirect host the site didn't have before.",
+        en: "Site content check: new hosts to review",
+        cs: "Kontrola obsahu webu: nové adresy k posouzení",
+    },
+    LetterString {
+        id: "ops.content_review.body",
+        group: "Operator alerts — WordPress",
+        note: "One message per site per sweep. Tokens: {domain} {review} {new}.",
+        en: "{domain} — {review} script, frame or redirect host(s) wait for review, {new} new \
+             since the last check. Trust the expected ones (a new tag or embed) or look at the rest.",
+        cs: "{domain} — k posouzení čeká adres skriptů, rámců či přesměrování: {review}, z toho \
+             nových od poslední kontroly: {new}. Očekávané (nová značka či vložený obsah) \
+             potvrďte, ostatní prověřte.",
+    },
+    LetterString {
         id: "ops.cert_failed.title",
         group: "Operator alerts — certificates",
         note: "Renewal failed. Red only once the certificate has actually expired.",
@@ -2298,6 +2334,10 @@ mod tests {
             "care.integrity.what_rule",
             "ops.integrity_review.title",
             "ops.integrity_review.body",
+            "ops.content.title",
+            "ops.content.body",
+            "ops.content_review.title",
+            "ops.content_review.body",
         ] {
             let s = lookup(id).unwrap_or_else(|| panic!("{id} missing"));
             assert!(!s.en.is_empty() && !s.cs.is_empty(), "{id}");

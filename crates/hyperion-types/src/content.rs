@@ -185,6 +185,9 @@ pub struct ContentScanResult {
     /// Script and frame hosts the baseline holds.
     #[serde(default)]
     pub known_hosts: u32,
+    /// Items there was no room to list.
+    #[serde(default)]
+    pub more: u32,
 }
 
 impl ContentScanResult {

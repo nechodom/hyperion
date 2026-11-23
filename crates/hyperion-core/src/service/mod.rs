@@ -40,6 +40,7 @@ mod care_report;
 mod certs;
 mod cluster;
 mod config;
+mod content_scan;
 mod cpu_usage;
 mod cron;
 mod dashboard;
@@ -240,6 +241,31 @@ pub trait AdapterPort: Send + Sync {
     /// hosting owns.
     async fn site_scan_wp_config_db(&self, _root: &std::path::Path) -> Option<(String, String)> {
         None
+    }
+
+    /// A site's stored content, reduced to what it loads, hides and runs. From a
+    /// database the caller has confirmed the hosting owns, as the hosting's login.
+    async fn content_db_read(
+        &self,
+        _db: &str,
+        _prefix: &str,
+        _user: &str,
+        _password: &str,
+        _cursor: hyperion_adapters::contentscan::db::Cursor,
+        _site_hosts: Vec<String>,
+    ) -> Result<hyperion_adapters::contentscan::db::DbObserved, AdapterError> {
+        Err(AdapterError::Other("no database here".into()))
+    }
+
+    /// One page of a site, from this node's own copy. `crawler` asks for it the
+    /// way a search engine's crawler announces itself.
+    async fn content_page(
+        &self,
+        _url: &str,
+        _host: &str,
+        _crawler: bool,
+    ) -> Result<hyperion_adapters::sitecheck::Fetched, AdapterError> {
+        Err(AdapterError::Other("no web server here".into()))
     }
 
     /// An update transient from a database the caller has confirmed the hosting
@@ -971,6 +997,11 @@ pub struct SiteScanShared {
     pub(crate) wake: tokio::sync::Notify,
     /// The same for the ClamAV pass.
     pub(crate) clamav_wake: tokio::sync::Notify,
+    /// And for the content monitor.
+    pub(crate) content_wake: tokio::sync::Notify,
+    /// Held across reading and rewriting one site's content result and baseline:
+    /// a scan and a Trust can both want them.
+    pub(crate) content: tokio::sync::Mutex<()>,
 }
 
 impl Default for SiteScanShared {
@@ -980,6 +1011,8 @@ impl Default for SiteScanShared {
             node: Default::default(),
             record: Default::default(),
             wake: Default::default(),
+            content_wake: Default::default(),
+            content: Default::default(),
             clamav_wake: Default::default(),
         }
     }
@@ -1229,6 +1262,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// asked, so a save needs no restart.
     pub fn antivirus_settings(&self) -> hyperion_types::antivirus::AntivirusSettings {
         read_antivirus_settings(self.agent_config_path.as_deref())
+    }
+
+    /// Whether the content monitor's alerts are on — see [`read_content_live`].
+    pub fn content_live(&self) -> bool {
+        read_content_live(self.agent_config_path.as_deref())
     }
 
     /// [`read_vendor_refs_live`].
