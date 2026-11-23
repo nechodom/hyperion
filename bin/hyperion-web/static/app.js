@@ -681,6 +681,8 @@ function isShortcutContext(ev) {
       const pill = document.getElementById('sidebar-role');
       if (pill) pill.textContent = ROLE_LABELS[role] || role;
       apply();
+      // For scripts that only make sense for some roles (what's new).
+      document.dispatchEvent(new CustomEvent('hyperion:role', { detail: role }));
     })
     .catch(() => apply());
   // Content swapped in without a page load (the hosting detail's in-place
@@ -1137,7 +1139,8 @@ function placeDropdown(btn, dropdown) {
 
   const KEY = 'hyperion.whatsnew.seen';
   const FRESH_DAYS = 30;
-  let entries = null;      // null = not loaded (or failed)
+  let entries = null;      // set once the feed has arrived
+  let failed = false;
   let seen = readSeen();   // 0 = nothing stored
 
   // Private windows and blocked site data make localStorage throw or
@@ -1168,7 +1171,7 @@ function placeDropdown(btn, dropdown) {
   }
 
   function render() {
-    if (entries === null) { setMessage('Could not load.'); return; }
+    if (entries === null) { setMessage(failed ? 'Could not load.' : 'Loading\u2026'); return; }
     if (entries.length === 0) { setMessage('Nothing new yet.'); return; }
     list.textContent = '';
     for (const e of entries) {
@@ -1216,6 +1219,11 @@ function placeDropdown(btn, dropdown) {
     document.dispatchEvent(new CustomEvent('hyperion:footer-panel', { detail: 'whatsnew' }));
     placeDropdown(btn, dropdown);
     btn.setAttribute('aria-expanded', 'true');
+    markSeen();
+  }
+
+  // The list is on screen: remember its newest id and drop the dot.
+  function markSeen() {
     if (entries && entries.length) {
       const top = Math.max(...entries.map(e => e.id));
       if (top > seen) { seen = top; writeSeen(top); }
@@ -1238,16 +1246,27 @@ function placeDropdown(btn, dropdown) {
   });
   window.addEventListener('resize', () => { if (!dropdown.hidden) placeDropdown(btn, dropdown); });
 
-  // Once per page load: the list only changes with a release.
-  fetch('/api/whatsnew', { credentials: 'same-origin', headers: { accept: 'application/json' } })
-    .then(r => (r.ok ? r.json() : null))
-    .then(j => {
-      if (!j || !Array.isArray(j.entries)) return;
-      entries = j.entries;
-      dot.hidden = !entries.some(isNew);
-      if (!dropdown.hidden) { render(); placeDropdown(btn, dropdown); }
-    })
-    .catch(() => { /* panel says "Could not load." */ });
+  // Once per page load: the list only changes with a release. Not before
+  // the role is known — the feed refuses customers and viewers, and a
+  // refused request on every page is noise in their console and our logs.
+  document.addEventListener('hyperion:role', (ev) => {
+    if (ev.detail === 'customer' || ev.detail === 'viewer') { failed = true; return; }
+    fetch('/api/whatsnew', { credentials: 'same-origin', headers: { accept: 'application/json' } })
+      .then(r => (r.ok ? r.json() : null))
+      .then(j => {
+        if (!j || !Array.isArray(j.entries)) { failed = true; }
+        else { entries = j.entries; }
+        if (dropdown.hidden) {
+          dot.hidden = !(entries || []).some(isNew);
+        } else {
+          // Opened while loading: draw it now, and it counts as shown.
+          render();
+          placeDropdown(btn, dropdown);
+          markSeen();
+        }
+      })
+      .catch(() => { failed = true; if (!dropdown.hidden) render(); });
+  }, { once: true });
 })();
 
 // ============================================================

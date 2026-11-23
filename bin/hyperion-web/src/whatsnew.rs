@@ -35,8 +35,9 @@ pub const ENTRIES: &[Entry] = &[
         id: 1,
         date: "2026-11-05",
         title: "Site scanner",
-        body: "Hyperion now scans site files itself, without wp-cli or a per-site ClamAV. \
-               It watches for new or changed PHP and flags what looks like malware.",
+        body: "Hyperion now scans site files itself, without wp-cli or a per-site ClamAV, \
+               and watches for new or changed PHP. The newer rules stay quiet until they \
+               are switched on for a node.",
         link: "/antivirus",
         link_label: "Open the scanner",
         needs: Some(Capability::SecurityManage),
@@ -46,8 +47,8 @@ pub const ENTRIES: &[Entry] = &[
         id: 2,
         date: "2026-11-11",
         title: "Docker tab on reverse-proxy sites",
-        body: "A reverse-proxy site has a Docker tab on its page with the containers behind it. \
-               The Docker page lists every stack.",
+        body: "With the Docker module on, a reverse-proxy site has a Docker tab on its page \
+               with the containers behind it. The Docker page lists every stack.",
         link: "/docker",
         link_label: "Open Docker",
         needs: Some(Capability::DockerView),
@@ -61,7 +62,8 @@ pub const ENTRIES: &[Entry] = &[
                or sent in bulk. Switch it on per site, on the WordPress tab.",
         link: "/hostings",
         link_label: "Pick a site",
-        needs: Some(Capability::WpManage),
+        // The switch itself asks for this one, not WpManage.
+        needs: Some(Capability::HostingEditConfig),
         all_sites: false,
     },
     Entry {
@@ -72,7 +74,8 @@ pub const ENTRIES: &[Entry] = &[
                It is a second switch on the Contact form guard card, on the WordPress tab.",
         link: "/hostings",
         link_label: "Pick a site",
-        needs: Some(Capability::WpManage),
+        // The switch itself asks for this one, not WpManage.
+        needs: Some(Capability::HostingEditConfig),
         all_sites: false,
     },
     Entry {
