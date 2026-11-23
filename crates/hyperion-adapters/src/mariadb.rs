@@ -200,6 +200,103 @@ pub async fn read_option(
     Ok((!value.is_empty()).then(|| value.to_string()))
 }
 
+/// How long one site's content read may take in all: its statements have a
+/// server-side limit each, and this is the client's.
+const READ_CONTENT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// A WordPress site's stored content, reduced to what it loads, hides and runs.
+///
+/// Read as the hosting's own login for the reason [`read_option`] gives. The
+/// output is taken a row at a time and the client is killed the moment the
+/// sweep's limits are reached, so neither a huge site nor a tenant who fills a
+/// table on purpose can make this hold more than one row and its observations.
+pub async fn read_content(
+    db: &str,
+    prefix: &str,
+    login: &DbLogin<'_>,
+    cursor: &crate::contentscan::db::Cursor,
+    site_hosts: &[String],
+) -> Result<crate::contentscan::db::DbObserved, AdapterError> {
+    use crate::contentscan::db::{parse_line, statements, Budget};
+    use std::io::Write;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let sql = statements(db, prefix, cursor)?;
+    if !valid_db_name(login.user) {
+        return Err(AdapterError::Other("refusing a database login".into()));
+    }
+    let mut opt = tempfile::Builder::new()
+        .prefix("hyperion-dbread-")
+        .suffix(".cnf")
+        .tempfile()?;
+    opt.write_all(mariadb_option_file(login)?.as_bytes())?;
+    opt.flush()?;
+    let mut child = tokio::process::Command::new("/usr/bin/mariadb")
+        .arg(format!("--defaults-extra-file={}", opt.path().display()))
+        .arg(format!("--user={}", login.user))
+        // `--quick`: rows are written as they arrive, not after the whole result
+        // has been buffered in the client.
+        .args([
+            "--local-infile=0",
+            "--batch",
+            "--raw",
+            "--quick",
+            "--skip-column-names",
+            "--default-character-set=utf8mb4",
+            "--connect-timeout=3",
+        ])
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let mut stdin = child.stdin.take();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AdapterError::Other("no output from the database client".into()))?;
+    let mut budget = Budget::default();
+    let mut capped = false;
+    let read = async {
+        if let Some(mut stdin) = stdin.take() {
+            stdin.write_all(sql.as_bytes()).await?;
+            stdin.shutdown().await?;
+        }
+        let mut lines = tokio::io::BufReader::new(stdout);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            // Bounded: a value is at most VALUE_CHARS characters, hex-encoded.
+            if lines.read_until(b'\n', &mut line).await? == 0 {
+                break;
+            }
+            let Some(row) = parse_line(&String::from_utf8_lossy(&line)) else {
+                continue;
+            };
+            if !budget.take(&row, site_hosts) {
+                capped = true;
+                break;
+            }
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    let broken = match tokio::time::timeout(READ_CONTENT_TIMEOUT, read).await {
+        Err(_) => Some("reading the database took too long".to_string()),
+        Ok(Err(e)) => Some(format!("reading the database failed: {e}")),
+        Ok(Ok(())) if capped => None,
+        Ok(Ok(())) => match child.wait().await {
+            Ok(status) if status.success() => None,
+            Ok(status) => Some(format!(
+                "the database stopped answering (exit {})",
+                status.code().unwrap_or(-1)
+            )),
+            Err(e) => Some(format!("reading the database failed: {e}")),
+        },
+    };
+    // Whatever ended it, the client isn't left running.
+    let _ = child.start_kill();
+    Ok(budget.finish(capped, broken))
+}
+
 /// The statements behind [`read_option`]. Everything that isn't a constant is
 /// checked to be safe inside quotes and backticks, and a bad value is refused. Only
 /// a base table is read: a view swapped in between the check and the read runs as
