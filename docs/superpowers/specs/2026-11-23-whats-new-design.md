@@ -1,6 +1,6 @@
 # What's new: an icon that lists new features
 
-Status: draft 2026-11-23, waiting for approval
+Status: approved 2026-11-23
 
 ## Why
 
@@ -54,9 +54,11 @@ Read state, two ways:
 
 ## Design
 
-- **Entry:** `id` (integer, rising, never reused), `date`, `version` it
-  shipped in, `title`, `body` (plain text, one or two sentences), `link`
-  (a panel path), `link_label`, and an optional capability the link needs.
+- **Entry:** `id` (integer, rising, never reused), `date`, `title`, `body` (plain text, one or two sentences), `link`
+  (a panel path), `link_label`, an optional capability the link needs, and
+  whether the linked page covers every site (it then also needs all-sites
+  scope). No version: tags are cut after merge, so a pull request cannot
+  know it; the date says the same.
 - **Feed:** `GET /api/whatsnew` returns the newest 10 entries as JSON, with
   entries whose capability the session lacks left out on the server. Customers
   and viewers get 403.

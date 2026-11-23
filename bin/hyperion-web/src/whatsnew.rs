@@ -98,7 +98,7 @@ pub fn visible(
     entries
         .iter()
         .rev()
-        .filter(|e| (scope_all || !e.all_sites) && e.needs.is_none_or(&can))
+        .filter(|e| (scope_all || !e.all_sites) && e.needs.map_or(true, &can))
         .take(FEED_LIMIT)
         .collect()
 }

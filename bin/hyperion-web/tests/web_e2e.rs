@@ -817,7 +817,9 @@ async fn whatsnew_feed_lists_entries_newest_first() {
                 .method(Method::POST)
                 .uri("/login")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(b"username=kevin&password=good-pw&next=/".to_vec()))
+                .body(Body::from(
+                    b"username=kevin&password=good-pw&next=/".to_vec(),
+                ))
                 .unwrap(),
         )
         .await
