@@ -132,11 +132,20 @@ fn fetch_config(
 ) -> String {
     let mut cfg = String::new();
     cfg.push_str(&format!("url = \"{}\"\n", cmd::curl_config_quote(url)));
-    for port in [443, 80] {
-        cfg.push_str(&format!(
-            "resolve = \"{}\"\n",
-            cmd::curl_config_quote(&format!("{host}:{port}:{resolve_to}"))
-        ));
+    // Both spellings: `resolve_url` treats `www.<host>` and `<host>` as one site,
+    // so both must be pinned, or a redirect or sitemap entry to the other one
+    // would be looked up in DNS, which the tenant controls, and leave the machine.
+    let other = match host.strip_prefix("www.") {
+        Some(bare) => bare.to_string(),
+        None => format!("www.{host}"),
+    };
+    for name in [host, other.as_str()] {
+        for port in [443, 80] {
+            cfg.push_str(&format!(
+                "resolve = \"{}\"\n",
+                cmd::curl_config_quote(&format!("{name}:{port}:{resolve_to}"))
+            ));
+        }
     }
     // The connection cannot leave the machine (see the module docs), and a
     // site on its bootstrap certificate still has to be checkable.
@@ -803,6 +812,30 @@ mod tests {
         );
         assert!(!cfg.contains("\noutput = \"/etc/passwd"));
         assert!(cfg.contains("\\\"\\noutput"));
+    }
+
+    /// `resolve_url` lets `www.` and the bare name stand for each other, so a
+    /// request to either must stay on this machine.
+    #[test]
+    fn both_spellings_of_the_host_are_pinned() {
+        for host in ["example.cz", "www.example.cz"] {
+            let cfg = fetch_config(
+                "https://example.cz/",
+                host,
+                "127.0.0.1",
+                true,
+                &Identity::default(),
+            );
+            for name in ["example.cz", "www.example.cz"] {
+                for port in [443, 80] {
+                    assert!(
+                        cfg.contains(&format!("resolve = \"{name}:{port}:127.0.0.1\"\n")),
+                        "{host}: {name}:{port} not pinned"
+                    );
+                }
+            }
+            assert_eq!(cfg.matches("resolve = ").count(), 4);
+        }
     }
 
     #[test]

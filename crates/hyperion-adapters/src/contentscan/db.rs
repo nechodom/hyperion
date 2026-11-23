@@ -24,6 +24,9 @@ pub const MAX_ROWS: usize = 5_000;
 pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Characters of one value the database sends.
 pub const VALUE_CHARS: usize = 2 * 1024 * 1024;
+/// Characters of a row's name the database sends. A tenant can widen the
+/// column; that mustn't widen a line.
+pub const NAME_CHARS: usize = 255;
 /// Seconds one statement may run, enforced by the server.
 pub const STATEMENT_SECS: u32 = 60;
 /// Observations kept from one sweep's rows.
@@ -149,7 +152,7 @@ fn select(db: &str, prefix: &str, seg: &Segment) -> String {
         .unwrap_or_default();
     format!(
         "SET STATEMENT max_statement_time={STATEMENT_SECS} FOR \
-         SELECT '{tag}', {key}, HEX({name}), HEX(LEFT({value}, {VALUE_CHARS})) \
+         SELECT '{tag}', {key}, HEX(LEFT({name}, {NAME_CHARS})), HEX(LEFT({value}, {VALUE_CHARS})) \
          FROM `{db}`.`{prefix}{table}` \
          WHERE {key} > {above}{up_to} AND {extra} AND {value} REGEXP '{MARKER}' \
          ORDER BY {key} LIMIT {limit};\n",
@@ -278,11 +281,12 @@ impl Budget {
     /// Take one row. `false` means the sweep is over its limits and this row was
     /// not taken: stop reading.
     pub fn take(&mut self, row: &Row, site_hosts: &[String]) -> bool {
-        if self.rows >= MAX_ROWS || self.bytes + row.value.len() > MAX_BYTES {
+        let size = row.value.len() + row.name.len();
+        if self.rows >= MAX_ROWS || self.bytes + size > MAX_BYTES {
             return false;
         }
         self.rows += 1;
-        self.bytes += row.value.len();
+        self.bytes += size;
         self.last = Some((row.table, row.id));
         let room = MAX_OBSERVED.saturating_sub(self.placed.len());
         self.placed
@@ -354,6 +358,8 @@ mod tests {
         assert!(sql.contains("meta_key = '_elementor_data'"));
         assert!(sql.contains("post_type <> 'revision'"));
         assert!(sql.contains("LIMIT 5001"));
+        // Every field that comes back is cut by the server, the name included.
+        assert_eq!(sql.matches("HEX(LEFT(").count(), 6);
     }
 
     #[test]

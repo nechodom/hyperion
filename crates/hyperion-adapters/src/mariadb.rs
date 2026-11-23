@@ -256,6 +256,7 @@ pub async fn read_content(
         .ok_or_else(|| AdapterError::Other("no output from the database client".into()))?;
     let mut budget = Budget::default();
     let mut capped = false;
+    let mut junk = 0usize;
     let read = async {
         if let Some(mut stdin) = stdin.take() {
             stdin.write_all(sql.as_bytes()).await?;
@@ -270,6 +271,13 @@ pub async fn read_content(
                 break;
             }
             let Some(row) = parse_line(&String::from_utf8_lossy(&line)) else {
+                // Not a row of ours. It still counts against what this read may
+                // take, or a server answering with noise would be read forever.
+                junk += line.len();
+                if junk > crate::contentscan::db::MAX_BYTES {
+                    capped = true;
+                    break;
+                }
                 continue;
             };
             if !budget.take(&row, site_hosts) {

@@ -78,6 +78,13 @@ pub(super) struct Baseline {
     pub(super) pages: Vec<String>,
     #[serde(default)]
     pub(super) pages_at: i64,
+    /// The stored content has been read through once. Until then what turns up
+    /// in it can't be called new.
+    #[serde(default)]
+    pub(super) db_seeded: bool,
+    /// The same for the pages.
+    #[serde(default)]
+    pub(super) pages_seeded: bool,
 }
 
 pub(super) fn base_key(kind: ContentKind, key: &str) -> String {
@@ -176,10 +183,16 @@ pub(super) fn judge(
     prior: Option<&ContentScanResult>,
     now: i64,
 ) -> ContentScanResult {
-    let first = baseline.since == 0;
-    if first {
+    if baseline.since == 0 {
         baseline.since = now;
     }
+    // "First" is per layer and means "not read through yet", not "not tried yet":
+    // a site whose homepage was down on its first night, or whose content takes
+    // several nights to read, has said nothing about what it already held.
+    let first_db = !baseline.db_seeded;
+    let first_pages = !baseline.pages_seeded;
+    baseline.db_seeded |= obs.db.is_complete();
+    baseline.pages_seeded |= obs.pages.ran();
     if let Some(cursor) = obs.cursor {
         baseline.cursor = cursor;
     }
@@ -213,7 +226,10 @@ pub(super) fn judge(
             }
             None => {
                 item.first_seen = now;
-                item.at_first_scan = first && !kind.is_finding();
+                // Already there when its layer was first read through.
+                item.at_first_scan = !kind.is_finding()
+                    && (!item.in_db || first_db)
+                    && (!item.on_page || first_pages);
             }
         }
         standing.push(item);
@@ -230,7 +246,7 @@ pub(super) fn judge(
             }
         }
     }
-    if !first && new_links.len() >= LINK_BURST {
+    if !first_pages && new_links.len() >= LINK_BURST {
         standing.push(ContentItem {
             kind: ContentKind::LinkBurst,
             key: now.to_string(),
@@ -609,14 +625,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // What only a crawler is shown. Known = this sweep's ordinary views, the
         // stored content, and everything the site is already known for, so two
         // fetches differing by a rotating advert isn't cloaking.
-        let mut known = hosts_of(&obs.seen);
-        known.extend(baseline.hosts().into_iter().map(str::to_string));
+        // By kind as well as host: a visible link to a host doesn't make a script
+        // from it, or a hidden link to it, something the site is known for.
+        let mut known: BTreeSet<String> =
+            obs.seen.iter().map(|s| base_key(s.kind, &s.key)).collect();
+        known.extend(baseline.keys.keys().cloned());
+        let known_hosts: BTreeSet<String> = hosts_of(&obs.seen)
+            .into_iter()
+            .chain(baseline.hosts().into_iter().map(str::to_string))
+            .collect();
         match self.adapters.content_page(&base, domain, true).await {
             Ok(f) if f.is_ok() => {
                 for s in page_sightings(&f.body, &base, site_hosts) {
                     if s.kind == ContentKind::InlineScript {
                         obs.seen.push(s);
-                    } else if !known.contains(&s.key) {
+                    } else if !known.contains(&base_key(s.kind, &s.key)) {
                         obs.seen.push(Sighting {
                             kind: ContentKind::Cloaked,
                             ..s
@@ -632,7 +655,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         *h == s || h.ends_with(&format!(".{s}"))
                     })
                 }) {
-                    Some(host) if !known.contains(&host) => obs.seen.push(Sighting {
+                    Some(host) if !known_hosts.contains(&host) => obs.seen.push(Sighting {
                         kind: ContentKind::Cloaked,
                         key: host,
                         snippet: format!(

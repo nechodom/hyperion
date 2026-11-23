@@ -741,6 +741,73 @@ async fn what_the_site_is_already_known_for_is_not_cloaking() {
     assert!(stored(&s).await.findings.is_empty());
 }
 
+/// A visible link to a host is no licence for that host to serve the crawler a
+/// script or a hidden link.
+#[tokio::test]
+async fn a_known_link_host_does_not_excuse_other_kinds_shown_to_a_crawler() {
+    let w = world();
+    let visible = r#"<a href="https://spam.test/">partner</a>"#;
+    w.lock()
+        .expect("lock")
+        .pages
+        .insert(HOME.into(), (200, visible.into()));
+    let s = svc(open_memory().await.expect("open"), mocks(&w));
+    let detail = site(&s).await;
+    s.content_scan_site(&detail.id, at(0, 12)).await;
+    assert!(stored(&s).await.findings.is_empty());
+    w.lock().expect("lock").crawler = Some((
+        200,
+        format!(r#"{visible}<script src="https://spam.test/x.js"></script>"#),
+        String::new(),
+    ));
+    s.content_scan_site(&detail.id, at(1, 3)).await;
+    assert_eq!(
+        keys(&stored(&s).await.findings),
+        [(ContentKind::Cloaked, "spam.test".to_string())]
+    );
+}
+
+/// A first night on which a layer couldn't be read says nothing about what the
+/// site already held: when it is read, that isn't news.
+#[tokio::test]
+async fn a_layer_first_read_later_is_still_its_first_read() {
+    let w = world();
+    {
+        let mut w = w.lock().expect("lock");
+        w.pages.insert(HOME.into(), (503, String::new()));
+        w.db_fails = true;
+    }
+    let (cfg, _dir) = live();
+    let s = svc(open_memory().await.expect("open"), mocks(&w)).with_agent_config_path(cfg);
+    let admin = seed_web_user(&s, "boss", WebRole::Admin).await;
+    let detail = site(&s).await;
+    s.content_scan_site(&detail.id, at(0, 12)).await;
+    assert!(stored(&s).await.is_partial());
+    {
+        let mut w = w.lock().expect("lock");
+        w.db_fails = false;
+        w.rows = vec![post(
+            1,
+            r#"<iframe src="https://video.example.net/embed/1"></iframe>"#,
+        )];
+        let links: String = (0..15)
+            .map(|n| format!(r#"<a href="https://l{n}.example.org/">l</a>"#))
+            .collect();
+        w.pages.insert(
+            HOME.into(),
+            (
+                200,
+                format!(r#"{links}<script src="https://tags.example.net/t.js"></script>"#),
+            ),
+        );
+    }
+    s.content_scan_site(&detail.id, at(1, 3)).await;
+    let r = stored(&s).await;
+    assert_eq!(r.review.len(), 2, "{:?}", r.review);
+    assert!(r.review.iter().all(|i| i.at_first_scan));
+    assert!(feed(&s, admin).await.is_empty(), "nothing here is new");
+}
+
 #[tokio::test]
 async fn a_homepage_that_does_not_answer_is_could_not_check() {
     let w = world();

@@ -356,6 +356,21 @@ Where the build departs from the text above, and why.
   (`crates/hyperion-adapters/tests/contentscan_live.rs`, off unless given a container).
   They have not been run against a production-sized site; the 60-second limit and the
   row cap are what stand between a slow table scan and the node.
+- **"First scan" is per layer and means read through, not tried.** A layer that failed
+  or was capped on the first night has said nothing about what the site already held, so
+  script and frame hosts it turns up later are still "already here", unannounced.
+  Findings are announced whenever they are first seen.
+- **A site with more candidate rows than one night reads** (over 5,000 rows carrying a
+  marker) is "partly checked" every night, its stored content never counts as read
+  through, and a finding that was fixed stays listed until trusted. Rare, and said on
+  the card; a per-cycle record would lift it.
+- **Cloaking is judged by kind as well as host.** A visible link to a host doesn't make
+  a script from it, or a hidden link to it, something the site is known for.
+- **Both spellings of the site's name are pinned to loopback** (`www.` and bare), for
+  the site check too. The same-site test treated them as one site while only one was
+  pinned, so a redirect or sitemap entry to the other could have been resolved by DNS.
+- Content the markup reader can't get through is a finding of its own
+  (`unreadable-markup`), not a crashed sweep and not a pass.
 - Builder data read: `_elementor_data` only.
 - The false-positive check (acceptance 8) has not been run; the pilot is where it
   happens.

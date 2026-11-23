@@ -189,7 +189,11 @@ fn read_tag(html: &str, start: usize) -> Option<Tag<'_>> {
         return None;
     }
     let name = html[name_start..i].to_ascii_lowercase();
-    let limit = (start + MAX_TAG).min(bytes.len());
+    // On a character boundary: every slice below ends at an ASCII byte or here.
+    let mut limit = (start + MAX_TAG).min(bytes.len());
+    while !html.is_char_boundary(limit) {
+        limit -= 1;
+    }
     let mut attrs = Vec::new();
     let mut self_closing = false;
     loop {
@@ -408,6 +412,29 @@ fn shown_or<'a>(shown: &'a str, script: &'a str) -> &'a str {
 /// page reports its visible outbound links and its canonical, because stored
 /// content is a fragment and a post is expected to link out.
 pub fn extract(html: &str, site_hosts: &[String], page: bool) -> Vec<Seen> {
+    // This reads whatever a tenant stored, in a task that reads every site on the
+    // node. A bug here must cost one fragment, said out loud, and not the monitor.
+    match std::panic::catch_unwind(|| extract_unguarded(html, site_hosts, page)) {
+        Ok(seen) => seen,
+        Err(_) => {
+            tracing::error!(
+                len = html.len(),
+                "content scan: markup reader failed on a fragment"
+            );
+            vec![Seen {
+                kind: ContentKind::InlineScript,
+                key: UNREADABLE_KEY.to_string(),
+                snippet: "this content made the reader fail, so it was not checked".to_string(),
+            }]
+        }
+    }
+}
+
+/// The key of the item that stands for content the reader couldn't get through.
+/// A finding on purpose: unread is never clean.
+pub const UNREADABLE_KEY: &str = "unreadable-markup";
+
+fn extract_unguarded(html: &str, site_hosts: &[String], page: bool) -> Vec<Seen> {
     let bytes = html.as_bytes();
     let mut out = Out {
         seen: Vec::new(),
@@ -738,6 +765,18 @@ mod tests {
             "é".repeat(MAX_TAG)
         );
         let _ = extract(&huge_tag, &site(), true);
+        // The cut at MAX_TAG lands inside a character, wherever in a tag it falls:
+        // in a name, in a quoted value, in a bare one.
+        for prefix in ["<a ", "<a  x=\"", "<a x=", "<a title=\"", "<a  ", "<é a"] {
+            for pad in 0..3 {
+                let tag = format!("{prefix}{}{}", "x".repeat(pad), "é".repeat(MAX_TAG));
+                let seen = extract(&tag, &site(), true);
+                assert!(
+                    seen.iter().all(|s| s.key != UNREADABLE_KEY),
+                    "{prefix:?} +{pad}"
+                );
+            }
+        }
     }
 
     #[test]
