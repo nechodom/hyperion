@@ -693,6 +693,43 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         (from.min(now), now)
     }
 
+    /// Start of the oldest care-report period on this node that has not
+    /// been reported yet, if any site sells a report. The report counts
+    /// updates from `audit_log` and attacks from `ip_bans` over its period,
+    /// and says "not measured" for the whole section when retention purged
+    /// part of it — so `[log_retention]` must never cut into an open
+    /// period. A quarterly plan keeps about three months; a period left open
+    /// by a relay that kept refusing keeps everything back to its start.
+    ///
+    /// A one-off report over an operator-picked range is not covered: it can
+    /// reach back arbitrarily far, and holding every log that long for it
+    /// would defeat the setting.
+    pub(crate) async fn care_report_open_floor(&self, now: i64) -> Option<i64> {
+        let rows = packages::list_all_in_force(&self.pool).await.ok()?;
+        let mut sold: HashMap<String, (HostingId, ReportCadence, i64)> = HashMap::new();
+        for row in rows {
+            let c = row.features.report_cadence;
+            if report_cadence_secs(c).is_none() {
+                continue;
+            }
+            let starts = row.valid_from.unwrap_or(row.activated_at);
+            sold.entry(row.hosting_id.as_str().to_string())
+                .and_modify(|(_, cadence, since)| {
+                    *cadence = cadence.combine(c);
+                    *since = (*since).min(starts);
+                })
+                .or_insert((row.hosting_id.clone(), c, starts));
+        }
+        let mut floor: Option<i64> = None;
+        for (id, cadence, starts) in sold.into_values() {
+            let (from, _) = self
+                .care_report_period(&id, cadence, Some(starts), now)
+                .await;
+            floor = Some(floor.map_or(from, |f| f.min(from)));
+        }
+        floor
+    }
+
     /// Record that everything up to `period_end` has been reported. This
     /// is what a restart reads, so the same period can't be mailed twice,
     /// and it is where the next period begins.

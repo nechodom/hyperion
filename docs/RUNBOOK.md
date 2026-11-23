@@ -465,6 +465,33 @@ only to people allowed to change a hosting's configuration.
     "SELECT ts, action, result FROM audit_log ORDER BY id DESC LIMIT 20"
   ```
 
+### Retention
+
+Settings → Log retention (`[log_retention]` in `agent.toml`, copied to every
+node by the settings sync) sets the days each log is kept. Every class
+defaults to 30 days; nothing is kept forever. Each node applies it on an
+hourly pass, so a change takes effect within the hour without a restart.
+
+| Key | What | Where |
+|-----|------|-------|
+| `web_days` | Each site's nginx `access.log` / `error.log`, PHP slow-request logs | `/home/<user>/<domain>/logs/` (rotated by the agent: `.1` plain, older `.N.gz`), `/var/log/hyperion/php-slow/` (logrotate) |
+| `firewall_days` | WAF and ModSecurity logs, refused-request samples | `/var/log/hyperion-waf/`, `/var/log/hyperion/modsec/` (logrotate), `waf_recent` table |
+| `bans_days` | Ended bans (bans in force are kept) | `ip_bans` table |
+| `audit_days` | Panel audit log (chain re-anchored at the oldest row kept) | `audit_log` table |
+| `email_days` | Mail Hyperion sent | `email_log` table |
+| `sessions_days` | IP and browser of panel sessions (erased, session row kept) | `web_sessions` table |
+| `notifications_days` | The bell's archive | `notifications` table |
+| `system_days` | systemd journal (SSH, FTP, mail, services) | `/etc/systemd/journald.conf.d/hyperion-retention.conf` (`MaxRetentionSec`) |
+
+The audit log and ended bans are kept past their window while a care-report
+period that has not been reported yet still covers them: the report counts
+that period's updates and blocked attacks from those two tables.
+
+Not managed by Hyperion: Debian's own rules for `/var/log/nginx` (14 days)
+and, when rsyslog is installed, `/var/log/auth.log` and `mail.log` (4 weeks).
+A `[cluster] audit_retention_days` set before this section existed is still
+honoured until `audit_days` is saved; its old default 0 ("forever") is not.
+
 ## Verifying the audit chain
 
 ```bash

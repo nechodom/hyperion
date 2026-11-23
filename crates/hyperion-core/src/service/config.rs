@@ -485,6 +485,19 @@ pub(super) fn parse_agent_section_fields(
                 }
                 crate::config_persist::FieldValue::Int(n)
             }
+            // [log_retention] — days each log class is kept, every node.
+            ("log_retention", k) if hyperion_types::log_retention::is_class(k) => {
+                let n = parse_int(v)?;
+                let r = hyperion_types::log_retention::DAYS_RANGE;
+                if !(i64::from(*r.start())..=i64::from(*r.end())).contains(&n) {
+                    return Err(bad(format!(
+                        "{k} must be {}..={} days, got {n}",
+                        r.start(),
+                        r.end()
+                    )));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
             // [antivirus] — when each node's ClamAV pass runs. The ranges are
             // the ones `AntivirusSettings::sanitized` leaves alone, so the
             // file never holds a number the node reads as another.

@@ -45,6 +45,7 @@ pub const SYNCED_SECTIONS: &[&str] = &[
     "update",
     "fail2ban",
     "antivirus",
+    "log_retention",
     "cluster",
 ];
 
@@ -114,6 +115,8 @@ pub fn is_synced_key(section: &str, key: &str) -> bool {
             key,
             "trash_enabled" | "trash_retention_days" | "test_domain_template"
         ),
+        // Every node rotates its own sites' logs and prunes its own tables.
+        "log_retention" => hyperion_types::log_retention::is_class(key),
         // Each node runs its own ClamAV pass and reads this when its tick asks.
         "antivirus" => matches!(
             key,

@@ -1,9 +1,9 @@
-//! `GET /settings/access` — who may sign in to the panel, and how long what
-//! they did stays on record.
+//! `GET /settings/access` — who may sign in to the panel.
 //!
-//! Two settings live here, both in `[cluster]` and both read only by the
-//! master: the 2FA rule for Administrators and Owners, and the audit log's
-//! retention window. Users, roles and API keys have pages of their own; the
+//! One setting lives here, in `[cluster]` and read only by the master: the
+//! 2FA rule for Administrators and Owners. The audit log's retention window
+//! moved to `/settings/logs` with every other log's. Users, roles and API
+//! keys have pages of their own; the
 //! middle card only points at them, so somebody who used to find API keys on
 //! the old one-page Settings learns where they went.
 
@@ -100,19 +100,19 @@ mod tests {
             })
             .collect();
         assert_eq!(declared, vec!["enforce_admin_2fa"]);
-        assert_eq!(html.matches(r#"name="section" value="cluster""#).count(), 2);
+        assert_eq!(html.matches(r#"name="section" value="cluster""#).count(), 1);
+        // The audit window moved to Log retention.
+        assert!(!html.contains("audit_retention_days"));
+        assert!(html.contains(r#"href="/settings/logs#log-retention""#));
     }
 
     #[test]
     fn state_reads_from_the_config() {
         let mut c = AgentConfigView::default();
         c.cluster.enforce_admin_2fa = false;
-        c.cluster.audit_retention_days = 90;
         let html = page(c);
         assert!(html.contains(r#"<span class="pill warn">optional</span>"#));
-        assert!(html.contains(r#"<span class="pill ok">90 days</span>"#));
         let html = page(AgentConfigView::default());
         assert!(html.contains(r#"<span class="pill ok">required</span>"#));
-        assert!(html.contains("kept forever"));
     }
 }

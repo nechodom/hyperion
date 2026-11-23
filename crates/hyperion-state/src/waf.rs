@@ -308,6 +308,17 @@ pub async fn prune(pool: &SqlitePool, now: i64, ban_window_secs: i64) -> Result<
     Ok(())
 }
 
+/// Drop sampled refusals (address, URL, user agent) older than `cutoff`:
+/// `[log_retention] firewall_days`. The per-site cap keeps the table small;
+/// this keeps it short-lived.
+pub async fn prune_recent_before(pool: &SqlitePool, cutoff: i64) -> Result<u64, StateError> {
+    Ok(sqlx::query("DELETE FROM waf_recent WHERE ts < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected())
+}
+
 /// Everything recorded for one hosting (hosting delete).
 pub async fn delete_hosting(pool: &SqlitePool, hosting_id: &str) -> Result<(), StateError> {
     for table in ["waf_hits_hourly", "waf_recent", "waf_ip_minute"] {
@@ -631,5 +642,21 @@ mod tests {
         assert_eq!(back.waf_level, "standard");
         assert!(back.waf_enabled);
         assert!(!back.noindex, "the hash-writing statement binds it too");
+    }
+
+    #[tokio::test]
+    async fn prune_recent_drops_only_samples_before_the_cutoff() {
+        let pool = open_memory().await.expect("open");
+        let hits = vec![
+            hit(1_000, "1.1.1.1", "scanner_ua"),
+            hit(5_000, "2.2.2.2", "scanner_ua"),
+        ];
+        record(&pool, "h1", &WafBatch::from_hits(hits))
+            .await
+            .expect("record");
+        assert_eq!(prune_recent_before(&pool, 2_000).await.expect("prune"), 1);
+        let left = recent(&pool, "h1", 10).await.expect("recent");
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].ip, "2.2.2.2");
     }
 }

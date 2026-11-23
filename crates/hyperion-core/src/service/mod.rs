@@ -68,6 +68,7 @@ mod letters;
 mod limits;
 pub use limits::PhpWorkersCursors;
 mod fpm_own;
+mod log_retention;
 mod login_lock;
 mod mail;
 mod migration;
@@ -169,6 +170,11 @@ pub trait AdapterPort: Send + Sync {
     fn nginx_user(&self) -> String {
         "www-data".to_string()
     }
+
+    /// Bring this node's log rotation rules and journald drop-in in line
+    /// with `[log_retention]`. Default: nothing (mocked adapters touch no
+    /// files outside the test's temp dirs).
+    async fn apply_log_retention(&self, _r: hyperion_types::log_retention::LogRetention) {}
 
     /// Whether `redis-server` is installed + active right now.
     /// Default impl returns true so tests don't need to override

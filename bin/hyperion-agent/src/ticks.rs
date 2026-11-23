@@ -67,6 +67,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_care_reports(svc);
     spawn_scheduled_backups(svc);
     spawn_snapshot_retention(svc);
+    spawn_log_retention(svc);
     spawn_os_updates(svc);
     spawn_docker(svc);
     spawn_docker_updates(svc);
@@ -117,6 +118,9 @@ fn spawn_scheduler(svc: &Svc) {
 
 /// Once at startup, before the scheduler loop.
 async fn reapply_on_boot(svc: &Svc) {
+    // The rotation rules that vhost and pool writes put down at boot must
+    // already carry the configured days, not the built-in 30.
+    hyperion_adapters::log_retention::set(&svc.log_retention());
     if let Ok(n) = svc.jobs_reap_stale(JOB_STALE_SECS).await {
         if n > 0 {
             tracing::warn!(rows = n, "startup: reaped stale jobs");
@@ -753,6 +757,19 @@ fn spawn_snapshot_retention(svc: &Svc) {
             Ok(_) => tracing::debug!("snapshot retention sweep: nothing old enough"),
             Err(e) => tracing::warn!(error=%e, "snapshot retention sweep failed"),
         }
+    });
+}
+
+/// Log retention (`[log_retention]`) — hourly: rotates each site's nginx
+/// logs once a day, keeps the logrotate rules and the journald drop-in at
+/// the configured days, and prunes the WAF samples, ban history, email log
+/// and panel-session addresses. Hourly so a saved change shows within the
+/// hour; a site's log is still rotated only once a day.
+///
+/// 3 minutes in: the first pass after an upgrade writes the new rules soon.
+fn spawn_log_retention(svc: &Svc) {
+    every(svc, 3 * MIN, HOUR, |svc| async move {
+        svc.log_retention_tick().await;
     });
 }
 

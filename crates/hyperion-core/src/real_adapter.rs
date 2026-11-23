@@ -914,6 +914,16 @@ impl AdapterPort for RealAdapter {
         Ok((quarantined, scanned))
     }
 
+    async fn apply_log_retention(&self, r: hyperion_types::log_retention::LogRetention) {
+        hyperion_adapters::log_retention::set(&r);
+        hyperion_adapters::log_retention::reapply_rules().await;
+        match hyperion_adapters::log_retention::ensure_journald(r.system_days).await {
+            Ok(true) => tracing::info!(days = r.system_days, "journald retention applied"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "journald retention not applied"),
+        }
+    }
+
     async fn ensure_vhost_log_dirs(&self) -> Result<(usize, usize), AdapterError> {
         let sites_dir = &self.nginx_paths.sites_enabled;
         let mut entries = match tokio::fs::read_dir(sites_dir).await {

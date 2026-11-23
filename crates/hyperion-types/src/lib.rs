@@ -31,6 +31,7 @@ pub mod ids;
 pub mod import;
 pub mod jobs;
 pub mod limits;
+pub mod log_retention;
 pub mod migration;
 pub mod package;
 pub mod perf;

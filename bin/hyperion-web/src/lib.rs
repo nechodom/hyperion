@@ -521,6 +521,7 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/settings/letters", get(handlers::settings::get_letters))
         .route("/settings/access", get(handlers::settings::get_access))
+        .route("/settings/logs", get(handlers::settings::get_logs))
         .route("/settings/bans", get(handlers::settings::get_bans))
         .route(
             "/settings/antivirus",

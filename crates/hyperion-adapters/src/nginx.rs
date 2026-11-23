@@ -905,23 +905,16 @@ log_format hyperion_waf escape=json
     TEMPLATE.to_string()
 }
 
-fn render_waf_logrotate() -> String {
+pub(crate) fn render_waf_logrotate() -> String {
     // copytruncate: the live file keeps its inode, so rotation never
     // depends on every nginx worker managing to reopen it. The reader
     // (`waflog::read_new`) sees the truncation and finishes the copy in
-    // `<log>.1` from where it left off.
-    const TEMPLATE: &str = r#"# Auto-managed by Hyperion.
-__DIR__/*.log {
-    daily
-    rotate 7
-    missingok
-    notifempty
-    compress
-    delaycompress
-    copytruncate
-}
-"#;
-    TEMPLATE.replace("__DIR__", WAF_LOG_DIR)
+    // `<log>.1` from where it left off. Days: `[log_retention] firewall_days`.
+    crate::log_retention::render_rule(
+        &format!("{WAF_LOG_DIR}/*.log"),
+        crate::log_retention::firewall_days(),
+        &[],
+    )
 }
 
 /// Mode of [`WAF_LOG_DIR`].

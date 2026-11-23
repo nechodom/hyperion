@@ -79,10 +79,17 @@ pub const SECTIONS: &[Section] = &[
         cluster_only: false,
     },
     Section {
+        slug: "logs",
+        title: "Log retention",
+        group: "Data",
+        lead: "How long each log that records IP or e-mail addresses is kept.",
+        cluster_only: false,
+    },
+    Section {
         slug: "access",
         title: "Access",
         group: "Security",
-        lead: "Who can sign in to the panel, and how long their actions are on record.",
+        lead: "Who can sign in to the panel, and how they prove it.",
         cluster_only: false,
     },
     Section {
@@ -145,9 +152,9 @@ pub const CARDS: &[(&str, &str)] = &[
     ("trash", "backups"),
     ("offsite-backfill", "backups"),
     ("offsite-orphans", "backups"),
+    ("log-retention", "logs"),
     ("sign-in", "access"),
     ("users-roles", "access"),
-    ("audit-retention", "access"),
     ("bruteforce-scanner", "bans"),
     ("geoip", "bans"),
     ("antivirus-schedule", "antivirus"),
@@ -186,6 +193,8 @@ const LEGACY: &[(&str, &str)] = &[
     ("api", "/admin/api-keys"),
     ("api-keys", "/admin/api-keys"),
     ("raw-toml", "/install/node-settings?node_id=local#raw-toml"),
+    // The audit window joined the other logs' on one card.
+    ("audit-retention", "/settings/logs#log-retention"),
 ];
 
 /// The page `slug` names, if it is one.
