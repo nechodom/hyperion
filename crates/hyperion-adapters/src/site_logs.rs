@@ -240,7 +240,7 @@ pub fn rotate(
         // rotated can hold years of it; filling the disk to rotate it would
         // take every site on the node down with it.
         if let Ok(vfs) = rustix::fs::fstatvfs(&logs) {
-            let free = (vfs.f_bavail as u64).saturating_mul(vfs.f_frsize as u64);
+            let free = vfs.f_bavail.saturating_mul(vfs.f_frsize);
             let need = (st.st_size as u64).saturating_add(COPY_HEADROOM);
             if free < need {
                 tracing::warn!(
