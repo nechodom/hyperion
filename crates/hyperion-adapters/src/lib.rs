@@ -14,6 +14,7 @@ pub mod acme;
 pub mod backup;
 pub mod cert;
 pub mod cmd;
+pub mod contentscan;
 pub mod dkim;
 pub mod dns_delegation;
 pub mod dns_probe;
