@@ -31,6 +31,7 @@ pub mod setup;
 pub mod state;
 pub mod ttl_cache;
 pub mod url_watch;
+pub mod whatsnew;
 pub mod wp_library;
 pub mod wp_list_cache;
 
@@ -1260,6 +1261,8 @@ pub fn build_router(state: SharedState) -> Router {
         // Tiny role echo for the nav-hiding shim in base.html.
         // Returns "super_admin" | "admin" | "operator" | "viewer".
         .route("/api/me/role", get(handlers::me::get_role))
+        // Feed behind the "What's new" icon next to the bell.
+        .route("/api/whatsnew", get(handlers::whatsnew::feed))
         // Avatar serve + upload. Upload uses a 2 MB body cap —
         // double the 1 MB asset cap to leave room for multipart
         // envelope overhead.

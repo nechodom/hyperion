@@ -806,6 +806,145 @@ async fn authenticated_dashboard_renders() {
 }
 
 #[tokio::test]
+async fn whatsnew_feed_lists_entries_newest_first() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    b"username=kevin&password=good-pw&next=/".to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/whatsnew")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let body = body_string(resp).await;
+    assert!(!body.contains("needs"), "capability names stay server-side");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let entries = v["entries"].as_array().expect("entries");
+    let newest = hyperion_web::whatsnew::ENTRIES.last().unwrap();
+    assert_eq!(entries[0]["id"], newest.id);
+    assert_eq!(entries[0]["title"], newest.title);
+    for e in entries {
+        assert!(e["link"].as_str().unwrap().starts_with('/'));
+        assert!(!e["link_label"].as_str().unwrap().is_empty());
+        assert_eq!(e["date"].as_str().unwrap().len(), 10);
+    }
+}
+
+/// Logs `username` in and returns the feed's status and body.
+async fn whatsnew_as(app: &axum::Router, username: &str, password: &str) -> (StatusCode, String) {
+    let form = format!("username={username}&password={password}&next=/");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form.into_bytes()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/whatsnew")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let status = resp.status();
+    (status, body_string(resp).await)
+}
+
+#[tokio::test]
+async fn whatsnew_feed_follows_the_role() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    // The bootstrap login seeds the DB the users below are created in.
+    let (status, _) = whatsnew_as(&app, "kevin", "good-pw").await;
+    assert_eq!(status, StatusCode::OK);
+    for role in ["viewer", "customer", "operator"] {
+        let created = hyperion_rpc_client::call(
+            &sock,
+            hyperion_rpc::codec::Request::WebUserCreate {
+                username: format!("news-{role}"),
+                email: format!("news-{role}@example.invalid"),
+                password: "news-pw-12345".into(),
+                role: role.into(),
+            },
+        )
+        .await
+        .expect("create user");
+        assert!(
+            matches!(created, hyperion_rpc::codec::Response::WebUserCreate { .. }),
+            "{role}: {created:?}"
+        );
+    }
+
+    // Nothing to switch on: no list, not even an empty one.
+    for role in ["viewer", "customer"] {
+        let (status, body) = whatsnew_as(&app, &format!("news-{role}"), "news-pw-12345").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{role}");
+        assert!(!body.contains("entries"), "{role}: {body}");
+    }
+
+    // An operator is scoped to some sites: the list comes, without the
+    // pages that cover every site and would turn them away.
+    let (status, body) = whatsnew_as(&app, "news-operator", "news-pw-12345").await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let links: Vec<&str> = v["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|e| e["link"].as_str().unwrap())
+        .collect();
+    assert!(links.contains(&"/hostings"), "{links:?}");
+    assert!(!links.contains(&"/antivirus"), "{links:?}");
+    assert!(!links.contains(&"/docker"), "{links:?}");
+}
+
+#[tokio::test]
+async fn whatsnew_feed_needs_a_session() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let (status, body) = get_body(app, "/api/whatsnew").await;
+    assert_ne!(status, StatusCode::OK);
+    assert!(!body.contains("entries"));
+}
+
+#[tokio::test]
 async fn static_css_is_served() {
     let admin = admin_user::create("kevin", "good-pw").expect("create");
     let (sock, _d) = start_agent().await;

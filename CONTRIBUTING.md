@@ -58,6 +58,10 @@ layout under `hyperion-web/src/handlers/hostings/`.
   steps 2 and 1 must un-do themselves.
 * **Audit log** every state change. The chain is BLAKE3-hashed;
   missing rows produce verifiable gaps.
+* **Announce what people can use.** A feature somebody running the
+  panel would want to know about adds an entry at the end of
+  `bin/hyperion-web/src/whatsnew.rs`, in the same pull request. It
+  shows up behind the "What's new" icon next to the notification bell.
 
 ## Adding a new system effect
 
