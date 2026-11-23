@@ -948,6 +948,25 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(r) => Response::WpIntegrityScan(r),
             Err(e) => Response::Error(e),
         },
+        Request::ContentScanStored { hosting } => match api.content_scan_stored(hosting).await {
+            Ok(r) => Response::ContentScan(r),
+            Err(e) => Response::Error(e),
+        },
+        Request::ContentTrust {
+            hosting,
+            kind,
+            key,
+            actor,
+        } => match api.content_trust(hosting, kind, key, actor).await {
+            Ok(r) => Response::ContentScan(Some(r)),
+            Err(e) => Response::Error(e),
+        },
+        Request::ContentTrustAllReview { hosting, actor } => {
+            match api.content_trust_all_review(hosting, actor).await {
+                Ok(r) => Response::ContentScan(Some(r)),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::ScanQuarantineList { hosting } => match api.scan_quarantine_list(hosting).await {
             Ok(r) => Response::ScanQuarantineList(r),
             Err(e) => Response::Error(e),
@@ -3297,6 +3316,28 @@ mod tests {
             _: String,
         ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
             Ok(hyperion_types::WpIntegrityScanResult::default())
+        }
+        async fn content_scan_stored(
+            &self,
+            _: HostingSelector,
+        ) -> Result<Option<hyperion_types::content::ContentScanResult>, RpcError> {
+            Ok(None)
+        }
+        async fn content_trust(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+            _: String,
+        ) -> Result<hyperion_types::content::ContentScanResult, RpcError> {
+            Ok(Default::default())
+        }
+        async fn content_trust_all_review(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<hyperion_types::content::ContentScanResult, RpcError> {
+            Ok(Default::default())
         }
         async fn scan_quarantine_list(
             &self,

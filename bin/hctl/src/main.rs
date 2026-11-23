@@ -532,6 +532,8 @@ pub enum WpCmd {
     VulnScan { selector: String },
     /// Verify core + plugin checksums and scan for malware.
     IntegrityScan { selector: String },
+    /// Show what the content monitor last found in the database and on pages.
+    ContentScan { selector: String },
     /// Forget this node's reference copy of a vendor package version.
     VendorForget {
         selector: String,

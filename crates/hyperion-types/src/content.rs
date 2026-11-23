@@ -193,7 +193,8 @@ pub struct ContentScanResult {
 impl ContentScanResult {
     /// A layer that should have run didn't, or ran in part.
     pub fn is_partial(&self) -> bool {
-        let short = |l: &ContentLayer| matches!(l, ContentLayer::Partial(_) | ContentLayer::Failed(_));
+        let short =
+            |l: &ContentLayer| matches!(l, ContentLayer::Partial(_) | ContentLayer::Failed(_));
         short(&self.db) || short(&self.pages)
     }
 

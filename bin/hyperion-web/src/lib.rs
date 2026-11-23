@@ -323,6 +323,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_integrity_trust_all),
         )
         .route(
+            "/hostings/integrity/content-trust",
+            post(handlers::hostings::post_integrity_content_trust),
+        )
+        .route(
+            "/hostings/integrity/content-trust-all",
+            post(handlers::hostings::post_integrity_content_trust_all),
+        )
+        .route(
             "/hostings/integrity/vendor-forget",
             post(handlers::hostings::post_integrity_vendor_forget),
         )

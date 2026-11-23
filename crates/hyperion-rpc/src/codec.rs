@@ -755,6 +755,30 @@ pub enum Request {
         #[serde(default)]
         actor: String,
     },
+    /// What the content monitor last found in a hosting's database and on its
+    /// pages, without scanning: answered by `Response::ContentScan`. `None` when
+    /// it has never run.
+    ContentScanStored {
+        hosting: HostingSelector,
+    },
+    /// Vouch for one item the content scan reported, answered by
+    /// `Response::ContentScan`. `kind` and `key` must name an item of the stored
+    /// result. The panel only sends this for `WpScanTrust`.
+    ContentTrust {
+        hosting: HostingSelector,
+        kind: String,
+        key: String,
+        #[serde(default)]
+        actor: String,
+    },
+    /// Vouch for every content change waiting for review (never a finding),
+    /// answered by `Response::ContentScan`. The panel only sends this for
+    /// `WpScanTrust`.
+    ContentTrustAllReview {
+        hosting: HostingSelector,
+        #[serde(default)]
+        actor: String,
+    },
     /// What a hosting holds in quarantine: metadata only.
     ScanQuarantineList {
         hosting: HostingSelector,
@@ -2689,6 +2713,7 @@ pub enum Response {
     VulnFindingsList(Vec<hyperion_types::HostingVulnSummary>),
     WpIntegrityScan(hyperion_types::WpIntegrityScanResult),
     ScanQuarantineList(hyperion_types::QuarantineList),
+    ContentScan(Option<hyperion_types::content::ContentScanResult>),
     IntegrityFindingsList(Vec<hyperion_types::HostingIntegritySummary>),
     AntivirusOverview(hyperion_types::antivirus::AntivirusOverview),
     AntivirusRunNow {

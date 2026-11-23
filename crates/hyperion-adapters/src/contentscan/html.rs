@@ -180,7 +180,8 @@ fn read_tag(html: &str, start: usize) -> Option<Tag<'_>> {
     let bytes = html.as_bytes();
     let mut i = start + 1;
     let name_start = i;
-    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-' || bytes[i] == b':')
+    while i < bytes.len()
+        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-' || bytes[i] == b':')
     {
         i += 1;
     }
@@ -285,7 +286,11 @@ impl Out<'_> {
                 .rev()
                 .find(|i| script.is_char_boundary(*i))
                 .unwrap_or(0);
-            let text = if shown.is_empty() { &script[from..] } else { shown };
+            let text = if shown.is_empty() {
+                &script[from..]
+            } else {
+                shown
+            };
             self.push(
                 ContentKind::InlineScript,
                 rules::snippet_key(hit.rule, script, hit.at),
@@ -339,13 +344,17 @@ impl Out<'_> {
                 }
             }
             "iframe" | "embed" | "frame" => {
-                if let Some(host) = tag.attr("src").and_then(|s| external_host(s, self.site_hosts))
+                if let Some(host) = tag
+                    .attr("src")
+                    .and_then(|s| external_host(s, self.site_hosts))
                 {
                     self.push(ContentKind::FrameHost, host, tag.raw);
                 }
             }
             "object" => {
-                if let Some(host) = tag.attr("data").and_then(|s| external_host(s, self.site_hosts))
+                if let Some(host) = tag
+                    .attr("data")
+                    .and_then(|s| external_host(s, self.site_hosts))
                 {
                     self.push(ContentKind::FrameHost, host, tag.raw);
                 }
@@ -372,7 +381,9 @@ impl Out<'_> {
                 if !canonical {
                     return;
                 }
-                if let Some(host) = tag.attr("href").and_then(|s| external_host(s, self.site_hosts))
+                if let Some(host) = tag
+                    .attr("href")
+                    .and_then(|s| external_host(s, self.site_hosts))
                 {
                     self.push(ContentKind::Redirect, host, tag.raw);
                 }
@@ -436,7 +447,11 @@ pub fn extract(html: &str, site_hosts: &[String], page: bool) -> Vec<Seen> {
         out.element(&tag, hidden);
         match tag.name.as_str() {
             "script" | "style" => {
-                let close: &[u8] = if tag.name == "script" { b"</script" } else { b"</style" };
+                let close: &[u8] = if tag.name == "script" {
+                    b"</script"
+                } else {
+                    b"</style"
+                };
                 let body_end = find_ci(bytes, i, close).unwrap_or(bytes.len());
                 if tag.name == "script"
                     && !tag.self_closing
@@ -449,10 +464,8 @@ pub fn extract(html: &str, site_hosts: &[String], page: bool) -> Vec<Seen> {
                 }
                 i = body_end;
             }
-            name if !tag.self_closing && !VOID.contains(&name) => {
-                if stack.len() < MAX_DEPTH {
-                    stack.push((tag.name.clone(), hidden));
-                }
+            name if !tag.self_closing && !VOID.contains(&name) && stack.len() < MAX_DEPTH => {
+                stack.push((tag.name.clone(), hidden));
             }
             _ => {}
         }
@@ -516,8 +529,12 @@ mod tests {
 
     #[test]
     fn a_link_hidden_by_its_own_style_is_a_hidden_link() {
-        let html = r#"<p>Text</p><a href="https://pills.spam.test/buy" style="display:none">cheap</a>"#;
-        assert_eq!(kinds(html, false), one(ContentKind::HiddenLink, "pills.spam.test"));
+        let html =
+            r#"<p>Text</p><a href="https://pills.spam.test/buy" style="display:none">cheap</a>"#;
+        assert_eq!(
+            kinds(html, false),
+            one(ContentKind::HiddenLink, "pills.spam.test")
+        );
     }
 
     #[test]
@@ -538,7 +555,10 @@ mod tests {
     #[test]
     fn the_hidden_attribute_hides_too() {
         let html = r#"<div hidden><a href="https://spam.test/">x</a></div>"#;
-        assert_eq!(kinds(html, false), one(ContentKind::HiddenLink, "spam.test"));
+        assert_eq!(
+            kinds(html, false),
+            one(ContentKind::HiddenLink, "spam.test")
+        );
     }
 
     #[test]
@@ -546,7 +566,10 @@ mod tests {
         let html = r#"<div style="display:none"><br><img src="x.png"></div>
             <a href="https://friend.example.org/">after</a>"#;
         assert_eq!(kinds(html, false), vec![]);
-        assert_eq!(kinds(html, true), one(ContentKind::LinkHost, "friend.example.org"));
+        assert_eq!(
+            kinds(html, true),
+            one(ContentKind::LinkHost, "friend.example.org")
+        );
     }
 
     #[test]
@@ -562,13 +585,19 @@ mod tests {
     fn a_visible_link_is_inventory_on_a_page_and_nothing_in_content() {
         let html = r#"<a href="https://friend.example.org/about">friend</a>"#;
         assert_eq!(kinds(html, false), vec![]);
-        assert_eq!(kinds(html, true), one(ContentKind::LinkHost, "friend.example.org"));
+        assert_eq!(
+            kinds(html, true),
+            one(ContentKind::LinkHost, "friend.example.org")
+        );
     }
 
     #[test]
     fn an_href_spelled_in_character_references_still_counts() {
         let html = r#"<a style="font-size:0" href="&#104;ttps&#x3a;//spam.test&sol;x">.</a>"#;
-        assert_eq!(kinds(html, false), one(ContentKind::HiddenLink, "spam.test"));
+        assert_eq!(
+            kinds(html, false),
+            one(ContentKind::HiddenLink, "spam.test")
+        );
     }
 
     #[test]
@@ -613,7 +642,8 @@ mod tests {
 
     #[test]
     fn script_bodies_are_not_read_as_markup() {
-        let html = r#"<script>var t = '<a style="display:none" href="https://spam.test/">';</script>"#;
+        let html =
+            r#"<script>var t = '<a style="display:none" href="https://spam.test/">';</script>"#;
         assert_eq!(kinds(html, true), vec![]);
     }
 
@@ -631,7 +661,10 @@ mod tests {
     fn the_analytics_loader_is_a_script_host() {
         let html = r"<script>(function(d){var j=d.createElement('script');
             j.src='https://tags.example.net/gtm.js';d.head.appendChild(j);})(document);</script>";
-        assert_eq!(kinds(html, true), one(ContentKind::ScriptHost, "tags.example.net"));
+        assert_eq!(
+            kinds(html, true),
+            one(ContentKind::ScriptHost, "tags.example.net")
+        );
     }
 
     #[test]
@@ -656,10 +689,16 @@ mod tests {
     #[test]
     fn a_meta_refresh_elsewhere_is_a_redirect_and_canonical_only_on_a_page() {
         let refresh = r#"<meta http-equiv="Refresh" content="0; URL='https://away.spam.test/'">"#;
-        assert_eq!(kinds(refresh, false), one(ContentKind::Redirect, "away.spam.test"));
+        assert_eq!(
+            kinds(refresh, false),
+            one(ContentKind::Redirect, "away.spam.test")
+        );
         let canonical = r#"<link rel="canonical" href="https://other.spam.test/page">"#;
         assert_eq!(kinds(canonical, false), vec![]);
-        assert_eq!(kinds(canonical, true), one(ContentKind::Redirect, "other.spam.test"));
+        assert_eq!(
+            kinds(canonical, true),
+            one(ContentKind::Redirect, "other.spam.test")
+        );
         let own = r#"<link rel="canonical" href="https://www.shop.example.com/page">"#;
         assert_eq!(kinds(own, true), vec![]);
     }
@@ -690,8 +729,14 @@ mod tests {
             let _ = extract(html, &site(), true);
         }
         let deep = "<div>".repeat(5_000) + "<a href=\"https://friend.example.org/\">x</a>";
-        assert_eq!(kinds(&deep, true), one(ContentKind::LinkHost, "friend.example.org"));
-        let huge_tag = format!("<a title=\"{}\" href=\"https://spam.test/\">", "é".repeat(MAX_TAG));
+        assert_eq!(
+            kinds(&deep, true),
+            one(ContentKind::LinkHost, "friend.example.org")
+        );
+        let huge_tag = format!(
+            "<a title=\"{}\" href=\"https://spam.test/\">",
+            "é".repeat(MAX_TAG)
+        );
         let _ = extract(&huge_tag, &site(), true);
     }
 
@@ -708,10 +753,22 @@ mod tests {
 
     #[test]
     fn url_hosts_are_normalised_and_odd_ones_refused() {
-        assert_eq!(url_host("HTTPS://WWW.Example.NET:8443/x").as_deref(), Some("example.net"));
-        assert_eq!(url_host(" ht\ttps://a.example.net").as_deref(), Some("a.example.net"));
-        assert_eq!(url_host("https://user:pw@b.example.net/").as_deref(), Some("b.example.net"));
-        assert_eq!(url_host("//c.example.net").as_deref(), Some("c.example.net"));
+        assert_eq!(
+            url_host("HTTPS://WWW.Example.NET:8443/x").as_deref(),
+            Some("example.net")
+        );
+        assert_eq!(
+            url_host(" ht\ttps://a.example.net").as_deref(),
+            Some("a.example.net")
+        );
+        assert_eq!(
+            url_host("https://user:pw@b.example.net/").as_deref(),
+            Some("b.example.net")
+        );
+        assert_eq!(
+            url_host("//c.example.net").as_deref(),
+            Some("c.example.net")
+        );
         assert_eq!(url_host("https://[::1]/"), None);
         assert_eq!(url_host("/relative"), None);
         assert_eq!(url_host("https://localhost/"), None);

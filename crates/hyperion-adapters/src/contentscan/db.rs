@@ -56,7 +56,9 @@ impl Table {
     }
 
     fn from_tag(tag: &str) -> Option<Table> {
-        Table::ORDER.into_iter().find(|t| t.tag().to_string() == tag)
+        Table::ORDER
+            .into_iter()
+            .find(|t| t.tag().to_string() == tag)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -204,7 +206,12 @@ impl Row {
 /// four fields asked for is dropped: it wasn't written by the statements above.
 pub fn parse_line(line: &str) -> Option<Row> {
     let mut fields = line.trim_end_matches(['\r', '\n']).split('\t');
-    let (tag, id, name, value) = (fields.next()?, fields.next()?, fields.next()?, fields.next()?);
+    let (tag, id, name, value) = (
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+    );
     if fields.next().is_some() {
         return None;
     }
@@ -312,7 +319,11 @@ mod tests {
     }
 
     fn line(tag: char, id: u64, name: &str, value: &[u8]) -> String {
-        format!("{tag}\t{id}\t{}\t{}\n", hex::encode_upper(name), hex::encode_upper(value))
+        format!(
+            "{tag}\t{id}\t{}\t{}\n",
+            hex::encode_upper(name),
+            hex::encode_upper(value)
+        )
     }
 
     #[test]
@@ -320,7 +331,19 @@ mod tests {
         let sql = statements("lm_abc", "wp_", &Cursor::default()).expect("sql");
         assert!(sql.starts_with("SET SESSION TRANSACTION READ ONLY;\n"));
         let upper = sql.to_ascii_uppercase();
-        for word in ["INSERT", "UPDATE ", "DELETE", "DROP", "ALTER", "CREATE", "REPLACE ", "GRANT", "INTO OUTFILE", "LOAD_FILE", "CALL "] {
+        for word in [
+            "INSERT",
+            "UPDATE ",
+            "DELETE",
+            "DROP",
+            "ALTER",
+            "CREATE",
+            "REPLACE ",
+            "GRANT",
+            "INTO OUTFILE",
+            "LOAD_FILE",
+            "CALL ",
+        ] {
             assert!(!upper.contains(word), "{word} in {sql}");
         }
         assert_eq!(sql.matches("SELECT").count(), 3);
@@ -356,7 +379,9 @@ mod tests {
         };
         let segs = segments(&cursor);
         assert_eq!(
-            segs.iter().map(|s| (s.table, s.above, s.up_to)).collect::<Vec<_>>(),
+            segs.iter()
+                .map(|s| (s.table, s.above, s.up_to))
+                .collect::<Vec<_>>(),
             vec![
                 (Table::Options, 420, None),
                 (Table::Postmeta, 0, None),
@@ -515,7 +540,10 @@ mod tests {
         assert_eq!(taken, 6);
         assert!(matches!(
             budget.finish(true, None).end,
-            ReadEnd::Capped(Cursor { table: Table::Options, after: 6 })
+            ReadEnd::Capped(Cursor {
+                table: Table::Options,
+                after: 6
+            })
         ));
     }
 
@@ -523,9 +551,14 @@ mod tests {
     fn a_read_that_ended_by_itself_is_complete_and_a_broken_one_says_why() {
         assert_eq!(Budget::default().finish(false, None).end, ReadEnd::Complete);
         assert_eq!(
-            Budget::default().finish(false, Some("timed out".into())).end,
+            Budget::default()
+                .finish(false, Some("timed out".into()))
+                .end,
             ReadEnd::Broken("timed out".into())
         );
-        assert!(matches!(Budget::default().finish(true, None).end, ReadEnd::Broken(_)));
+        assert!(matches!(
+            Budget::default().finish(true, None).end,
+            ReadEnd::Broken(_)
+        ));
     }
 }

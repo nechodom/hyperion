@@ -39,7 +39,9 @@ fn is_zero(value: &str) -> bool {
 }
 
 fn at_most_one_px(value: &str) -> bool {
-    css_number(value).is_some_and(|(n, unit)| (0.0..=1.0).contains(&n) && (unit.is_empty() || unit.starts_with("px")))
+    css_number(value).is_some_and(|(n, unit)| {
+        (0.0..=1.0).contains(&n) && (unit.is_empty() || unit.starts_with("px"))
+    })
 }
 
 /// Does this inline style take its element off the page a visitor sees?
@@ -80,6 +82,8 @@ struct Rule {
     re: Regex,
 }
 
+// A pattern that doesn't compile is a bug every test in this file would hit.
+#[allow(clippy::expect_used)]
 fn rule(id: &'static str, pattern: &str) -> Rule {
     Rule {
         id,
@@ -136,9 +140,10 @@ pub fn inline_hits(script: &str) -> Vec<InlineHit> {
         .collect()
 }
 
-static CREATES_SCRIPT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)createElement\s*\(\s*["'`]script["'`]"#).expect("regex")
-});
+#[allow(clippy::expect_used)]
+static CREATES_SCRIPT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)createElement\s*\(\s*["'`]script["'`]"#).expect("regex"));
+#[allow(clippy::expect_used)]
 static URL_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)["'`](?:https?:)?//([a-z0-9][a-z0-9.-]*\.[a-z]{2,})(?:[/:?"'`])"#)
         .expect("regex")
@@ -265,7 +270,9 @@ mod tests {
 
     #[test]
     fn a_long_run_of_character_codes_is_a_hit() {
-        let codes = (0..30).map(|n| (97 + n % 20).to_string()).collect::<Vec<_>>();
+        let codes = (0..30)
+            .map(|n| (97 + n % 20).to_string())
+            .collect::<Vec<_>>();
         let script = format!("var s=String.fromCharCode({});", codes.join(","));
         assert_eq!(ids(&script), ["charcode-chain"]);
         assert!(ids("String.fromCharCode(60,115,99)").is_empty());

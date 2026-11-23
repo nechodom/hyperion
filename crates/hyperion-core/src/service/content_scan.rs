@@ -245,7 +245,10 @@ pub(super) fn judge(
         });
     }
     let everything_read = !matches!(obs.db, ContentLayer::Partial(_) | ContentLayer::Failed(_))
-        && !matches!(obs.pages, ContentLayer::Partial(_) | ContentLayer::Failed(_));
+        && !matches!(
+            obs.pages,
+            ContentLayer::Partial(_) | ContentLayer::Failed(_)
+        );
     if everything_read {
         baseline
             .keys
@@ -685,7 +688,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.content_read_pages(&detail, &site_hosts, &mut pages_state, &mut obs, now)
             .await;
 
-        let _held = self.site_scan.content.lock().await;
+        let held = self.site_scan.content.lock().await;
         // Read again under the lock: a Trust may have landed while pages loaded.
         let mut baseline = self.content_baseline(id.as_str()).await;
         baseline.pages = pages_state.pages;
@@ -698,7 +701,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await;
         self.put_content_kv(id.as_str(), CONTENT_KV_KEY, &result)
             .await;
-        drop(_held);
+        drop(held);
 
         if !live {
             // The pilot's numbers, one line per site, for comparing nodes.
@@ -755,19 +758,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<i64, RpcError> {
         let mut flagged = 0i64;
         // Requests first, whatever the hour.
-        let requests = hyperion_state::hosting_kv::list_by_key(&self.pool, CONTENT_REQUESTED_KV_KEY)
-            .await
-            .unwrap_or_default();
+        let requests =
+            hyperion_state::hosting_kv::list_by_key(&self.pool, CONTENT_REQUESTED_KV_KEY)
+                .await
+                .unwrap_or_default();
         for (id, _) in requests {
             let last: Option<ContentScanResult> = self.content_kv(&id, CONTENT_KV_KEY).await;
-            let too_soon = last.is_some_and(|r| {
-                r.scanned_at <= now && now - r.scanned_at < REQUEST_MIN_GAP_SECS
-            });
+            let too_soon = last
+                .is_some_and(|r| r.scanned_at <= now && now - r.scanned_at < REQUEST_MIN_GAP_SECS);
             if too_soon {
                 continue;
             }
-            let _ = hyperion_state::hosting_kv::delete(&self.pool, &id, CONTENT_REQUESTED_KV_KEY)
-                .await;
+            let _ =
+                hyperion_state::hosting_kv::delete(&self.pool, &id, CONTENT_REQUESTED_KV_KEY).await;
             if self.content_scan_site(&HostingId(id), now).await == Some(true) {
                 flagged += 1;
             }

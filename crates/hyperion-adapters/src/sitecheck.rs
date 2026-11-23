@@ -775,7 +775,13 @@ mod tests {
 
     #[test]
     fn the_request_cannot_leave_the_machine() {
-        let cfg = fetch_config("https://example.cz/a", "example.cz", "127.0.0.1", true, &Identity::default());
+        let cfg = fetch_config(
+            "https://example.cz/a",
+            "example.cz",
+            "127.0.0.1",
+            true,
+            &Identity::default(),
+        );
         assert!(cfg.contains("resolve = \"example.cz:443:127.0.0.1\""));
         assert!(cfg.contains("resolve = \"example.cz:80:127.0.0.1\""));
         // A site on its bootstrap certificate still has to be checkable, and
@@ -801,14 +807,26 @@ mod tests {
 
     #[test]
     fn a_request_says_who_it_was_told_to_be() {
-        let own = fetch_config("https://example.cz/", "example.cz", "127.0.0.1", true, &Identity::default());
+        let own = fetch_config(
+            "https://example.cz/",
+            "example.cz",
+            "127.0.0.1",
+            true,
+            &Identity::default(),
+        );
         assert!(own.contains(&format!("user-agent = \"{USER_AGENT}\"\n")));
         assert!(!own.contains("referer"));
         let crawler = Identity {
             user_agent: "Crawler/1 \"x\"\noutput = \"/etc/passwd",
             referer: Some("https://search.example/"),
         };
-        let cfg = fetch_config("https://example.cz/", "example.cz", "127.0.0.1", true, &crawler);
+        let cfg = fetch_config(
+            "https://example.cz/",
+            "example.cz",
+            "127.0.0.1",
+            true,
+            &crawler,
+        );
         assert!(cfg.contains("user-agent = \"Crawler/1 "));
         assert!(cfg.contains("referer = \"https://search.example/\"\n"));
         assert!(!cfg.contains("\noutput = \"/etc/passwd"));
@@ -941,7 +959,13 @@ mod header_tests {
 
     #[test]
     fn compression_is_requested_the_way_a_browser_does() {
-        let cfg = fetch_config("https://example.cz/", "example.cz", "127.0.0.1", true, &Identity::default());
+        let cfg = fetch_config(
+            "https://example.cz/",
+            "example.cz",
+            "127.0.0.1",
+            true,
+            &Identity::default(),
+        );
         assert!(cfg.contains("compressed\n"));
         assert!(cfg.contains("%header{content-encoding}"));
         assert!(cfg.contains("%header{cache-control}"));
@@ -1146,7 +1170,13 @@ mod ssrf_tests {
     /// The hop is taken by `fetch`, which re-runs the same-site test.
     #[test]
     fn curl_is_told_not_to_follow_redirects_or_odd_schemes() {
-        let cfg = fetch_config("https://example.cz/", "example.cz", "127.0.0.1", true, &Identity::default());
+        let cfg = fetch_config(
+            "https://example.cz/",
+            "example.cz",
+            "127.0.0.1",
+            true,
+            &Identity::default(),
+        );
         assert!(cfg.contains("max-redirs = 0"));
         assert!(
             !cfg.contains("\nlocation\n"),

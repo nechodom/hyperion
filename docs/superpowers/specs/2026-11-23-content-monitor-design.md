@@ -1,6 +1,6 @@
 # Content monitor: injected content in the database and on rendered pages — design
 
-Status: draft, awaiting owner approval. Date: 2026-11-23.
+Status: approved 2026-11-23; built behind `[integrity] content_live` (see "As built").
 
 ## Intent
 
@@ -328,7 +328,41 @@ Each step leaves the product working.
 - Limits (2 MiB, 5,000 rows, 64 MiB, 60 s, 2,000 keys, 30 days, 10 hosts) are starting
   values.
 
+## As built
+
+Where the build departs from the text above, and why.
+
+- **A script that builds a `<script>` element is not a finding by itself.** The
+  ordinary analytics snippet does exactly that. The hosts such a script names are
+  `script-host` items, to review like any `<script src>`. A loader that hides its host
+  behind a decoder is what the decode rules catch.
+- **Pages:** the homepage plus the first four addresses of the sitemap (for an index,
+  of its first child that lists any), chosen once a week and kept, rather than one from
+  each child sitemap. A night is then six requests; the week the pages are chosen adds
+  up to four sitemap requests.
+- **Markers:** `<style` is not one (style blocks aren't interpreted); `<meta`, `<frame`
+  and the `hidden` attribute are.
+- **Traffic figures are not adjusted.** They are byte counts from the access log and
+  don't single out any user agent today, the site check's included. Six small requests
+  a night are left in them.
+- **The crawler view is unverified on a real node.** The generated nginx rules never
+  name a search engine, and a refused view is "couldn't check", but nobody has yet
+  watched ModSecurity or a security plugin meet it. Look at the `crawler` note on pilot
+  sites before `content_live` is switched on.
+- **`hctl wp content-scan`** prints the stored result; it is its own command, not part
+  of `integrity-scan`.
+- **The statements were run on a real server**, MariaDB 10.11 and 11.8, as an ordinary
+  database user: accepted, the right rows come back, and the session refuses a write
+  (`crates/hyperion-adapters/tests/contentscan_live.rs`, off unless given a container).
+  They have not been run against a production-sized site; the 60-second limit and the
+  row cap are what stand between a slow table scan and the node.
+- Builder data read: `_elementor_data` only.
+- The false-positive check (acceptance 8) has not been run; the pilot is where it
+  happens.
+
 ## Open question for the owner
+
+Not answered at approval; the fixtures assume an inline style.
 
 Where exactly did October's links sit (post content, a widget, builder data, an option)
 and how were they hidden (inline style, a CSS class, off-screen)? The fixture in
