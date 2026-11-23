@@ -31,6 +31,7 @@ pub mod setup;
 pub mod state;
 pub mod ttl_cache;
 pub mod url_watch;
+pub mod whatsnew;
 pub mod wp_library;
 pub mod wp_list_cache;
 
