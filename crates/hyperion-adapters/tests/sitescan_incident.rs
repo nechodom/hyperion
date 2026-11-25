@@ -2252,6 +2252,68 @@ fn no_slug_list_means_no_update_pass() {
 }
 
 #[test]
+fn an_update_seen_without_a_slug_list_gets_its_pass_once_there_is_one() {
+    // One lookup wordpress.org didn't answer must not cost the update its
+    // pass for good: every file of the new version would sit in review until
+    // someone trusts them by hand.
+    let mut s = Site::new();
+    s.known = None;
+    s.wordpress();
+    s.plugin("premium", "1.0", &[("a.php", b"<?php // a\n")]);
+    s.scan();
+    settle();
+    s.bump("premium", "1.1");
+    s.write("wp-content/plugins/premium/a.php", "<?php // a2\n");
+    s.write("wp-content/plugins/premium/new.php", "<?php // new\n");
+    for _ in 0..2 {
+        let out = s.scan();
+        assert!(out.auto_accepted.is_empty());
+        item(&out.review, "wp-content/plugins/premium/a.php");
+        // Still the version the pass is measured against.
+        assert_eq!(s.load().components["plugin/premium"], "1.0");
+    }
+
+    s.known = Some(BTreeSet::new());
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    let mut accepted = out.auto_accepted.clone();
+    accepted.sort();
+    assert_eq!(
+        accepted,
+        [
+            "wp-content/plugins/premium/a.php",
+            "wp-content/plugins/premium/new.php",
+            "wp-content/plugins/premium/premium.php",
+        ]
+    );
+    assert_eq!(s.load().components["plugin/premium"], "1.1");
+
+    // And the pass was for that update alone.
+    settle();
+    s.write("wp-content/plugins/premium/a.php", "<?php // a3\n");
+    assert_eq!(rels(&s.scan().review), ["wp-content/plugins/premium/a.php"]);
+}
+
+#[test]
+fn a_slug_wordpress_org_turns_out_to_know_gets_no_late_pass() {
+    let mut s = Site::new();
+    s.known = None;
+    s.wordpress();
+    s.plugin("free", "1.0", &[("a.php", b"<?php // a\n")]);
+    s.scan();
+    settle();
+    s.bump("free", "1.1");
+    s.write("wp-content/plugins/free/a.php", "<?php // a2\n");
+    s.scan();
+    s.known = Some(BTreeSet::from(["free".to_string()]));
+    let out = s.scan();
+    assert!(out.auto_accepted.is_empty());
+    item(&out.review, "wp-content/plugins/free/a.php");
+    // Decided: nothing left to wait for.
+    assert_eq!(s.load().components["plugin/free"], "1.1");
+}
+
+#[test]
 fn ordinary_generated_php_paths_are_churn() {
     let s = Site::new();
     s.wordpress();

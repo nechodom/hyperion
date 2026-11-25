@@ -317,10 +317,26 @@ const GUARD_HTACCESS_MAX_BYTES: usize = 2048;
 /// `storage/` at runtime, so they are never in the wordpress.org manifest.
 pub fn is_access_guard(rel_path: &str, bytes: &[u8]) -> bool {
     match rel_path.rsplit('/').next() {
-        Some("index.php") => is_silence_stub(rel_path, bytes),
+        Some("index.php") => is_silence_stub(rel_path, bytes) || is_not_found_stub(rel_path, bytes),
         Some(".htaccess") => is_deny_htaccess(bytes),
         _ => false,
     }
+}
+
+/// The `index.php` WPForms writes into its upload folders
+/// (`wpforms_create_index_php_file`, wpforms-lite 1.8.7+): two `header()` calls
+/// answering 404, and nothing else. Byte for byte, line ends aside: a stub
+/// that sends any other header is not this one.
+const WPFORMS_NOT_FOUND_STUB: &str = "<?php\nheader( $_SERVER['SERVER_PROTOCOL'] . ' 404 Not Found' );\nheader( 'Status: 404 Not Found' );";
+
+/// An `index.php` that only answers "not found" (see
+/// [`WPFORMS_NOT_FOUND_STUB`]).
+fn is_not_found_stub(rel_path: &str, bytes: &[u8]) -> bool {
+    if rel_path.rsplit('/').next() != Some("index.php") || bytes.len() > STUB_MAX_BYTES {
+        return false;
+    }
+    std::str::from_utf8(bytes)
+        .is_ok_and(|text| text.replace("\r\n", "\n").trim_end() == WPFORMS_NOT_FOUND_STUB)
 }
 
 /// An `.htaccess` whose every line is access control, a listing switch-off,
@@ -518,6 +534,7 @@ pub fn is_rsssl_code_execution_test(rel_path: &str, bytes: &[u8]) -> bool {
 fn is_plugin_php_in_uploads(rel_path: &str, bytes: &[u8]) -> bool {
     bytes.is_empty()
         || is_silence_stub(rel_path, bytes)
+        || is_not_found_stub(rel_path, bytes)
         || is_twig_cache(rel_path, bytes)
         || is_wp_all_import_functions(rel_path)
         || is_rsssl_code_execution_test(rel_path, bytes)
@@ -1571,6 +1588,44 @@ return () => {
         let h = inspect(WPML_TWIG_PATH, src.as_bytes());
         assert_eq!(worst(&h), Some(Severity::High), "{h:?}");
         assert!(!ids(&h).contains(&"php_in_uploads"), "{h:?}");
+    }
+
+    #[test]
+    fn wpforms_not_found_index_is_not_php_in_uploads() {
+        // What `wpforms_create_index_php_file` writes (wpforms-lite 1.8.7+,
+        // includes/functions/filesystem-media.php) into its upload folders.
+        let src = b"<?php\nheader( $_SERVER['SERVER_PROTOCOL'] . ' 404 Not Found' );\nheader( 'Status: 404 Not Found' );\n";
+        for p in [
+            "wp-content/uploads/wpforms/cache/index.php",
+            "wp-content/uploads/wpforms/index.php",
+        ] {
+            assert!(inspect(p, src).is_empty(), "{p}");
+            assert!(is_access_guard(p, src), "{p}");
+        }
+        let crlf = String::from_utf8_lossy(src).replace('\n', "\r\n");
+        assert!(inspect("wp-content/uploads/wpforms/index.php", crlf.as_bytes()).is_empty());
+        // The name is part of it, and so is every byte.
+        assert_eq!(
+            ids(&inspect("wp-content/uploads/wpforms/cache/x.php", src)),
+            ["php_in_uploads"]
+        );
+        let mut more = src.to_vec();
+        more.extend_from_slice(b"include $_SERVER['DOCUMENT_ROOT'] . '/x';\n");
+        assert_eq!(
+            ids(&inspect(
+                "wp-content/uploads/wpforms/cache/index.php",
+                &more
+            )),
+            ["php_in_uploads"]
+        );
+        let other = b"<?php\nheader( 'Location: https://example.com/' );\n";
+        assert_eq!(
+            ids(&inspect(
+                "wp-content/uploads/wpforms/cache/index.php",
+                other
+            )),
+            ["php_in_uploads"]
+        );
     }
 
     #[test]

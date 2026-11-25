@@ -2174,11 +2174,26 @@ impl<'a> Scan<'a> {
         if !self.stopped {
             self.baseline.first_done = true;
             self.baseline.rule_pack = self.baseline.rule_pack.max(RULE_PACK_VERSION);
+            // Without wordpress.org's answer nobody could say whether a
+            // changed version was a premium update. Its old version stays on
+            // record, so the scan that does get the answer still sees the
+            // update and gives the pass (or doesn't). Recording the new one
+            // here would leave every file of the update in review for good.
+            let undecided = self.input.wporg_known_slugs.is_none();
+            let old = std::mem::take(&mut self.baseline.components);
             self.baseline.components = self
                 .comps
                 .iter()
                 .filter(|c| !c.is_core() && !c.c.key.version.is_empty())
-                .map(|c| (component_key(c.c), c.c.key.version.clone()))
+                .map(|c| {
+                    let key = component_key(c.c);
+                    let waiting = undecided && c.manifest.is_none() && !c.c.is_child_theme;
+                    let version = match old.get(&key) {
+                        Some(was) if waiting => was.clone(),
+                        _ => c.c.key.version.clone(),
+                    };
+                    (key, version)
+                })
                 .collect();
         }
         self.flush();
