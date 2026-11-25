@@ -72,6 +72,11 @@ pub struct Baseline {
     pub churn: BTreeMap<String, BaselineEntry>,
     /// Plugin and theme versions at the last finished scan, by `kind/slug`.
     pub components: BTreeMap<String, String>,
+    /// Every version in `components` was recorded by a scan that kept the old
+    /// one while wordpress.org hadn't answered. False in a baseline from before
+    /// that: an update may be recorded there without ever having had its pass,
+    /// so the first scan with an answer gives it (see `Scan::new`).
+    pub update_pass_settled: bool,
     /// Unused by the scan, which takes what's trusted from `ScanInput::trusted`,
     /// and emptied on its first save. Still read and written so a file from before
     /// that loads.
@@ -123,6 +128,8 @@ struct Header {
     rule_pack: u32,
     #[serde(default)]
     first_done: bool,
+    #[serde(default)]
+    update_pass_settled: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -213,6 +220,7 @@ impl Baseline {
                 since: self.since,
                 rule_pack: self.rule_pack,
                 first_done: self.first_done,
+                update_pass_settled: self.update_pass_settled,
             },
         )?;
         for (p, e) in &self.entries {
@@ -340,6 +348,7 @@ fn parse(src: impl Read, lim: &Limits) -> io::Result<Option<Baseline>> {
         since: head.since,
         rule_pack: head.rule_pack,
         first_done: head.first_done,
+        update_pass_settled: head.update_pass_settled,
         ..Baseline::default()
     };
     loop {
