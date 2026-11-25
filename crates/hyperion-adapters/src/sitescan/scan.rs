@@ -920,6 +920,14 @@ impl<'a> Scan<'a> {
             .chain(baseline.churn.keys())
             .map(|p| recorded_cost(p))
             .sum();
+        // A baseline from before the old version was kept on record (see
+        // `finish`) may hold an update's new version without the update ever
+        // having had its pass: version on record == version on disk, and every
+        // file of it in review for good. Nothing in it says which plugins those
+        // are, so the first scan with wordpress.org's answer gives the pass to
+        // every plugin and theme it would have gone to, once. The rules still
+        // read every file.
+        let late_pass = !first && !baseline.update_pass_settled;
         let mut comps = Vec::with_capacity(input.discovery.components.len());
         let mut by_root = HashMap::new();
         let mut core = None;
@@ -952,7 +960,7 @@ impl<'a> Scan<'a> {
                 && baseline
                     .components
                     .get(&component_key(c))
-                    .is_some_and(|old| *old != c.key.version);
+                    .is_some_and(|old| late_pass || *old != c.key.version);
             comps.push(Comp {
                 c,
                 disputed,
@@ -2180,6 +2188,10 @@ impl<'a> Scan<'a> {
             // update and gives the pass (or doesn't). Recording the new one
             // here would leave every file of the update in review for good.
             let undecided = self.input.wporg_known_slugs.is_none();
+            // A first scan has no update on record to owe a pass to.
+            if self.first || !undecided {
+                self.baseline.update_pass_settled = true;
+            }
             let old = std::mem::take(&mut self.baseline.components);
             self.baseline.components = self
                 .comps

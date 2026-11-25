@@ -2294,6 +2294,85 @@ fn an_update_seen_without_a_slug_list_gets_its_pass_once_there_is_one() {
     assert_eq!(rels(&s.scan().review), ["wp-content/plugins/premium/a.php"]);
 }
 
+/// A baseline as it was left before the old version was kept on record: the
+/// update's new version is written down, and nothing says who decided.
+fn forget_update_pass_was_settled(s: &Site) {
+    let mut b = s.load();
+    b.update_pass_settled = false;
+    b.save_atomic(&s.baseline).expect("save");
+}
+
+#[test]
+fn an_update_recorded_before_the_pass_was_kept_gets_it_once() {
+    // Before the old version was kept, a scan without wordpress.org's answer
+    // wrote the new version down. Such a site has every file of that update
+    // in review, and version on record == version on disk, for good.
+    let mut s = Site::new();
+    s.wordpress();
+    s.plugin("premium", "1.1", &[("a.php", b"<?php // a\n")]);
+    s.plugin("free", "1.0", &[("f.php", b"<?php // f\n")]);
+    s.scan();
+    settle();
+    s.write("wp-content/plugins/premium/a.php", "<?php // a2\n");
+    s.write("wp-content/plugins/premium/new.php", "<?php // new\n");
+    s.write("wp-content/plugins/premium/bad.php", EVAL);
+    s.write("wp-content/plugins/free/f.php", "<?php // f2\n");
+    s.write("wp-content/uploads/x.php", "<?php // x\n");
+    forget_update_pass_was_settled(&s);
+
+    // No answer: no pass, and the question stays open.
+    s.known = None;
+    let out = s.scan();
+    assert!(out.auto_accepted.is_empty());
+    item(&out.review, "wp-content/plugins/premium/a.php");
+    assert!(!s.load().update_pass_settled);
+
+    // The answer: the premium plugin's files pass, a rule hit doesn't, and
+    // neither does a plugin wordpress.org knows or a file outside a plugin.
+    s.known = Some(BTreeSet::from(["free".to_string()]));
+    let out = s.scan();
+    let mut accepted = out.auto_accepted.clone();
+    accepted.sort();
+    assert_eq!(
+        accepted,
+        [
+            "wp-content/plugins/premium/a.php",
+            "wp-content/plugins/premium/new.php",
+        ]
+    );
+    assert_eq!(
+        rels(&out.findings)
+            .iter()
+            .filter(|r| r.contains("premium"))
+            .count(),
+        1
+    );
+    item(&out.findings, "wp-content/plugins/premium/bad.php");
+    item(&out.review, "wp-content/plugins/free/f.php");
+    assert!(s.load().update_pass_settled);
+
+    // Once: the next change is a change again.
+    settle();
+    s.write("wp-content/plugins/premium/a.php", "<?php // a3\n");
+    let next = s.scan();
+    assert!(next.auto_accepted.is_empty());
+    item(&next.review, "wp-content/plugins/premium/a.php");
+}
+
+#[test]
+fn a_new_baseline_owes_no_late_pass() {
+    let s = Site::new();
+    s.wordpress();
+    s.plugin("premium", "1.0", &[("a.php", b"<?php // a\n")]);
+    s.scan();
+    assert!(s.load().update_pass_settled);
+    settle();
+    s.write("wp-content/plugins/premium/a.php", "<?php // a2\n");
+    let out = s.scan();
+    assert!(out.auto_accepted.is_empty());
+    item(&out.review, "wp-content/plugins/premium/a.php");
+}
+
 #[test]
 fn a_slug_wordpress_org_turns_out_to_know_gets_no_late_pass() {
     let mut s = Site::new();
