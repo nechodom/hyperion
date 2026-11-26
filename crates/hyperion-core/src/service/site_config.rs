@@ -707,6 +707,54 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(options)
     }
 
+    /// Refuse `alias` when another hosting already answers to it. A name can
+    /// belong to one hosting only: as another hosting's own domain it would
+    /// sit in two vhosts — nginx merely warns and serves whichever it read
+    /// first — and as another hosting's alias the UNIQUE column refuses it
+    /// with raw database text. The refusal names the hosting to look at (it
+    /// may be suspended or in the trash). `own` is the hosting being edited,
+    /// whose current aliases are its to keep; `None` for one being created.
+    pub(super) async fn refuse_alias_taken(
+        &self,
+        alias: &str,
+        own: Option<&HostingId>,
+    ) -> Result<(), RpcError> {
+        let lookup = |e| RpcError::Internal_with(format!("alias lookup: {e}"));
+        if let Some(other) = hyperion_state::hostings::get_by_domain(&self.pool, alias)
+            .await
+            .map_err(lookup)?
+        {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "{alias} is the domain of another hosting on this node (state: {}). \
+                     Remove that hosting first, or redirect it instead of adding an alias.",
+                    other.state.as_str()
+                ),
+            });
+        }
+        self.refuse_name_held_as_alias(alias, own).await
+    }
+
+    /// Refuse `name` when it is an alias of a hosting other than `own`.
+    pub(super) async fn refuse_name_held_as_alias(
+        &self,
+        name: &str,
+        own: Option<&HostingId>,
+    ) -> Result<(), RpcError> {
+        let owner = hyperion_state::hostings::alias_owner(&self.pool, name)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("alias lookup: {e}")))?;
+        match owner {
+            Some((owner_id, _)) if own.is_some_and(|id| id.as_str() == owner_id) => Ok(()),
+            Some((_, owner_domain)) => Err(RpcError::Validation {
+                message: format!(
+                    "{name} is already an alias of {owner_domain}. Remove it there first."
+                ),
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Replace a hosting's alias domains (SANs) after creation. Rewrites the
     /// nginx `server_name` and reloads. Newly-added aliases are NOT yet covered
     /// by the existing certificate — the operator re-issues from the SSL tab to
@@ -733,6 +781,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         norm.sort();
+
+        for a in &norm {
+            self.refuse_alias_taken(a, Some(&detail.id)).await?;
+        }
 
         let old_aliases = detail.aliases.clone();
         hyperion_state::hostings::replace_aliases(&self.pool, &detail.id, &norm)

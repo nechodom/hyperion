@@ -55,6 +55,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
         self.reclaim_trashed_domain(req.domain.as_str()).await;
 
+        // One name, one hosting — checked before anything is provisioned, so
+        // a refusal leaves nothing to roll back. The domain itself is covered
+        // by its UNIQUE column; what that cannot see is the alias table.
+        self.refuse_name_held_as_alias(req.domain.as_str(), None)
+            .await?;
+        for alias in &req.aliases {
+            self.refuse_alias_taken(alias.as_str(), None).await?;
+        }
+
         // Every step that changes the box pushes its undo; any failure rolls
         // all of them back, newest first.
         let mut stack = RollbackStack::new();
