@@ -1437,3 +1437,61 @@ async fn the_form_question_follows_its_switch_and_the_guard() {
     s.wp_plugin_tick().await.expect("tick");
     assert!(!formmath::is_present(&root).await);
 }
+
+/// An alias that is another hosting's own domain would put one name in two
+/// vhosts: nginx only warns and serves whichever file it read first. It has
+/// to be refused by name, and the hosting's current aliases must survive.
+#[tokio::test]
+async fn set_aliases_refuses_another_hostings_primary_domain() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), happy_mocks_many());
+    s.create(req("first.cz")).await.expect("create first");
+    s.create(req("second.cz")).await.expect("create second");
+    let sel = HostingSelector::Domain(Domain::parse("first.cz").unwrap());
+    s.hosting_set_aliases(sel.clone(), vec![Domain::parse("www.first.cz").unwrap()])
+        .await
+        .expect("first alias");
+
+    let err = s
+        .hosting_set_aliases(
+            sel.clone(),
+            vec![
+                Domain::parse("www.first.cz").unwrap(),
+                Domain::parse("second.cz").unwrap(),
+            ],
+        )
+        .await
+        .expect_err("another hosting's domain must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("second.cz"), "names the domain: {msg}");
+    assert!(msg.contains("domain of another hosting"), "says why: {msg}");
+    assert_eq!(
+        s.get(sel).await.expect("get").aliases,
+        vec!["www.first.cz".to_string()]
+    );
+}
+
+/// The alias table is UNIQUE across hostings; the refusal used to be the raw
+/// sqlx "UNIQUE constraint failed" text. It names the owning hosting instead.
+#[tokio::test]
+async fn set_aliases_refuses_an_alias_held_by_another_hosting() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), happy_mocks_many());
+    s.create(req("first.cz")).await.expect("create first");
+    s.create(req("second.cz")).await.expect("create second");
+    let second = HostingSelector::Domain(Domain::parse("second.cz").unwrap());
+    s.hosting_set_aliases(second, vec![Domain::parse("shop.cz").unwrap()])
+        .await
+        .expect("second alias");
+
+    let sel = HostingSelector::Domain(Domain::parse("first.cz").unwrap());
+    let err = s
+        .hosting_set_aliases(sel.clone(), vec![Domain::parse("shop.cz").unwrap()])
+        .await
+        .expect_err("an alias another hosting holds must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("shop.cz"), "names the alias: {msg}");
+    assert!(msg.contains("second.cz"), "names the owner: {msg}");
+    assert!(!msg.contains("UNIQUE"), "no raw database text: {msg}");
+    assert!(s.get(sel).await.expect("get").aliases.is_empty());
+}

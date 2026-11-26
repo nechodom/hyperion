@@ -706,17 +706,21 @@ pub async fn post_set_aliases(
         Request::HostingSetAliases { sel, aliases },
     )
     .await?;
-    let flash = match resp {
-        RpcResponse::HostingSetAliases(_) => {
+    // A refusal goes out as `flash_error`: under `flash` it rendered as a
+    // green success, and "my alias vanished" was the only thing anyone saw.
+    let (key, flash) = match resp {
+        RpcResponse::HostingSetAliases(_) => (
+            "flash",
             "Aliases updated. Re-issue the certificate (SSL tab) to cover any new names."
-                .to_string()
-        }
-        RpcResponse::Error(e) => format!("Couldn't update aliases: {e}"),
-        _ => "Aliases: unexpected response".into(),
+                .to_string(),
+        ),
+        RpcResponse::Error(e) => ("flash_error", format!("Couldn't update aliases: {e}")),
+        _ => ("flash_error", "Aliases: unexpected response".into()),
     };
     Ok(Redirect::to(&format!(
-        "/hostings/{}?flash={}#access",
+        "/hostings/{}?{}={}#access",
         sel_url,
+        key,
         urlencoding(&flash)
     ))
     .into_response())

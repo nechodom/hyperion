@@ -125,6 +125,23 @@ pub async fn insert_alias(
     Ok(())
 }
 
+/// The hosting that holds `alias`, as `(hosting id, primary domain)`. The
+/// alias table is UNIQUE across hostings, so there is at most one.
+pub async fn alias_owner(
+    pool: &SqlitePool,
+    alias: &str,
+) -> Result<Option<(String, String)>, StateError> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT h.id, h.domain FROM hosting_aliases a
+         JOIN hostings h ON h.id = a.hosting_id
+         WHERE a.alias_domain = ?",
+    )
+    .bind(alias)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// Replace the full alias set for a hosting atomically (delete all, then
 /// insert the new list). Used by HostingSetAliases. The UNIQUE constraint on
 /// alias_domain still applies — a duplicate surfaces as an error and the
