@@ -692,7 +692,7 @@ pub async fn post_set_aliases(
         Ok(a) => a,
         Err(e) => {
             return Ok(Redirect::to(&format!(
-                "/hostings/{}?flash_error={}#access",
+                "/hostings/{}?flash_error={}#ssl",
                 sel_url,
                 urlencoding(&format!("Invalid alias: {e}"))
             ))
@@ -718,7 +718,7 @@ pub async fn post_set_aliases(
         _ => ("flash_error", "Aliases: unexpected response".into()),
     };
     Ok(Redirect::to(&format!(
-        "/hostings/{}?{}={}#access",
+        "/hostings/{}?{}={}#ssl",
         sel_url,
         key,
         urlencoding(&flash)

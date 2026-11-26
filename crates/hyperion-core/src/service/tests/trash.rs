@@ -619,3 +619,36 @@ async fn a_failed_removal_leaves_the_site_and_only_the_true_rows() {
         .any(|e| e.action == "hosting.backup.local_delete_all" && e.result == "failed");
     assert!(audited, "a failure must leave a trace");
 }
+
+/// A trashed hosting still owns its domain. The refusal has to say the owner
+/// is in the Trash: "remove that hosting" sent the operator looking for a
+/// site that is in no list.
+#[tokio::test]
+async fn an_alias_owned_by_a_trashed_hosting_points_at_the_trash() {
+    let pool = open_memory().await.expect("open");
+    let mut mocks = trash_cycle_mocks();
+    mocks.expect_nginx_write_vhost().returning(|_| Ok(()));
+    let (s, _dir) = with_trash_on(svc(pool.clone(), mocks));
+    s.create(req("gone.cz")).await.expect("create gone");
+    s.delete(
+        HostingSelector::Domain(Domain::parse("gone.cz").unwrap()),
+        DeleteOpts::default(),
+    )
+    .await
+    .expect("trash");
+    s.create(req("kept.cz")).await.expect("create kept");
+
+    let err = s
+        .hosting_set_aliases(
+            HostingSelector::Domain(Domain::parse("kept.cz").unwrap()),
+            vec![Domain::parse("gone.cz").unwrap()],
+        )
+        .await
+        .expect_err("a trashed hosting still owns its domain");
+    let msg = err.to_string();
+    assert!(msg.contains("gone.cz"), "names the domain: {msg}");
+    assert!(
+        msg.contains("in the Trash"),
+        "says where the owner is: {msg}"
+    );
+}
