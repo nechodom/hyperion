@@ -1380,3 +1380,29 @@ fn the_add_website_wizard_steps_match_its_stepper() {
          {pills:?} disagree; every step must appear in both or navigation breaks"
     );
 }
+
+/// The hosting detail page sends its forms with fetch and swaps the answer
+/// in. Handlers answer with a redirect carrying `?flash=` / `?flash_error=`,
+/// which app.js only reads on a page LOAD — so every such message was
+/// dropped, and a refused save looked like nothing had happened. The in-place
+/// submit has to read both off the URL the fetch landed on.
+#[test]
+fn the_detail_page_shows_redirect_flashes_after_an_in_place_save() {
+    let src = std::fs::read_to_string(templates_dir().join("hostings_detail.html"))
+        .expect("hostings_detail.html");
+    assert!(
+        src.contains("showFlashes(doc, near, res.url)"),
+        "the in-place submit must hand the landed URL to showFlashes"
+    );
+    let start = src
+        .find("function redirectFlashes(url)")
+        .expect("redirectFlashes is gone");
+    let body = &src[start..start + 900];
+    for key in ["'flash'", "'flash_error'"] {
+        assert!(body.contains(key), "redirectFlashes must read {key}");
+    }
+    assert!(
+        src.contains("flashes(doc).concat(redirectFlashes(url))"),
+        "showFlashes must show the redirect's flashes as well"
+    );
+}

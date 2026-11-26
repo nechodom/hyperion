@@ -5518,6 +5518,25 @@
     }));
   }
 
+  // Most handlers answer with a redirect carrying `?flash=` / `?flash_error=`,
+  // which app.js turns into a toast on page LOAD. A save sent from here never
+  // loads a page, so those two were dropped: a refused alias just vanished
+  // from its field without a word. Read them off the URL the fetch landed on.
+  function redirectFlashes(url) {
+    let params;
+    try { params = new URL(url, location.href).searchParams; } catch (_) { return []; }
+    return [['flash', 'success'], ['flash_error', 'error']].filter(p => params.get(p[0])).map(p => {
+      const node = document.createElement('div');
+      node.className = 'flash ' + p[1];
+      node.setAttribute('role', p[1] === 'error' ? 'alert' : 'status');
+      const body = document.createElement('div');
+      body.className = 'flash-body';
+      body.textContent = params.get(p[0]);
+      node.appendChild(body);
+      return { kind: p[1], text: body.textContent, node: node };
+    });
+  }
+
   // Scripts set through innerHTML / importNode never run; re-create them.
   function wake(root) {
     root.querySelectorAll('script').forEach(old => {
@@ -5599,7 +5618,7 @@
     if (submitter && submitter.isConnected) submitter.disabled = on;
   }
 
-  function showFlashes(doc, near) {
+  function showFlashes(doc, near, url) {
     // The previous answer — a banner from the page load, or an inline error
     // from the last save — is not about this request any more.
     document.querySelectorAll('.site-alerts > [data-flash], [data-ajax-flash]').forEach(n => n.remove());
@@ -5610,7 +5629,7 @@
       alerts.querySelectorAll(':scope > [data-standing]').forEach(n => n.remove());
       doc.querySelectorAll('.site-alerts > [data-standing]').forEach(n => alerts.appendChild(document.importNode(n, true)));
     }
-    flashes(doc).forEach(f => {
+    flashes(doc).concat(redirectFlashes(url)).forEach(f => {
       if (window.toast) window.toast(f.text, f.kind === 'warn' ? 'info' : f.kind, f.kind === 'error' ? 12000 : 5000);
       // An error also stays on the page, above the card the operator just
       // used — a toast alone is too easy to miss for something that failed.
@@ -5706,7 +5725,7 @@
 
     swapChrome(doc);
     const near = swapRegion(form, doc);
-    showFlashes(doc, near);
+    showFlashes(doc, near, res.url);
     const reveal = near && near.querySelector('[data-reveal]');
     if (reveal) reveal.scrollIntoView({ block: 'center', behavior: 'smooth' });
     // Flash parameters from the redirect must not come back on a reload.

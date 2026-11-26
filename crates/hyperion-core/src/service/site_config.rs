@@ -724,13 +724,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(lookup)?
         {
-            return Err(RpcError::Validation {
-                message: format!(
+            // A trashed hosting still owns its domain until it is purged or
+            // restored, and "remove that hosting" sends the operator looking
+            // for a site that is in no list: say where it is.
+            let message = if other.state == HostingState::Trashed {
+                format!(
+                    "{alias} is the domain of a hosting in the Trash. Purge it there \
+                     (or restore it) first, then add the alias."
+                )
+            } else {
+                format!(
                     "{alias} is the domain of another hosting on this node (state: {}). \
                      Remove that hosting first, or redirect it instead of adding an alias.",
                     other.state.as_str()
-                ),
-            });
+                )
+            };
+            return Err(RpcError::Validation { message });
         }
         self.refuse_name_held_as_alias(alias, own).await
     }
