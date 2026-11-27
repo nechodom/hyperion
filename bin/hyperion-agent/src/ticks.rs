@@ -108,6 +108,11 @@ fn spawn_scheduler(svc: &Svc) {
             svc.firewall_rollback_tick().await;
         });
 
+        // A renewed certificate reaches vsftpd only through a restart.
+        every(&tick_svc, HOUR, HOUR, |svc| async move {
+            ftp_tls_pass(&svc).await;
+        });
+
         let mut interval = tokio::time::interval(Duration::from_secs(5 * MIN));
         interval.tick().await; // skip the immediate first tick
         loop {
@@ -115,6 +120,16 @@ fn spawn_scheduler(svc: &Svc) {
             scheduler_pass(&tick_svc).await;
         }
     });
+}
+
+/// vsftpd on its current TLS settings and certificate; restarts it only when
+/// it is behind one of them.
+async fn ftp_tls_pass(svc: &Svc) {
+    match svc.ftp_keep_tls_current().await {
+        Ok(Some(why)) => tracing::info!(reason = why, "ftp: restarted vsftpd for TLS"),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error=%e, "ftp: TLS check failed"),
+    }
 }
 
 /// Once at startup, before the scheduler loop.
@@ -141,6 +156,7 @@ async fn reapply_on_boot(svc: &Svc) {
         Ok(false) => {}
         Err(e) => tracing::warn!(error=%e, "startup: FTP passive range not pinned"),
     }
+    ftp_tls_pass(svc).await;
     // Rebuild hyperion's firewall chain (presets, confirmed
     // default-drop) BEFORE the bans: nft rules do not survive a
     // reboot, and the ban infra would otherwise create the chain

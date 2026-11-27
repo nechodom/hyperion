@@ -355,6 +355,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(pinned)
     }
 
+    /// Restart vsftpd when it is older than its TLS settings or its
+    /// certificate; see `keep_tls_current` for why nothing else does. At
+    /// agent start and hourly. Returns what it restarted for.
+    pub async fn ftp_keep_tls_current(&self) -> Result<Option<&'static str>, RpcError> {
+        let why = hyperion_adapters::ftp::keep_tls_current()
+            .await
+            .map_err(|e| RpcError::Internal {
+                message: e.to_string(),
+            })?
+            .map(|w| w.as_str());
+        if let Some(why) = why {
+            self.append_audit(
+                "node.ftp.tls_restart",
+                None,
+                &serde_json::json!({ "reason": why }).to_string(),
+                "ok",
+            )
+            .await;
+        }
+        Ok(why)
+    }
+
     /// Turn FTPS on or off for this node.
     ///
     /// Never called from a tick and never implied by another action: it

@@ -875,6 +875,7 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
             "ssl_sslv3",
             "allow_anon_ssl",
             "require_ssl_reuse",
+            "strict_ssl_read_eof",
             "ssl_ciphers",
             "pasv_enable",
             "pasv_min_port",
@@ -1093,6 +1094,267 @@ pub async fn ensure_ftps_cert(
     Ok((cert_path, key_path))
 }
 
+/// OpenSSL settings for vsftpd alone, named by `OPENSSL_CONF` in the unit
+/// drop-in below. vsftpd has no directive for either of them.
+const TLS_COMPAT_CNF: &str = "/etc/hyperion/vsftpd-openssl.cnf";
+const TLS_COMPAT_DROPIN: &str = "/etc/systemd/system/vsftpd.service.d/90-hyperion-tls.conf";
+/// A renewed certificate waits this long for a moment with no FTP session
+/// before the restart happens anyway.
+const CERT_RESTART_GRACE_SECS: u64 = 24 * 3600;
+
+/// Two defects in vsftpd 3.0.5 on OpenSSL 3, both measured on Debian 13 over
+/// a 2 Mbit/s link with 15 ms delay:
+///
+///   * TLS 1.3 sends its session tickets after the handshake. An uploading
+///     client never reads them, so its `close()` finds unread data and the
+///     kernel answers with a reset that throws away whatever the client had
+///     not put on the wire yet. A 300 kB upload from lftp arrived as 81920
+///     bytes with `426 Failure reading network stream`. Under TLS 1.2 the
+///     ticket is part of the handshake and nothing is left unread.
+///     `NumTickets = 0` also stops the truncation but leaves no session to
+///     resume, and PHP's `ftp_put` refuses to send without one.
+///   * OpenSSL 3 reports a connection closed without `close_notify` as an
+///     error where 1.1 reported end of file, so a complete upload from such
+///     a client was answered with 426 as well. vsftpd 3.0.5 means to accept
+///     that close (`strict_ssl_read_eof` defaults to NO); the option gives
+///     it back. OpenSSL 3.0 does not know the option's name and ignores it,
+///     and the vsftpd 3.0.3 beside it on Debian 12 defaults the directive to
+///     YES, so there the directive itself does the job: [`LENIENT_READ_EOF`].
+fn render_tls_compat_cnf() -> &'static str {
+    "# Managed by Hyperion. Read by vsftpd only (OPENSSL_CONF in its unit).\n\
+     openssl_conf = openssl_init\n\
+     \n\
+     [openssl_init]\n\
+     ssl_conf = ssl_sect\n\
+     \n\
+     [ssl_sect]\n\
+     system_default = system_default_sect\n\
+     \n\
+     [system_default_sect]\n\
+     MinProtocol = TLSv1.2\n\
+     MaxProtocol = TLSv1.2\n\
+     Options = IgnoreUnexpectedEOF\n"
+}
+
+const LENIENT_READ_EOF: &str = "strict_ssl_read_eof=NO\n";
+
+/// `conf` with [`LENIENT_READ_EOF`] added, or `None` when FTPS is off or the
+/// config already says either way.
+fn with_lenient_read_eof(conf: &str) -> Option<String> {
+    if !conf_value(conf, "ssl_enable").is_some_and(|v| v.eq_ignore_ascii_case("YES"))
+        || conf_sets(conf, "strict_ssl_read_eof")
+    {
+        return None;
+    }
+    let mut body = conf.to_string();
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(LENIENT_READ_EOF);
+    Some(body)
+}
+
+fn render_tls_compat_dropin() -> String {
+    format!(
+        "# Managed by Hyperion. Do not edit.\n\
+         [Service]\n\
+         Environment=OPENSSL_CONF={TLS_COMPAT_CNF}\n"
+    )
+}
+
+/// Write the OpenSSL config and the drop-in that points vsftpd at it.
+/// Idempotent on content, so the files' modification times only move when
+/// the running daemon really is behind them.
+async fn write_tls_compat() -> Result<bool, AdapterError> {
+    let mut changed = false;
+    for (path, want) in [
+        (TLS_COMPAT_CNF, render_tls_compat_cnf().to_string()),
+        (TLS_COMPAT_DROPIN, render_tls_compat_dropin()),
+    ] {
+        if tokio::fs::read_to_string(path).await.ok().as_deref() == Some(want.as_str()) {
+            continue;
+        }
+        if let Some(dir) = Path::new(path).parent() {
+            tokio::fs::create_dir_all(dir)
+                .await
+                .map_err(|e| AdapterError::Other(format!("mkdir {}: {e}", dir.display())))?;
+        }
+        atomic_write(Path::new(path), want.as_bytes(), 0o644)
+            .await
+            .map_err(|e| AdapterError::Other(format!("write {path}: {e}")))?;
+        changed = true;
+    }
+    if changed {
+        cmd::run("/usr/bin/systemctl", &["daemon-reload"]).await?;
+    }
+    Ok(changed)
+}
+
+/// Why [`keep_tls_current`] restarted vsftpd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsRestart {
+    /// The daemon was started before the OpenSSL settings existed.
+    Settings,
+    /// The certificate file is newer than the daemon.
+    Certificate,
+}
+
+impl TlsRestart {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TlsRestart::Settings => "settings",
+            TlsRestart::Certificate => "certificate",
+        }
+    }
+}
+
+/// Whether vsftpd has to be restarted, given how many seconds ago it started
+/// and how many seconds ago each file changed (`None`: no such file).
+/// `settings_changed`: this very call wrote them.
+///
+/// The settings do not wait: every upload until then can be cut short. A
+/// renewed certificate does wait for a moment with no session, since the old
+/// one is still valid for weeks, but not past the grace period.
+fn tls_restart_due(
+    daemon_age: f64,
+    settings_changed: bool,
+    settings_age: Option<f64>,
+    cert_age: Option<f64>,
+    busy: bool,
+) -> Option<TlsRestart> {
+    if settings_changed || settings_age.is_some_and(|a| a < daemon_age) {
+        return Some(TlsRestart::Settings);
+    }
+    match cert_age {
+        Some(a) if a < daemon_age && (!busy || a >= CERT_RESTART_GRACE_SECS as f64) => {
+            Some(TlsRestart::Certificate)
+        }
+        _ => None,
+    }
+}
+
+/// Seconds since `path` was last written.
+async fn file_age_secs(path: &str) -> Option<f64> {
+    let modified = tokio::fs::metadata(path).await.ok()?.modified().ok()?;
+    // A time in the future reads as "just written", which errs towards the
+    // restart.
+    Some(modified.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0))
+}
+
+/// The running vsftpd: main PID and seconds since that process started.
+///
+/// Both numbers come from /proc and count from the same clock. systemd's own
+/// `…TimestampMonotonic` does not count time the machine spent suspended and
+/// /proc/uptime does, so mixing those two made the daemon look older than a
+/// file written just before it started.
+async fn vsftpd_main_pid_and_age() -> Option<(u32, f64)> {
+    let pid: u32 = cmd::run(
+        "/usr/bin/systemctl",
+        &["show", "-p", "MainPID", "--value", "vsftpd"],
+    )
+    .await
+    .ok()?
+    .trim()
+    .parse()
+    .ok()
+    .filter(|p| *p != 0)?;
+    let stat = tokio::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .await
+        .ok()?;
+    let uptime = tokio::fs::read_to_string("/proc/uptime").await.ok()?;
+    Some((pid, process_age_secs(&stat, &uptime)?))
+}
+
+/// Age of a process from its /proc/<pid>/stat line and /proc/uptime.
+fn process_age_secs(stat: &str, proc_uptime: &str) -> Option<f64> {
+    // The command name may hold spaces and brackets; the fields after its
+    // closing bracket are fixed. Start time is field 22, in 1/100 s since boot.
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    let start_ticks: f64 = after_comm.split_whitespace().nth(19)?.parse().ok()?;
+    let up: f64 = proc_uptime.split_whitespace().next()?.parse().ok()?;
+    Some((up - start_ticks / 100.0).max(0.0))
+}
+
+/// Keep the running vsftpd on the current TLS settings and certificate.
+///
+/// vsftpd reads its certificate once, when the listener starts, and SIGHUP
+/// does not read it again (checked on 3.0.5: the old certificate is still
+/// served after a reload). Nothing restarted the daemon after a renewal, so
+/// a node served the certificate it started with until that expired. Returns
+/// why it restarted, or `None` when the daemon was already current.
+///
+/// A restart cuts the transfers in progress, which is why this compares
+/// times instead of restarting on every call.
+pub async fn keep_tls_current() -> Result<Option<TlsRestart>, AdapterError> {
+    if !ftps_enabled().await {
+        return Ok(None);
+    }
+    let mut changed = write_tls_compat().await?;
+    let mut conf = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    let previous_conf = conf.clone();
+    if let Some(body) = with_lenient_read_eof(&conf) {
+        // An unknown directive is fatal to vsftpd, so only where it has one.
+        if !vsftpd_known_directives(&["strict_ssl_read_eof"])
+            .await
+            .is_empty()
+        {
+            let _ = tokio::fs::write(format!("{VSFTPD_CONF}.hyperion-pre-ftps"), &conf).await;
+            atomic_write(Path::new(VSFTPD_CONF), body.as_bytes(), 0o644)
+                .await
+                .map_err(|e| AdapterError::Other(format!("write {VSFTPD_CONF}: {e}")))?;
+            conf = body;
+            changed = true;
+        }
+    }
+    let Some((pid, daemon_age)) = vsftpd_main_pid_and_age().await else {
+        // Not running: it reads everything when it next starts.
+        return Ok(None);
+    };
+    let cert_age = match conf_value(&conf, "rsa_cert_file") {
+        Some(cert) => file_age_secs(cert).await,
+        None => None,
+    };
+    let settings_age = match (
+        file_age_secs(TLS_COMPAT_CNF).await,
+        file_age_secs(TLS_COMPAT_DROPIN).await,
+    ) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    // One process per connected client hangs off the listener.
+    let busy = tokio::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .await
+        .is_ok_and(|c| !c.trim().is_empty());
+    let Some(why) = tls_restart_due(daemon_age, changed, settings_age, cert_age, busy) else {
+        return Ok(None);
+    };
+    cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"]).await?;
+    if let Err(down) = vsftpd_settled_running().await {
+        if why != TlsRestart::Settings {
+            return Err(AdapterError::Other(down));
+        }
+        // The settings are the only thing that changed, so take them away
+        // rather than leave the node without FTP.
+        let _ = atomic_write(Path::new(VSFTPD_CONF), previous_conf.as_bytes(), 0o644).await;
+        let _ = tokio::fs::remove_file(TLS_COMPAT_DROPIN).await;
+        let _ = cmd::run("/usr/bin/systemctl", &["daemon-reload"]).await;
+        let _ = cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"]).await;
+        return Err(AdapterError::Other(match vsftpd_settled_running().await {
+            Ok(()) => format!(
+                "{down} with the TLS settings in {TLS_COMPAT_DROPIN}; they were removed and \
+                 vsftpd is running again without them"
+            ),
+            Err(e) => format!(
+                "{down} with the TLS settings in {TLS_COMPAT_DROPIN}, and it did not come \
+                 back without them either ({e}). FTP is DOWN on this node."
+            ),
+        }));
+    }
+    Ok(Some(why))
+}
+
 /// Strip every directive Hyperion manages for FTPS, leaving the rest of the
 /// operator's config untouched.
 fn without_ftps_block(conf: &str) -> String {
@@ -1108,6 +1370,7 @@ fn without_ftps_block(conf: &str) -> String {
         "ssl_sslv2",
         "ssl_sslv3",
         "require_ssl_reuse",
+        "strict_ssl_read_eof",
         "ssl_ciphers",
         "allow_anon_ssl",
         "pasv_min_port",
@@ -1172,6 +1435,7 @@ pub async fn set_ftps(
             "ssl_sslv2",
             "ssl_sslv3",
             "require_ssl_reuse",
+            "strict_ssl_read_eof",
             "allow_anon_ssl",
             "ssl_ciphers",
         ])
@@ -1215,6 +1479,9 @@ pub async fn set_ftps(
             // like a server fault.
             body.push_str("require_ssl_reuse=NO\n");
         }
+        if known("strict_ssl_read_eof") {
+            body.push_str(LENIENT_READ_EOF);
+        }
         if known("ssl_ciphers") {
             body.push_str("ssl_ciphers=HIGH\n");
         }
@@ -1228,6 +1495,10 @@ pub async fn set_ftps(
                     .into(),
             ));
         }
+    }
+    if enabled {
+        // Before the restart below, so the daemon starts with them.
+        write_tls_compat().await?;
     }
     // Transactional: vsftpd has no config-test mode, so the only way to know
     // the new config parses is to start it and look — carefully.
@@ -1400,6 +1671,82 @@ mod ftps_tests {
              has ssl_tlsv1_2 would kill the daemon"
         );
         assert!(!has("listen_port"));
+    }
+
+    #[test]
+    fn tls_settings_pin_tls_1_2_and_accept_a_bare_close() {
+        let cnf = render_tls_compat_cnf();
+        // TLS 1.3 is what truncates uploads; see render_tls_compat_cnf.
+        assert!(cnf.contains("\nMaxProtocol = TLSv1.2\n"));
+        assert!(cnf.contains("\nMinProtocol = TLSv1.2\n"));
+        assert!(cnf.contains("\nOptions = IgnoreUnexpectedEOF\n"));
+        // PHP's ftp_put needs a session to resume on the data connection.
+        assert!(!cnf.contains("NumTickets"));
+        assert!(render_tls_compat_dropin()
+            .contains("\nEnvironment=OPENSSL_CONF=/etc/hyperion/vsftpd-openssl.cnf\n"));
+    }
+
+    #[test]
+    fn a_daemon_older_than_its_tls_settings_restarts_at_once() {
+        // Started an hour ago, settings written a minute ago, a client connected.
+        assert_eq!(
+            tls_restart_due(3600.0, false, Some(60.0), None, true),
+            Some(TlsRestart::Settings)
+        );
+        // Written by this call: restart whatever the clocks say.
+        assert_eq!(
+            tls_restart_due(60.0, true, Some(60.0), None, true),
+            Some(TlsRestart::Settings)
+        );
+        // Started 150 ms after them: nothing to do.
+        assert_eq!(
+            tls_restart_due(3600.0, false, Some(3600.15), Some(3600.15), false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_renewed_certificate_waits_for_an_idle_moment_but_not_forever() {
+        let month = 30.0 * 24.0 * 3600.0;
+        let due = |cert_age, busy| tls_restart_due(month, false, Some(month + 5.0), cert_age, busy);
+        assert_eq!(due(Some(600.0), false), Some(TlsRestart::Certificate));
+        // A session is open: wait.
+        assert_eq!(due(Some(600.0), true), None);
+        // Still busy a day later: restart anyway.
+        assert_eq!(
+            due(Some(CERT_RESTART_GRACE_SECS as f64), true),
+            Some(TlsRestart::Certificate)
+        );
+        // No certificate file, no restart.
+        assert_eq!(due(None, false), None);
+    }
+
+    #[test]
+    fn process_age_is_uptime_minus_its_start() {
+        // A command name with a space and a bracket must not shift the fields.
+        let stat = "1096 (vs ft)pd) S 1 1096 1096 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 \
+                    2000 9000000 300 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 3 0 0";
+        assert_eq!(process_age_secs(stat, "5020.50 9000.00\n"), Some(5000.5));
+        assert_eq!(process_age_secs("garbage", "5020.50 1\n"), None);
+    }
+
+    #[test]
+    fn a_bare_close_is_accepted_only_where_ftps_is_on_and_nobody_decided() {
+        let on = "listen=YES\nssl_enable=YES\n";
+        assert_eq!(
+            with_lenient_read_eof(on).as_deref(),
+            Some("listen=YES\nssl_enable=YES\nstrict_ssl_read_eof=NO\n")
+        );
+        // Idempotent, and an operator's YES stays.
+        assert_eq!(
+            with_lenient_read_eof(&with_lenient_read_eof(on).unwrap()),
+            None
+        );
+        assert_eq!(
+            with_lenient_read_eof("ssl_enable=YES\nstrict_ssl_read_eof=YES\n"),
+            None
+        );
+        assert_eq!(with_lenient_read_eof("ssl_enable=NO\n"), None);
     }
 
     /// FTPS state must be read from the VALUE. `ssl_enable=NO` next to a
